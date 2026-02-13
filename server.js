@@ -30,6 +30,10 @@ const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DISCONNECT_TIMEOUT_MS = 60_000;
 const BOT_BET_CONFIRM_MIN_MS = 200;
 const BOT_BET_CONFIRM_MAX_MS = 600;
+const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
+const PATCH_REPO = 'Elicanig/1v1Blackjack';
+const FRIEND_INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+const EMOTE_COOLDOWN_MS = 2000;
 
 const db = await JSONFilePreset(path.join(__dirname, 'data.json'), {
   users: [],
@@ -123,6 +127,38 @@ const lobbyToMatch = new Map();
 const disconnectTimers = new Map();
 const botTurnTimers = new Map();
 const botBetConfirmTimers = new Map();
+const emoteCooldownByUser = new Map();
+let patchNotesCache = { at: 0, payload: null };
+
+const LOCAL_PATCH_NOTES = [
+  {
+    date: '2026-02-13',
+    title: 'Gameplay and polish updates',
+    bullets: [
+      'Instant round-end handling for bust and naturals.',
+      'Improved notifications overlay and profile PIN controls.'
+    ],
+    body: 'Instant round-end handling for bust and naturals.\nImproved notifications overlay and profile PIN controls.'
+  },
+  {
+    date: '2026-02-12',
+    title: 'Practice and split flow updates',
+    bullets: [
+      'Practice bot mode no longer affects real chips/stats.',
+      'Split flow now stays on the same player until all split hands are completed.'
+    ],
+    body: 'Practice bot mode no longer affects real chips/stats.\nSplit flow now stays on the same player until all split hands are completed.'
+  },
+  {
+    date: '2026-02-11',
+    title: 'Security and progression improvements',
+    bullets: [
+      'Per-view hand sanitization prevents hidden-card leakage.',
+      'Challenge tiers and rewards are persisted server-side.'
+    ],
+    body: 'Per-view hand sanitization prevents hidden-card leakage.\nChallenge tiers and rewards are persisted server-side.'
+  }
+];
 
 const CHALLENGE_COUNTS = { hourly: 3, daily: 7, weekly: 5 };
 const CHALLENGE_POOLS = {
@@ -217,6 +253,78 @@ function buildParticipants(playerIds, botDifficultyById = {}) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function deployCommitId() {
+  return (
+    process.env.RENDER_GIT_COMMIT ||
+    process.env.RENDER_GIT_COMMIT_SHA ||
+    process.env.GIT_COMMIT ||
+    process.env.COMMIT_SHA ||
+    ''
+  );
+}
+
+function parseCommitToNotes(commit) {
+  const message = String(commit?.commit?.message || '').trim();
+  const lines = message.split('\n').map((line) => line.trim()).filter(Boolean);
+  const title = lines[0] || 'Latest update';
+  const extra = lines.slice(1, 4);
+  let bullets = extra.filter((line) => line.length > 0).slice(0, 3);
+  if (!bullets.length) {
+    const lower = title.toLowerCase();
+    bullets = [
+      lower.includes('fix') ? 'Includes reliability and bug fixes.' : 'Includes product polish and quality updates.',
+      lower.includes('ui') || lower.includes('style') ? 'Refines interface hierarchy and readability.' : 'Improves game experience consistency.'
+    ];
+  }
+  return {
+    date: new Date(commit?.commit?.author?.date || Date.now()).toISOString().slice(0, 10),
+    title,
+    bullets,
+    body: message
+  };
+}
+
+async function getPatchNotesPayload() {
+  const now = Date.now();
+  if (patchNotesCache.payload && now - patchNotesCache.at < PATCH_NOTES_CACHE_MS) {
+    return patchNotesCache.payload;
+  }
+
+  const commit = deployCommitId();
+  const deployedAt = nowIso();
+  let payload = {
+    currentDeploy: { commit, deployedAt },
+    notes: LOCAL_PATCH_NOTES
+  };
+
+  if (commit) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      const response = await fetch(`https://api.github.com/repos/${PATCH_REPO}/commits/${commit}`, {
+        headers: { Accept: 'application/vnd.github+json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      if (response.ok) {
+        const ghCommit = await response.json();
+        payload = {
+          currentDeploy: {
+            commit,
+            deployedAt: ghCommit?.commit?.author?.date || deployedAt
+          },
+          notes: [parseCommitToNotes(ghCommit), ...LOCAL_PATCH_NOTES].slice(0, 6)
+        };
+      }
+    } catch {
+      // Fall back to local notes when GitHub API is unavailable.
+    }
+  }
+
+  patchNotesCache = { at: now, payload };
+  return payload;
 }
 
 function freeClaimMeta(user) {
@@ -1650,18 +1758,22 @@ app.post('/api/friends/decline', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/friends/invite-link', authMiddleware, async (req, res) => {
+  db.data.friendInvites = (db.data.friendInvites || []).filter((invite) => invite.fromUserId !== req.user.id);
   const code = nanoid(12);
+  const expiresAt = new Date(Date.now() + FRIEND_INVITE_TTL_MS).toISOString();
   db.data.friendInvites.push({
     code,
     fromUserId: req.user.id,
     createdAt: nowIso(),
+    expiresAt,
     usedBy: []
   });
   await db.write();
 
   return res.json({
-    code,
-    link: `${req.protocol}://${req.get('host')}/?friendInvite=${code}`
+    token: code,
+    inviteUrl: `${req.protocol}://${req.get('host')}/?friendInvite=${code}`,
+    expiresAt
   });
 });
 
@@ -1669,6 +1781,9 @@ app.post('/api/friends/invite-link/accept', authMiddleware, async (req, res) => 
   const { code } = req.body || {};
   const invite = db.data.friendInvites.find((f) => f.code === code);
   if (!invite) return res.status(404).json({ error: 'Invalid invite' });
+  if (invite.expiresAt && Date.now() > new Date(invite.expiresAt).getTime()) {
+    return res.status(410).json({ error: 'Invite expired' });
+  }
   const inviter = getUserById(invite.fromUserId);
   if (!inviter) return res.status(404).json({ error: 'Inviter not found' });
   if (inviter.id === req.user.id) return res.status(400).json({ error: 'Cannot add yourself' });
@@ -1892,6 +2007,11 @@ app.post('/api/challenges/claim', authMiddleware, async (req, res) => {
   return res.json({ id: targetId, reward: target.rewardChips, chips: req.user.chips });
 });
 
+app.get('/api/patch-notes', async (_req, res) => {
+  const payload = await getPatchNotesPayload();
+  return res.json(payload);
+});
+
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
   if (!token) return next(new Error('Missing token'));
@@ -1994,6 +2114,34 @@ io.on('connection', (socket) => {
     db.write();
     scheduleBotTurn(match);
     return null;
+  });
+
+  socket.on('game:emote', (payload = {}) => {
+    const { matchId, type, value } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    if (!match.playerIds.includes(userId)) return socket.emit('match:error', { error: 'Unauthorized' });
+    if (match.playerIds.some((id) => isBotPlayer(id))) return socket.emit('match:error', { error: 'Emotes disabled in bot mode' });
+
+    const now = Date.now();
+    const lastAt = emoteCooldownByUser.get(userId) || 0;
+    if (now - lastAt < EMOTE_COOLDOWN_MS) return;
+
+    const allowed = {
+      emoji: new Set(['😂', '😭', '👍', '😡']),
+      quip: new Set(['Bitchmade', 'Fuck you', 'Skill issue', 'L'])
+    };
+    if (!allowed[type]?.has(value)) return;
+
+    emoteCooldownByUser.set(userId, now);
+    const out = {
+      fromUsername: socket.user.username,
+      fromUserId: userId,
+      type,
+      value,
+      ts: nowIso()
+    };
+    for (const pid of match.playerIds) emitToUser(pid, 'game:emote', out);
   });
 
   socket.on('disconnect', () => {

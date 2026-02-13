@@ -138,6 +138,8 @@ const state = {
   socket: null,
   status: '',
   error: '',
+  patchNotes: [],
+  patchNotesDeploy: null,
   currentLobby: null,
   currentMatch: null,
   pendingFriendInviteCode: new URLSearchParams(window.location.search).get('friendInvite'),
@@ -149,11 +151,14 @@ const state = {
   freeClaimNextAt: null,
   freeClaimRemainingMs: 0,
   showMorePatchNotes: false,
+  friendInvite: null,
   lastRoundResultKey: '',
   roundResultModal: null,
   currentBet: 5,
   selectedBotDifficulty: 'normal',
-  botStakeType: 'FAKE'
+  botStakeType: 'FAKE',
+  emotePickerOpen: false,
+  floatingEmote: null
 };
 
 let freeClaimTicker = null;
@@ -174,17 +179,14 @@ function formatCooldown(ms) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-const PATCH_NOTES = [
-  { date: '2026-02-13', bullets: ['Instant round-end handling for bust/blackjack.', 'Notifications overlay now renders above all UI.', 'Profile-only PIN controls with copy support.'] },
-  { date: '2026-02-12', bullets: ['Practice bot mode no longer affects real chips/stats.', 'Split flow keeps turn on same player until all split hands are played.'] },
-  { date: '2026-02-11', bullets: ['Per-view hand sanitization to prevent hidden-card leakage.', 'Challenge tiers and rewards persisted server-side.'] },
-  { date: '2026-02-10', bullets: ['Casino table restyle + improved card visuals.', 'Lobby create/join flows fully separated.'] }
+const FALLBACK_PATCH_NOTES = [
+  { date: '2026-02-13', title: 'Gameplay and polish updates', bullets: ['Instant round-end handling for bust and naturals.', 'Improved notifications overlay and profile PIN controls.'] },
+  { date: '2026-02-12', title: 'Practice and split flow updates', bullets: ['Practice bot mode no longer affects real chips/stats.', 'Split flow now stays on the same player until all split hands are completed.'] },
+  { date: '2026-02-11', title: 'Security and progression improvements', bullets: ['Per-view hand sanitization prevents hidden-card leakage.', 'Challenge tiers and rewards are persisted server-side.'] }
 ];
 
 function setStatus(message = '') {
-  state.status = message;
-  state.error = '';
-  render();
+  if (message) pushToast(message);
 }
 
 function pushToast(message, type = 'info') {
@@ -194,7 +196,18 @@ function pushToast(message, type = 'info') {
   setTimeout(() => {
     state.toasts = state.toasts.filter((t) => t.id !== toast.id);
     render();
-  }, 2800);
+  }, 2500);
+}
+
+async function loadPatchNotes() {
+  try {
+    const data = await api('/api/patch-notes', { method: 'GET' });
+    state.patchNotes = data?.notes || FALLBACK_PATCH_NOTES;
+    state.patchNotesDeploy = data?.currentDeploy || null;
+  } catch {
+    state.patchNotes = FALLBACK_PATCH_NOTES;
+    state.patchNotesDeploy = null;
+  }
 }
 
 function normalizeAppError(message) {
@@ -275,6 +288,17 @@ function connectSocket() {
     state.notifications = [notification, ...state.notifications].slice(0, 60);
     pushToast(notification.message, notification.type);
   });
+  state.socket.on('game:emote', (event) => {
+    if (!event) return;
+    state.floatingEmote = event;
+    render();
+    setTimeout(() => {
+      if (state.floatingEmote?.ts === event.ts) {
+        state.floatingEmote = null;
+        render();
+      }
+    }, 2000);
+  });
   state.socket.on('lobby:update', (lobby) => {
     state.currentLobby = lobby;
     render();
@@ -294,6 +318,7 @@ function connectSocket() {
       }
     }
     goToView('match');
+    state.emotePickerOpen = false;
     render();
   });
   state.socket.on('match:error', ({ error }) => setError(error));
@@ -362,6 +387,7 @@ async function loadMe() {
       state.pendingLobbyCode = null;
     }
 
+    await loadPatchNotes();
     render();
   } catch (e) {
     localStorage.removeItem('bb_auth_token');
@@ -380,6 +406,8 @@ async function loadMe() {
     state.freeClaimedAt = null;
     state.freeClaimNextAt = null;
     state.freeClaimRemainingMs = 0;
+    state.patchNotes = FALLBACK_PATCH_NOTES;
+    state.patchNotesDeploy = null;
     render();
   }
 }
@@ -454,6 +482,11 @@ function emitSetBaseBet(amount) {
 function emitConfirmBet() {
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:confirmBet', { matchId: state.currentMatch.id });
+}
+
+function emitEmote(type, value) {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('game:emote', { matchId: state.currentMatch.id, type, value });
 }
 
 function adjustBet(delta) {
@@ -538,13 +571,21 @@ async function addFriend(form) {
   }
 }
 
-async function createFriendInvite() {
+async function createFriendInvite(regenerate = false) {
   try {
-    const data = await api('/api/friends/invite-link', { method: 'POST' });
-    const ok = await safeCopy(data.link);
-    if (ok) pushToast('Friend invite link copied.');
+    const data = await api('/api/friends/invite-link', {
+      method: 'POST',
+      body: JSON.stringify({ regenerate })
+    });
+    state.friendInvite = {
+      url: data.inviteUrl,
+      token: data.token,
+      expiresAt: data.expiresAt
+    };
+    const ok = await safeCopy(data.inviteUrl);
+    if (ok) pushToast(regenerate ? 'Invite link regenerated and copied.' : 'Friend invite link copied.');
     else pushToast("Couldn't copy — select and copy manually.");
-    setStatus(data.link);
+    render();
   } catch (e) {
     setError(e.message);
   }
@@ -557,7 +598,7 @@ async function acceptFriendInvite(code) {
       body: JSON.stringify({ code })
     });
     state.friends = data.friends;
-    setStatus(`Added ${data.inviter.username} as a friend.`);
+    pushToast(`Added ${data.inviter.username} as a friend.`);
   } catch (e) {
     setError(e.message);
   }
@@ -950,7 +991,6 @@ function renderAuth() {
       }
       ${state.authNotice ? `<p class="muted">${state.authNotice}</p>` : ''}
       ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
-      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     </div>
   `;
 
@@ -973,6 +1013,8 @@ function renderAuth() {
 
 function renderHome() {
   const me = state.me;
+  const notes = state.patchNotes?.length ? state.patchNotes : FALLBACK_PATCH_NOTES;
+  const latest = notes[0];
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -994,10 +1036,12 @@ function renderHome() {
             <button data-bot="medium" class="${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">Medium</button>
             <button data-bot="normal" class="${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">Normal</button>
           </div>
-          <div class="row bot-stake-row">
-            <label><input type="radio" name="botStake" value="REAL" ${state.botStakeType === 'REAL' ? 'checked' : ''} /> Real chips</label>
-            <label><input type="radio" name="botStake" value="FAKE" ${state.botStakeType === 'FAKE' ? 'checked' : ''} /> Practice (fake chips)</label>
+          <div class="bot-segmented bot-slider stake-slider" data-stake-slider>
+            <div class="bot-slider-indicator" style="transform:translateX(${state.botStakeType === 'REAL' ? 0 : 100}%);"></div>
+            <button data-stake="REAL" class="${state.botStakeType === 'REAL' ? 'is-selected' : ''}">Real Chips</button>
+            <button data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
           </div>
+          <div class="muted">Practice uses fake chips and won&apos;t affect your account.</div>
           <button class="gold" id="playBotBtn">Play Bot</button>
         </div>
         </section>
@@ -1021,15 +1065,28 @@ function renderHome() {
         </section>
         <section class="card section patch-card">
           <h2>Patch Notes</h2>
+          ${
+            latest
+              ? `<div class="patch-latest">
+                    <div class="muted">Latest update ${latest.date}${state.patchNotesDeploy?.commit ? ` • ${state.patchNotesDeploy.commit.slice(0, 7)}` : ''}</div>
+                    <strong class="patch-date">${latest.title || 'Latest update'}</strong>
+                 </div>`
+              : ''
+          }
       ${
-        PATCH_NOTES.slice(0, state.showMorePatchNotes ? PATCH_NOTES.length : 3)
+        notes.slice(0, state.showMorePatchNotes ? notes.length : 3)
           .map(
             (entry) => `
           <article class="patch-item">
-            <strong class="patch-date">${entry.date}</strong>
+            <strong class="patch-date">${entry.date} • ${entry.title || 'Update'}</strong>
             <ul class="patch-list">
               ${entry.bullets.map((b) => `<li class="muted">${b}</li>`).join('')}
             </ul>
+            ${
+              state.showMorePatchNotes && entry.body
+                ? `<div class="muted patch-body">${entry.body}</div>`
+                : ''
+            }
           </article>
         `
           )
@@ -1038,8 +1095,6 @@ function renderHome() {
       <button id="togglePatchNotesBtn" class="ghost">${state.showMorePatchNotes ? 'View less' : 'View more'}</button>
         </section>
       </div>
-
-      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     </main>
   `;
 
@@ -1065,9 +1120,9 @@ function renderHome() {
       render();
     };
   });
-  app.querySelectorAll('input[name="botStake"]').forEach((el) => {
-    el.onchange = () => {
-      state.botStakeType = el.value;
+  app.querySelectorAll('[data-stake]').forEach((el) => {
+    el.onclick = () => {
+      state.botStakeType = el.dataset.stake;
       render();
     };
   });
@@ -1128,7 +1183,6 @@ function renderProfile() {
         <button id="togglePinBtn" class="ghost" type="button">${state.revealPin ? 'Hide PIN' : 'Show PIN'}</button>
         <button id="copyPinBtnProfile" class="ghost" type="button">Copy PIN</button>
       </div>
-      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
       </div>
     </main>
   `;
@@ -1160,11 +1214,27 @@ function renderFriends() {
       <div class="row">
       <div class="col card section">
         <h3>Send Friend Request</h3>
-        <form id="friendForm" class="row">
+        <form id="friendForm" class="row friend-request-form">
           <input name="friend_username" placeholder="Friend username" />
           <button class="primary" type="submit">Request</button>
         </form>
-        <button id="inviteLinkBtn" style="margin-top:0.7rem">Generate Friend Invite Link</button>
+        <div class="invite-link-tools">
+          <div class="row invite-link-actions">
+            <button id="inviteLinkBtn" class="primary" type="button">Generate Friend Invite Link</button>
+            <button id="regenInviteLinkBtn" class="ghost" type="button">Regenerate</button>
+          </div>
+          ${
+            state.friendInvite
+              ? `<div class="grid" style="margin-top:0.55rem">
+                  <input value="${state.friendInvite.url}" readonly />
+                  <div class="row">
+                    <button id="copyInviteLinkBtn" class="ghost" type="button">Copy</button>
+                    <span class="muted">Expires ${new Date(state.friendInvite.expiresAt).toLocaleString()}</span>
+                  </div>
+                </div>`
+              : ''
+          }
+        </div>
         <h3 style="margin-top:1rem">Incoming Requests</h3>
         ${
           state.incomingRequests.length
@@ -1218,7 +1288,6 @@ function renderFriends() {
       </div>
       </div>
 
-      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     </main>
   `;
   bindShellNav();
@@ -1228,7 +1297,16 @@ function renderFriends() {
     addFriend(e.currentTarget);
   };
 
-  document.getElementById('inviteLinkBtn').onclick = createFriendInvite;
+  document.getElementById('inviteLinkBtn').onclick = () => createFriendInvite(false);
+  const regenBtn = document.getElementById('regenInviteLinkBtn');
+  if (regenBtn) regenBtn.onclick = () => createFriendInvite(true);
+  const copyInviteBtn = document.getElementById('copyInviteLinkBtn');
+  if (copyInviteBtn) {
+    copyInviteBtn.onclick = async () => {
+      const ok = await safeCopy(state.friendInvite?.url || '');
+      pushToast(ok ? 'Invite link copied.' : "Couldn't copy — please select and copy manually.");
+    };
+  }
   app.querySelectorAll('[data-accept]').forEach((btn) => {
     btn.onclick = () => acceptRequest(btn.dataset.accept);
   });
@@ -1279,7 +1357,6 @@ function renderLobby() {
         : ''
     }
 
-    ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
     </main>
   `;
@@ -1302,7 +1379,6 @@ function renderLobby() {
       const ok = await safeCopy(link);
       if (ok) pushToast('Lobby link copied.');
       else pushToast("Couldn't copy — select and copy manually.");
-      setStatus(link);
     };
   }
 }
@@ -1336,7 +1412,6 @@ function renderChallenges() {
       ${renderTier('Hourly Challenges', 'hourly')}
       ${renderTier('Daily Challenges', 'daily')}
       ${renderTier('Weekly Challenges', 'weekly')}
-      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     </main>
   `;
   bindShellNav();
@@ -1445,6 +1520,7 @@ function renderMatch() {
   const isBettingPhase = match.phase === 'ROUND_INIT';
   const opponentConnected = match.disconnects[oppId]?.connected;
   const isBotOpponent = Boolean(match.participants?.[oppId]?.isBot);
+  const isPvpMatch = !isBotOpponent;
   const phaseLabelMap = {
     ROUND_INIT: 'Betting',
     ACTION_TURN: 'Action',
@@ -1511,7 +1587,13 @@ function renderMatch() {
 
       <div class="match-zone opponent-zone" ${isBettingPhase ? 'style="display:none"' : ''}>
         <div class="zone-head">
-          <h4>Opponent: ${playerName(oppId)}</h4>
+          <h4>Opponent: ${playerName(oppId)}
+            ${
+              state.floatingEmote && state.floatingEmote.fromUserId === oppId
+                ? `<span class="emote-bubble ${state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip'}">${state.floatingEmote.value}</span>`
+                : ''
+            }
+          </h4>
           <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
         </div>
         <div class="hands">
@@ -1547,6 +1629,31 @@ function renderMatch() {
           <button data-action="split" title="${handCanSplit(activeHand) ? 'Split pair into two hands' : 'Split requires pair'}" ${!canAct || !handCanSplit(activeHand) ? 'disabled' : ''}>Split</button>
           <button class="warn" data-action="surrender" title="${canAct ? 'Lose 75% and lock hand' : actionHint}" ${!canAct ? 'disabled' : ''}>Surrender</button>
         </div>
+        ${
+          isPvpMatch
+            ? `<div class="emote-row">
+                <button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
+                ${
+                  state.emotePickerOpen
+                    ? `<div class="emote-popover card">
+                        <div class="emote-grid">
+                          <button data-emote-type="emoji" data-emote-value="😂">😂</button>
+                          <button data-emote-type="emoji" data-emote-value="😭">😭</button>
+                          <button data-emote-type="emoji" data-emote-value="👍">👍</button>
+                          <button data-emote-type="emoji" data-emote-value="😡">😡</button>
+                        </div>
+                        <div class="emote-quips">
+                          <button data-emote-type="quip" data-emote-value="Bitchmade">Bitchmade</button>
+                          <button data-emote-type="quip" data-emote-value="Fuck you">Fuck you</button>
+                          <button data-emote-type="quip" data-emote-value="Skill issue">Skill issue</button>
+                          <button data-emote-type="quip" data-emote-value="L">L</button>
+                        </div>
+                      </div>`
+                    : ''
+                }
+              </div>`
+            : ''
+        }
         <div class="muted">${actionHint}</div>
       </div>
 
@@ -1578,7 +1685,6 @@ function renderMatch() {
         }
       </div>
 
-      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
       </div>
     </main>
   `;
@@ -1602,6 +1708,20 @@ function renderMatch() {
 
   const surrenderBtn = document.getElementById('pressureSurrender');
   if (surrenderBtn) surrenderBtn.onclick = () => emitPressureDecision('surrender');
+  const emoteToggleBtn = document.getElementById('toggleEmoteBtn');
+  if (emoteToggleBtn) {
+    emoteToggleBtn.onclick = () => {
+      state.emotePickerOpen = !state.emotePickerOpen;
+      render();
+    };
+  }
+  app.querySelectorAll('[data-emote-type]').forEach((btn) => {
+    btn.onclick = () => {
+      emitEmote(btn.dataset.emoteType, btn.dataset.emoteValue);
+      state.emotePickerOpen = false;
+      render();
+    };
+  });
 }
 
 function render() {
