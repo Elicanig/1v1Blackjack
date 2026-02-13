@@ -163,6 +163,12 @@ body {
   color: var(--text-strong);
 }
 
+.chip-balance {
+  color: var(--gold-strong);
+  font-weight: 700;
+  font-size: 1.03rem;
+}
+
 .nav {
   display: flex;
   align-items: center;
@@ -193,6 +199,24 @@ body {
   width: min(340px, 90vw);
   z-index: 20;
   padding: 10px;
+}
+
+.notif-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(2, 8, 6, 0.5);
+}
+
+.notif-overlay-panel {
+  position: fixed;
+  top: 72px;
+  right: 18px;
+  width: min(360px, calc(100vw - 24px));
+  z-index: 1001;
+  padding: 10px;
+  max-height: min(70vh, 560px);
+  overflow: auto;
 }
 
 .notif-head {
@@ -512,6 +536,13 @@ select {
   display: flex;
   align-items: baseline;
   gap: 6px;
+}
+
+.bankroll-pill {
+  background: rgba(205, 167, 100, 0.14);
+  border: 1px solid rgba(205, 167, 100, 0.36);
+  border-radius: 999px;
+  padding: 4px 10px;
 }
 
 .your-turn {

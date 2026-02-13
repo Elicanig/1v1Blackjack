@@ -124,6 +124,8 @@ const state = {
   token: localStorage.getItem('bb_auth_token') || localStorage.getItem('bb_token') || null,
   authUsername: localStorage.getItem('bb_auth_username') || '',
   authNotice: '',
+  revealPin: false,
+  newPin: '',
   me: null,
   friends: [],
   incomingRequests: [],
@@ -144,9 +146,29 @@ const state = {
   lastRenderedView: '',
   freeClaimed: false,
   freeClaimedAt: null,
+  freeClaimNextAt: null,
+  freeClaimRemainingMs: 0,
   currentBet: 5,
   selectedBotDifficulty: 'normal'
 };
+
+let freeClaimTicker = null;
+
+function updateFreeClaimCountdown() {
+  const next = state.freeClaimNextAt ? new Date(state.freeClaimNextAt).getTime() : 0;
+  state.freeClaimRemainingMs = next ? Math.max(0, next - Date.now()) : 0;
+  if (state.freeClaimRemainingMs <= 0) {
+    state.freeClaimed = false;
+  }
+}
+
+function formatCooldown(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
 
 function setStatus(message = '') {
   state.status = message;
@@ -285,8 +307,10 @@ async function loadMe() {
     state.outgoingRequests = data.friendRequests?.outgoing || [];
     state.notifications = data.notifications || [];
     state.challenges = data.challenges || [];
-    state.freeClaimed = Boolean(data.freeClaimed || data.user?.hasClaimedFree100);
+    state.freeClaimed = !Boolean(data.freeClaimAvailable);
     state.freeClaimedAt = null;
+    state.freeClaimNextAt = data.freeClaimNextAt || null;
+    updateFreeClaimCountdown();
     if (typeof data.user?.selectedBet === 'number') {
       const local = Number(localStorage.getItem(`bb_last_bet_${data.user.id}`));
       state.currentBet = Number.isFinite(local) && local > 0 ? local : data.user.selectedBet;
@@ -322,6 +346,8 @@ async function loadMe() {
     state.challenges = [];
     state.freeClaimed = false;
     state.freeClaimedAt = null;
+    state.freeClaimNextAt = null;
+    state.freeClaimRemainingMs = 0;
     render();
   }
 }
@@ -412,11 +438,12 @@ function adjustBet(delta) {
 
 async function handleAuth(mode, form) {
   const username = form.querySelector('[name="username"]').value.trim();
-  const authToken = form.querySelector('[name="auth_token"]')?.value.trim();
+  const pin = form.querySelector('[name="pin"]')?.value.trim();
   if (!username) return setError('Username required');
+  if (mode === 'login' && !/^\d{4}$/.test(pin || '')) return setError('Enter a valid 4-digit PIN.');
   try {
     const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
-    const payload = mode === 'register' ? { username } : { username, authToken };
+    const payload = mode === 'register' ? { username } : { username, pin };
     const data = await api(endpoint, {
       method: 'POST',
       body: JSON.stringify(payload)
@@ -428,16 +455,18 @@ async function handleAuth(mode, form) {
     localStorage.setItem('bb_auth_username', username);
     localStorage.setItem('bb_token', data.authToken);
     if (mode === 'register') {
-      const copied = await safeCopy(data.authToken);
-      setStatus(copied ? 'Account created. Session token copied.' : `Account created. Session token: ${data.authToken}`);
+      state.newPin = String(data.pin || '');
+      const copied = await safeCopy(state.newPin);
+      setStatus(copied ? 'Account created. PIN copied.' : 'Account created. Save your PIN.');
     } else {
+      state.newPin = '';
       setStatus('Logged in.');
     }
     connectSocket();
     await loadMe();
   } catch (e) {
     if (mode === 'login') {
-      state.authNotice = 'Login failed. Check username and session token.';
+      state.authNotice = 'Login failed. Check username and PIN.';
       render();
     } else {
       setError(e.message);
@@ -634,11 +663,21 @@ async function claimFree100() {
   try {
     const data = await api('/api/free-claim', { method: 'POST' });
     state.me.chips = data.chips;
-    state.freeClaimed = true;
+    state.freeClaimed = !data.reward;
     state.freeClaimedAt = data.claimedAt || null;
-    setStatus(data.reward > 0 ? `Claimed free +${data.reward} chips` : 'Free chips already claimed.');
+    state.freeClaimNextAt = data.nextAt || null;
+    updateFreeClaimCountdown();
+    setStatus(data.reward > 0 ? `Claimed free +${data.reward} chips` : 'Free chips on cooldown.');
   } catch (e) {
-    setError(e.message);
+    try {
+      const data = await api('/api/me');
+      state.freeClaimNextAt = data.freeClaimNextAt || null;
+      state.freeClaimed = !Boolean(data.freeClaimAvailable);
+      updateFreeClaimCountdown();
+      setStatus('Free chips on cooldown.');
+    } catch {
+      setError(e.message);
+    }
   }
 }
 
@@ -673,6 +712,8 @@ function logout() {
   state.me = null;
   state.currentMatch = null;
   state.currentLobby = null;
+  state.revealPin = false;
+  state.newPin = '';
   localStorage.removeItem('bb_token');
   localStorage.removeItem('bb_auth_token');
   localStorage.removeItem('bb_auth_username');
@@ -683,35 +724,9 @@ function renderNotificationBell() {
   const unread = unreadCount();
   return `
     <div class="notif-wrap">
-      <button id="notifBell" class="ghost">Notifications ${unread > 0 ? `<span class="notif-badge">${unread}</span>` : ''}</button>
-      ${
-        state.notificationsOpen
-          ? `<div class="notif-panel card">
-              <div class="notif-head">
-                <strong>Notifications</strong>
-                <button id="clearNotifBtn" class="ghost">Clear</button>
-              </div>
-              ${
-                state.notifications.length
-                  ? state.notifications
-                      .map(
-                        (n) => `
-                    <div class="notif-item">
-                      <div>${n.message}</div>
-                      ${
-                        n.action
-                          ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>`
-                          : ''
-                      }
-                    </div>
-                  `
-                      )
-                      .join('')
-                  : '<div class="muted">No notifications yet.</div>'
-              }
-            </div>`
-          : ''
-      }
+      <button id="notifBell" class="ghost" aria-label="Notifications">
+        Bell ${unread > 0 ? `<span class="notif-badge">${unread}</span>` : ''}
+      </button>
     </div>
   `;
 }
@@ -726,13 +741,6 @@ function bindNotificationUI() {
   }
   const clearBtn = document.getElementById('clearNotifBtn');
   if (clearBtn) clearBtn.onclick = clearNotifications;
-  app.querySelectorAll('[data-notif-action]').forEach((btn) => {
-    btn.onclick = () => {
-      const notif = state.notifications.find((n) => n.id === btn.dataset.notifAction);
-      runNotificationAction(notif);
-      state.notificationsOpen = false;
-    };
-  });
 }
 
 function syncToasts() {
@@ -746,17 +754,77 @@ function syncToasts() {
   wrap.innerHTML = state.toasts.map((t) => `<div class="toast-item">${t.message}</div>`).join('');
 }
 
+function syncNotificationOverlay() {
+  let mount = document.getElementById('notifOverlayMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'notifOverlayMount';
+    document.body.appendChild(mount);
+  }
+  if (!state.notificationsOpen) {
+    mount.innerHTML = '';
+    return;
+  }
+  mount.innerHTML = `
+    <div class="notif-overlay-backdrop" id="notifBackdrop"></div>
+    <div class="notif-overlay-panel card">
+      <div class="notif-head">
+        <strong>Notifications</strong>
+        <button id="clearNotifBtn" class="ghost">Clear</button>
+      </div>
+      ${
+        state.notifications.length
+          ? state.notifications
+              .map(
+                (n) => `
+            <div class="notif-item">
+              <div>${n.message}</div>
+              ${
+                n.action
+                  ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>`
+                  : ''
+              }
+            </div>
+          `
+              )
+              .join('')
+          : '<div class="muted">No notifications yet.</div>'
+      }
+    </div>
+  `;
+  const backdrop = document.getElementById('notifBackdrop');
+  if (backdrop) {
+    backdrop.onclick = () => {
+      state.notificationsOpen = false;
+      render();
+    };
+  }
+  const clearBtn = document.getElementById('clearNotifBtn');
+  if (clearBtn) clearBtn.onclick = clearNotifications;
+  mount.querySelectorAll('[data-notif-action]').forEach((btn) => {
+    btn.onclick = () => {
+      const notif = state.notifications.find((n) => n.id === btn.dataset.notifAction);
+      runNotificationAction(notif);
+      state.notificationsOpen = false;
+      render();
+    };
+  });
+}
+
 function renderTopbar(title = 'Blackjack Battle') {
+  const chipText = state.me?.chips?.toLocaleString?.() || '0';
   return `
     <div class="card topbar">
-      <div class="logo">${title}</div>
+      <div>
+        <div class="logo">${title}</div>
+        <div class="chip-balance">Chips ${chipText}</div>
+      </div>
       <div class="nav">
         <button data-go="home" class="${state.view === 'home' ? 'nav-active' : ''}">Home</button>
         <button data-go="profile" class="${state.view === 'profile' ? 'nav-active' : ''}">Profile</button>
         <button data-go="friends" class="${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
         <button data-go="lobbies" class="${state.view === 'lobbies' ? 'nav-active' : ''}">Lobbies</button>
         <button data-go="challenges" class="${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
-        <button data-go="notifications" class="${state.view === 'notifications' ? 'nav-active' : ''}">Notifications</button>
         ${renderNotificationBell()}
         <button class="warn" id="logoutBtn">Logout</button>
       </div>
@@ -783,10 +851,10 @@ function renderAuth() {
       <p class="muted">1v1 real-time blackjack with poker-style pressure betting.</p>
       <div class="grid">
         <form id="loginForm" class="section card">
-          <h3>Login With Session Token</h3>
+          <h3>Login</h3>
           <div class="grid">
             <input name="username" placeholder="Username" autocomplete="username" value="${state.authUsername || ''}" />
-            <input name="auth_token" placeholder="Session token (optional)" autocomplete="off" />
+            <input name="pin" placeholder="4-digit PIN" autocomplete="one-time-code" inputmode="numeric" maxlength="4" />
             <button class="primary" type="submit">Login</button>
           </div>
         </form>
@@ -794,10 +862,19 @@ function renderAuth() {
           <h3>Register</h3>
           <div class="grid">
             <input name="username" placeholder="Unique username" autocomplete="username" />
-            <button class="gold" type="submit">Create Account + Token</button>
+            <button class="gold" type="submit">Create Account</button>
           </div>
         </form>
       </div>
+      ${
+        state.newPin
+          ? `<div class="card section" style="margin-top:0.8rem">
+              <strong>Your login PIN: ${state.newPin}</strong>
+              <div class="muted">Save this PIN. You will need it to log in on new devices.</div>
+              <button id="copyPinBtn" class="gold" style="margin-top:0.5rem">Copy PIN</button>
+            </div>`
+          : ''
+      }
       ${state.authNotice ? `<p class="muted">${state.authNotice}</p>` : ''}
       ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
       ${state.status ? `<p class="muted">${state.status}</p>` : ''}
@@ -812,6 +889,13 @@ function renderAuth() {
     e.preventDefault();
     handleAuth('register', e.currentTarget);
   };
+  const copyPinBtn = document.getElementById('copyPinBtn');
+  if (copyPinBtn) {
+    copyPinBtn.onclick = async () => {
+      const ok = await safeCopy(state.newPin);
+      pushToast(ok ? 'PIN copied.' : "Couldn't copy — please select and copy manually.");
+    };
+  }
 }
 
 function renderHome() {
@@ -819,7 +903,16 @@ function renderHome() {
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
-    <p class="muted">${me.username} • ${me.chips} chips</p>
+    <p class="muted">${me.username}</p>
+    ${
+      state.newPin
+        ? `<div class="card section" style="margin-bottom:0.8rem">
+            <strong>Your login PIN: ${state.newPin}</strong>
+            <div class="muted">Save this PIN. It is required when logging in on new devices.</div>
+            <button id="copyPinHomeBtn" class="gold" style="margin-top:0.5rem">Copy PIN</button>
+          </div>`
+        : ''
+    }
 
     <div class="row">
       <div class="col card section reveal-panel glow-follow glow-follow--panel">
@@ -846,13 +939,14 @@ function renderHome() {
           <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon}</strong></div>
           <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost}</strong></div>
           <div class="kpi"><div class="muted">Pushes</div><strong>${me.stats.pushes || me.stats.handsPush || 0}</strong></div>
+          <div class="kpi"><div class="muted">Blackjacks</div><strong>${me.stats.blackjacks || 0}</strong></div>
         </div>
         <div class="free-claim-card">
           <div>
             <strong>Free 100 Chips</strong>
-            <div class="muted">${state.freeClaimed ? 'Claimed' : 'One-time bankroll boost'}</div>
+            <div class="muted">${state.freeClaimRemainingMs > 0 ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now'}</div>
           </div>
-          <button class="gold" id="claimFreeBtn" ${state.freeClaimed ? 'disabled' : ''}>${state.freeClaimed ? 'Claimed' : 'Claim free 100 chips'}</button>
+          <button class="gold" id="claimFreeBtn" ${state.freeClaimRemainingMs > 0 ? 'disabled' : ''}>${state.freeClaimRemainingMs > 0 ? 'On cooldown' : 'Claim +100'}</button>
         </div>
       </div>
     </div>
@@ -862,6 +956,13 @@ function renderHome() {
   `;
 
   bindShellNav();
+  const copyPinHomeBtn = document.getElementById('copyPinHomeBtn');
+  if (copyPinHomeBtn) {
+    copyPinHomeBtn.onclick = async () => {
+      const ok = await safeCopy(state.newPin);
+      pushToast(ok ? 'PIN copied.' : "Couldn't copy — please select and copy manually.");
+    };
+  }
   document.getElementById('openLobbiesBtn').onclick = () => {
     goToView('lobbies');
     render();
@@ -922,10 +1023,22 @@ function renderProfile() {
         <button class="primary" type="submit">Save Profile</button>
       </form>
       <p class="muted">Chip balance: ${me.chips}</p>
+      <div class="row" style="align-items:center;gap:10px">
+        <strong>Login PIN:</strong>
+        <span>${state.revealPin ? me.pin || '****' : me.pinMasked || '****'}</span>
+        <button id="togglePinBtn" class="ghost" type="button">${state.revealPin ? 'Hide PIN' : 'Show PIN'}</button>
+      </div>
       ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     </div>
   `;
   bindShellNav();
+  const togglePinBtn = document.getElementById('togglePinBtn');
+  if (togglePinBtn) {
+    togglePinBtn.onclick = () => {
+      state.revealPin = !state.revealPin;
+      render();
+    };
+  }
   document.getElementById('profileForm').onsubmit = (e) => {
     e.preventDefault();
     saveProfile(e.currentTarget);
@@ -971,7 +1084,14 @@ function renderFriends() {
             (f) => `
           <div class="friend">
             <div>
-              <strong>${f.username}</strong>
+              <div style="display:flex;align-items:center;gap:8px">
+                ${
+                  f.avatarUrl || f.avatar
+                    ? `<img src="${f.avatarUrl || f.avatar}" alt="${f.username} avatar" style="width:26px;height:26px;border-radius:999px;border:1px solid rgba(255,255,255,0.16)" />`
+                    : `<span style="width:26px;height:26px;border-radius:999px;display:inline-grid;place-items:center;background:rgba(255,255,255,0.12)">${(f.username || '?').slice(0, 1).toUpperCase()}</span>`
+                }
+                <strong>${f.username}</strong>
+              </div>
               <div class="muted">${f.online ? 'Online' : 'Offline'} • ${f.chips} chips</div>
             </div>
             <button data-invite="${f.username}">Invite</button>
@@ -1242,7 +1362,7 @@ function renderMatch() {
         <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
         <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${isBettingPhase ? 'Betting' : myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
         <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
-        <div class="strip-item"><span class="muted">Bankroll</span> <strong>${myState.bankroll ?? me.chips} chips</strong></div>
+        <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()} chips</strong></div>
       </div>
 
       ${
@@ -1395,16 +1515,31 @@ function render() {
   applyGlowFollowClasses();
   bindNotificationUI();
   syncToasts();
+  syncNotificationOverlay();
   if (enteringFriends && state.token) loadFriendsData();
 }
 
 (async function init() {
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.notificationsOpen) {
+      state.notificationsOpen = false;
+      render();
+    }
+  });
   window.addEventListener('popstate', () => {
     state.view = initialViewFromPath();
     render();
   });
   initCursorSpotlight();
   useHoverGlow();
+  if (!freeClaimTicker) {
+    freeClaimTicker = setInterval(() => {
+      if (!state.token || !state.me || !state.freeClaimNextAt) return;
+      const prev = state.freeClaimRemainingMs;
+      updateFreeClaimCountdown();
+      if (state.view === 'home' && prev !== state.freeClaimRemainingMs) render();
+    }, 1000);
+  }
   render();
   if (state.token) {
     await loadMe();

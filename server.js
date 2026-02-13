@@ -26,6 +26,7 @@ const BASE_BET = 5;
 const MIN_BET = 5;
 const MAX_BET_CAP = 500;
 const DAILY_REWARD = 100;
+const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DISCONNECT_TIMEOUT_MS = 60_000;
 const BOT_BET_CONFIRM_MIN_MS = 200;
 const BOT_BET_CONFIRM_MAX_MS = 600;
@@ -65,6 +66,12 @@ for (const user of db.data.users) {
   }
   if (!user.avatar) {
     user.avatar = `https://api.dicebear.com/9.x/${encodeURIComponent(user.avatarStyle)}/svg?seed=${encodeURIComponent(user.avatarSeed)}`;
+    dbTouched = true;
+  }
+  if (!user.pin || !user.pinHash) {
+    const generatedPin = String(Math.floor(1000 + Math.random() * 9000));
+    user.pin = user.pin || generatedPin;
+    user.pinHash = user.pinHash || bcrypt.hashSync(user.pin, 10);
     dbTouched = true;
   }
   if (!user.stats) {
@@ -204,6 +211,16 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function freeClaimMeta(user) {
+  const lastTs = user?.lastFreeClaimAt ? new Date(user.lastFreeClaimAt).getTime() : 0;
+  const nextTs = lastTs ? lastTs + FREE_CLAIM_COOLDOWN_MS : 0;
+  const nowTs = Date.now();
+  return {
+    available: !lastTs || nowTs >= nextTs,
+    nextAt: nextTs ? new Date(nextTs).toISOString() : null
+  };
+}
+
 function normalizeUsername(username) {
   return String(username || '').trim().toLowerCase();
 }
@@ -219,6 +236,7 @@ function sanitizeUser(user) {
     id: user.id,
     username: user.username,
     avatar: user.avatar,
+    avatarUrl: user.avatar,
     avatarStyle: user.avatarStyle || 'adventurer',
     avatarSeed: user.avatarSeed || user.username,
     bio: user.bio,
@@ -226,6 +244,14 @@ function sanitizeUser(user) {
     stats: user.stats,
     selectedBet: user.selectedBet || BASE_BET,
     hasClaimedFree100: Boolean(user.lastFreeClaimAt)
+  };
+}
+
+function sanitizeSelfUser(user) {
+  return {
+    ...sanitizeUser(user),
+    pinMasked: '****',
+    pin: user.pin || null
   };
 }
 
@@ -316,6 +342,9 @@ function buildFriendsPayload(user) {
 }
 
 function getParticipantChips(match, playerId) {
+  if (match?.isPractice && match.practiceBankrollById) {
+    return match.practiceBankrollById[playerId] ?? STARTING_CHIPS;
+  }
   if (isBotPlayer(playerId)) {
     return match.bot?.chipsById?.[playerId] ?? STARTING_CHIPS;
   }
@@ -324,6 +353,11 @@ function getParticipantChips(match, playerId) {
 
 function setParticipantChips(match, playerId, chips) {
   const safe = Math.max(0, Math.floor(chips));
+  if (match?.isPractice) {
+    if (!match.practiceBankrollById) match.practiceBankrollById = {};
+    match.practiceBankrollById[playerId] = safe;
+    return;
+  }
   if (isBotPlayer(playerId)) {
     if (!match.bot) match.bot = { difficultyById: {}, chipsById: {} };
     if (!match.bot.chipsById) match.bot.chipsById = {};
@@ -426,7 +460,8 @@ function newHand(cards, hidden, bet = BASE_BET, splitDepth = 0) {
     surrendered: false,
     bust: false,
     doubled: false,
-    wasSplitHand: splitDepth > 0
+    wasSplitHand: splitDepth > 0,
+    naturalBlackjack: false
   };
 }
 
@@ -457,18 +492,20 @@ function nextPlayerId(match, fromPlayerId) {
   return alt;
 }
 
-function serializeMatchFor(match, viewerId) {
+// Build per-viewer sanitized state to avoid leaking opponent hole/hit cards.
+function buildClientState(match, viewerId) {
   const round = match.round;
   const players = {};
   const revealAllTotals = match.phase === PHASES.ROUND_RESOLVE || match.phase === PHASES.NEXT_ROUND;
   for (const pid of match.playerIds) {
     const state = round.players[pid];
+    const isViewer = pid === viewerId;
     players[pid] = {
       activeHandIndex: state.activeHandIndex,
       bankroll: getParticipantChips(match, pid),
       hands: state.hands.map((hand) => {
-        const hasHiddenToViewer = pid !== viewerId && hand.hidden.some(Boolean) && !revealAllTotals;
-        const visibleCards = hand.cards.filter((_, idx) => !(pid !== viewerId && hand.hidden[idx]));
+        const hasHiddenToViewer = !isViewer && !revealAllTotals && hand.cards.length > 1;
+        const visibleCards = isViewer || revealAllTotals ? hand.cards : hand.cards.slice(0, 1);
         const visibleMeta = visibleCards.length ? handMeta(visibleCards) : { total: null, isSoft: false };
         const fullMeta = handMeta(hand.cards);
         return {
@@ -485,10 +522,11 @@ function serializeMatchFor(match, viewerId) {
           isSoft: hasHiddenToViewer ? visibleMeta.isSoft : fullMeta.isSoft,
           outcome: hand.outcome || null,
           cards: hand.cards.map((card, idx) => {
-            const hiddenToViewer = pid !== viewerId && hand.hidden[idx] && !revealAllTotals;
+            const hiddenToViewer = !isViewer && !revealAllTotals && idx > 0;
             if (hiddenToViewer) return { hidden: true };
             return { rank: card.rank, suit: card.suit };
-          })
+          }),
+          naturalBlackjack: Boolean(hand.naturalBlackjack)
         };
       })
     };
@@ -528,11 +566,15 @@ function serializeMatchFor(match, viewerId) {
   };
 }
 
+function serializeMatchFor(match, viewerId) {
+  return buildClientState(match, viewerId);
+}
+
 function pushMatchState(match) {
   for (const pid of match.playerIds) {
     const socketId = activeSessions.get(pid);
     if (!socketId) continue;
-    io.to(socketId).emit('match:state', serializeMatchFor(match, pid));
+    io.to(socketId).emit('match:state', buildClientState(match, pid));
   }
 }
 
@@ -648,9 +690,11 @@ function startRound(match) {
 
   const u1 = getUserById(p1);
   const u2 = getUserById(p2);
-  if (u1) recordChallengeEvent(u1, 'round_played', 1);
-  if (u2) recordChallengeEvent(u2, 'round_played', 1);
-  db.write();
+  if (!match.isPractice) {
+    if (u1) recordChallengeEvent(u1, 'round_played', 1);
+    if (u2) recordChallengeEvent(u2, 'round_played', 1);
+    db.write();
+  }
 
   pushMatchState(match);
   scheduleBotBetConfirm(match);
@@ -681,7 +725,25 @@ function beginActionPhase(match) {
     activeHandIndex: 0,
     hands: [newHand(p2Cards, [false, true], postedP2, 0)]
   };
+
+  for (const pid of [p1, p2]) {
+    const hand = match.round.players[pid].hands[0];
+    hand.naturalBlackjack = handMeta(hand.cards).isNaturalBlackjack;
+    if (hand.naturalBlackjack) {
+      hand.stood = true;
+      hand.locked = true;
+    }
+  }
+
   match.phase = PHASES.ACTION_TURN;
+  if (!hasPlayableHand(match.round.players[match.round.turnPlayerId])) {
+    const other = nextPlayerId(match, match.round.turnPlayerId);
+    if (hasPlayableHand(match.round.players[other])) {
+      match.round.turnPlayerId = other;
+    } else {
+      resolveRound(match);
+    }
+  }
 }
 
 function maybeBeginRoundAfterBetConfirm(match) {
@@ -728,6 +790,7 @@ function resolveRound(match) {
   }
 
   const bBase = b.hands[0];
+  // Aggregate settlement per hand so split outcomes (win/push/loss mix) pay correctly.
   for (let idx = 0; idx < a.hands.length; idx += 1) {
     const handA = a.hands[idx];
     const handB = bBase;
@@ -749,18 +812,22 @@ function resolveRound(match) {
     } else {
       const result = compareHands(handA, handB);
       const pot = Math.min(handA.bet, handB.bet);
+      const handANatural = Boolean(handA.naturalBlackjack);
+      const handBNatural = Boolean(handB.naturalBlackjack);
       if (result > 0) {
-        chipsDelta[aId] += pot;
-        chipsDelta[bId] -= pot;
+        const amount = handANatural && !handBNatural ? Math.floor(pot * 1.5) : pot;
+        chipsDelta[aId] += amount;
+        chipsDelta[bId] -= amount;
         handA.outcome = 'win';
         handB.outcome = handB.outcome || 'loss';
-        outcomes.push({ winner: aId, loser: bId, amount: pot, splitWin: handA.wasSplitHand, handIndex: idx });
+        outcomes.push({ winner: aId, loser: bId, amount, splitWin: handA.wasSplitHand, handIndex: idx });
       } else if (result < 0) {
-        chipsDelta[aId] -= pot;
-        chipsDelta[bId] += pot;
+        const amount = handBNatural && !handANatural ? Math.floor(pot * 1.5) : pot;
+        chipsDelta[aId] -= amount;
+        chipsDelta[bId] += amount;
         handA.outcome = 'loss';
         handB.outcome = handB.outcome || 'win';
-        outcomes.push({ winner: bId, loser: aId, amount: pot, handIndex: idx });
+        outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx });
       } else {
         handA.outcome = 'push';
         if (!handB.outcome) handB.outcome = 'push';
@@ -769,8 +836,10 @@ function resolveRound(match) {
     }
   }
 
-  setParticipantChips(match, aId, getParticipantChips(match, aId) + chipsDelta[aId]);
-  setParticipantChips(match, bId, getParticipantChips(match, bId) + chipsDelta[bId]);
+  if (!match.isPractice) {
+    setParticipantChips(match, aId, getParticipantChips(match, aId) + chipsDelta[aId]);
+    setParticipantChips(match, bId, getParticipantChips(match, bId) + chipsDelta[bId]);
+  }
 
   function applyHandOutcomeStats(user, ownId, out) {
     if (!user) return;
@@ -790,19 +859,21 @@ function resolveRound(match) {
     }
   }
 
-  for (const out of outcomes) {
-    applyHandOutcomeStats(userA, aId, out);
-    applyHandOutcomeStats(userB, bId, out);
+  if (!match.isPractice) {
+    for (const out of outcomes) {
+      applyHandOutcomeStats(userA, aId, out);
+      applyHandOutcomeStats(userB, bId, out);
+    }
   }
 
-  if (userA) {
+  if (!match.isPractice && userA) {
     const naturals = a.hands.filter((h) => handMeta(h.cards).isNaturalBlackjack).length;
     if (naturals > 0) {
       userA.stats.blackjacks = (userA.stats.blackjacks || 0) + naturals;
       recordChallengeEvent(userA, 'blackjack', naturals);
     }
   }
-  if (userB) {
+  if (!match.isPractice && userB) {
     const naturals = b.hands.filter((h) => handMeta(h.cards).isNaturalBlackjack).length;
     if (naturals > 0) {
       userB.stats.blackjacks = (userB.stats.blackjacks || 0) + naturals;
@@ -812,13 +883,13 @@ function resolveRound(match) {
 
   const netA = chipsDelta[aId];
 
-  if (netA > 0) {
+  if (!match.isPractice && netA > 0) {
     if (userA) {
       userA.stats.roundsWon += 1;
       recordChallengeEvent(userA, 'round_won', 1);
     }
     if (userB) userB.stats.roundsLost += 1;
-  } else if (netA < 0) {
+  } else if (!match.isPractice && netA < 0) {
     if (userB) {
       userB.stats.roundsWon += 1;
       recordChallengeEvent(userB, 'round_won', 1);
@@ -826,10 +897,11 @@ function resolveRound(match) {
     if (userA) userA.stats.roundsLost += 1;
   }
 
-  if (userA) userA.stats.matchesPlayed += 1;
-  if (userB) userB.stats.matchesPlayed += 1;
-
-  db.write();
+  if (!match.isPractice) {
+    if (userA) userA.stats.matchesPlayed += 1;
+    if (userB) userB.stats.matchesPlayed += 1;
+    db.write();
+  }
 
   match.phase = PHASES.NEXT_ROUND;
   pushMatchState(match);
@@ -854,12 +926,13 @@ function progressTurn(match, actingPlayerId) {
   const otherState = match.round.players[other];
   advanceToNextPlayableHand(ownState);
 
-  if (hasPlayableHand(otherState)) {
+  // Split state machine: active player must finish all of their hands before turn passes.
+  if (hasPlayableHand(ownState)) {
+    match.round.turnPlayerId = actingPlayerId;
+    match.phase = PHASES.ACTION_TURN;
+  } else if (hasPlayableHand(otherState)) {
     advanceToNextPlayableHand(otherState);
     match.round.turnPlayerId = other;
-    match.phase = PHASES.ACTION_TURN;
-  } else if (hasPlayableHand(ownState)) {
-    match.round.turnPlayerId = actingPlayerId;
     match.phase = PHASES.ACTION_TURN;
   }
 
@@ -891,6 +964,7 @@ function getBotDifficulty(match, botId) {
 }
 
 function chooseBotAction(match, botId) {
+  // Difficulty affects decision quality only; deck generation remains uniform.
   const botState = match.round.players[botId];
   const hand = currentHand(botState);
   if (!hand) return 'stand';
@@ -1052,8 +1126,17 @@ function applyAction(match, playerId, action) {
     if (total > 21) {
       hand.bust = true;
       hand.locked = true;
+      progressTurn(match, playerId);
+      return { ok: true };
     }
-    progressTurn(match, playerId);
+    if (total === 21) {
+      hand.stood = true;
+      hand.locked = true;
+      progressTurn(match, playerId);
+      return { ok: true };
+    }
+    match.phase = PHASES.ACTION_TURN;
+    match.round.turnPlayerId = playerId;
     return { ok: true };
   }
 
@@ -1203,13 +1286,14 @@ function confirmBaseBet(match, playerId) {
 
 function createMatch(lobby, options = {}) {
   const playerIds = [lobby.ownerId, lobby.opponentId];
+  const isPractice = lobby.type === 'bot';
   const selectedBetById = {};
   for (const pid of playerIds) {
     if (isBotPlayer(pid)) {
       selectedBetById[pid] = BASE_BET;
     } else {
       const user = getUserById(pid);
-      selectedBetById[pid] = clampBet(user?.selectedBet || BASE_BET, user?.chips || STARTING_CHIPS);
+      selectedBetById[pid] = clampBet(user?.selectedBet || BASE_BET, isPractice ? STARTING_CHIPS : (user?.chips || STARTING_CHIPS));
     }
   }
   const match = {
@@ -1219,6 +1303,13 @@ function createMatch(lobby, options = {}) {
     playerIds,
     startingPlayerIndex: 0,
     roundNumber: 0,
+    isPractice,
+    practiceBankrollById: isPractice
+      ? playerIds.reduce((acc, pid) => {
+          acc[pid] = STARTING_CHIPS;
+          return acc;
+        }, {})
+      : null,
     phase: PHASES.ROUND_INIT,
     round: null,
     betControllerId: lobby.ownerId,
@@ -1250,13 +1341,15 @@ function emitLobbyUpdate(lobby) {
   }
 }
 
-function buildNewUser(username, passwordHash = null) {
+function buildNewUser(username) {
   const cleanUsername = String(username || '').trim();
+  const pin = String(Math.floor(1000 + Math.random() * 9000));
   const user = {
     id: nanoid(),
     username: cleanUsername,
     authToken: nanoid(36),
-    passwordHash,
+    pin,
+    pinHash: bcrypt.hashSync(pin, 10),
     avatarStyle: 'adventurer',
     avatarSeed: cleanUsername,
     avatar: avatarUrl('adventurer', cleanUsername),
@@ -1294,22 +1387,21 @@ app.post('/api/auth/register', async (req, res) => {
   const user = buildNewUser(cleanUsername);
   db.data.users.push(user);
   await db.write();
-  return res.json({ ok: true, userId: user.id, authToken: user.authToken, user: sanitizeUser(user) });
+  return res.json({ ok: true, userId: user.id, authToken: user.authToken, pin: user.pin, user: sanitizeSelfUser(user) });
 });
 
-app.post('/api/auth/login', (req, res) => {
-  const { username, authToken } = req.body || {};
+app.post('/api/auth/login', async (req, res) => {
+  const { username, pin } = req.body || {};
   const user = getUserByUsername(username || '');
   if (!user) return res.status(401).json({ ok: false, error: 'Invalid auth' });
-  if (!authToken) {
-    if (!user.authToken) user.authToken = nanoid(36);
-    db.write();
-    return res.json({ ok: true, user: sanitizeUser(user), authToken: user.authToken });
-  }
-  if (user.authToken !== authToken) {
+  if (!/^\d{4}$/.test(String(pin || ''))) return res.status(401).json({ ok: false, error: 'Invalid auth' });
+  const ok = await bcrypt.compare(String(pin || ''), user.pinHash || '');
+  if (!ok) {
     return res.status(401).json({ ok: false, error: 'Invalid auth' });
   }
-  return res.json({ ok: true, user: sanitizeUser(user), authToken: user.authToken });
+  if (!user.authToken) user.authToken = nanoid(36);
+  await db.write();
+  return res.json({ ok: true, user: sanitizeSelfUser(user), authToken: user.authToken });
 });
 
 app.post('/api/auth/me', (req, res) => {
@@ -1317,48 +1409,49 @@ app.post('/api/auth/me', (req, res) => {
   const token = header.startsWith('Bearer ') ? header.slice(7) : (req.body?.authToken || '');
   const user = db.data.users.find((u) => u.authToken === token);
   if (!user) return res.status(401).json({ ok: false, error: 'Invalid auth' });
-  return res.json({ ok: true, user: sanitizeUser(user), authToken: user.authToken });
+  return res.json({ ok: true, user: sanitizeSelfUser(user), authToken: user.authToken });
 });
 
 app.post('/api/register', async (req, res) => {
-  const { username, password } = req.body || {};
+  const { username } = req.body || {};
   const cleanUsername = String(username || '').trim();
-  if (!cleanUsername || !password) return res.status(400).json({ error: 'Missing fields' });
+  if (!cleanUsername) return res.status(400).json({ error: 'Missing fields' });
   if (cleanUsername.length < 3) return res.status(400).json({ error: 'Username too short' });
   if (getUserByUsername(cleanUsername)) return res.status(409).json({ error: 'Username already exists' });
-  const hash = await bcrypt.hash(password, 10);
-  const user = buildNewUser(cleanUsername, hash);
+  const user = buildNewUser(cleanUsername);
   db.data.users.push(user);
   await db.write();
-  return res.json({ token: issueToken(user), user: sanitizeUser(user), authToken: user.authToken });
+  return res.json({ token: issueToken(user), user: sanitizeSelfUser(user), authToken: user.authToken, pin: user.pin });
 });
 
 app.post('/api/login', async (req, res) => {
-  const { username, password, authToken } = req.body || {};
+  const { username, pin, authToken } = req.body || {};
   const user = getUserByUsername(username || '');
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
   if (authToken && user.authToken === authToken) {
-    return res.json({ token: issueToken(user), user: sanitizeUser(user), authToken: user.authToken });
+    return res.json({ token: issueToken(user), user: sanitizeSelfUser(user), authToken: user.authToken });
   }
-  if (!user.passwordHash) return res.status(401).json({ error: 'Invalid credentials' });
-  const ok = await bcrypt.compare(password || '', user.passwordHash);
+  const ok = await bcrypt.compare(String(pin || ''), user.pinHash || '');
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
-  return res.json({ token: issueToken(user), user: sanitizeUser(user), authToken: user.authToken });
+  return res.json({ token: issueToken(user), user: sanitizeSelfUser(user), authToken: user.authToken });
 });
 
 app.get('/api/me', authMiddleware, async (req, res) => {
   const friendsData = buildFriendsPayload(req.user);
   const refreshed = refreshChallengesForUser(req.user);
   if (refreshed) await db.write();
+  const freeClaim = freeClaimMeta(req.user);
   return res.json({
-    user: sanitizeUser(req.user),
+    user: sanitizeSelfUser(req.user),
     friends: friendsData.friends,
     friendRequests: {
       incoming: friendsData.incoming,
       outgoing: friendsData.outgoing
     },
     notifications: (req.user.notifications || []).slice(0, 30),
-    freeClaimed: Boolean(req.user.lastFreeClaimAt),
+    freeClaimed: !freeClaim.available,
+    freeClaimAvailable: freeClaim.available,
+    freeClaimNextAt: freeClaim.nextAt,
     challenges: {
       hourly: req.user.challengeSets.hourly?.items || [],
       daily: req.user.challengeSets.daily?.items || [],
@@ -1375,7 +1468,7 @@ app.put('/api/profile', authMiddleware, async (req, res) => {
   req.user.avatar = avatarUrl(req.user.avatarStyle, req.user.avatarSeed || req.user.username);
   if (typeof bio === 'string') req.user.bio = bio.slice(0, 300);
   await db.write();
-  return res.json({ user: sanitizeUser(req.user) });
+  return res.json({ user: sanitizeSelfUser(req.user) });
 });
 
 app.get('/api/friends', authMiddleware, (req, res) => {
@@ -1644,13 +1737,22 @@ app.post('/api/lobbies/bot', authMiddleware, createBotPracticeLobby);
 app.post('/api/matches/bot', authMiddleware, createBotPracticeLobby);
 
 app.post('/api/free-claim', authMiddleware, async (req, res) => {
-  if (req.user.lastFreeClaimAt) {
-    return res.json({ reward: 0, chips: req.user.chips, claimed: true, claimedAt: req.user.lastFreeClaimAt });
+  const freeClaim = freeClaimMeta(req.user);
+  if (!freeClaim.available) {
+    return res.status(409).json({
+      reward: 0,
+      chips: req.user.chips,
+      claimed: false,
+      claimedAt: req.user.lastFreeClaimAt,
+      nextAt: freeClaim.nextAt,
+      error: 'Free claim on cooldown'
+    });
   }
   req.user.lastFreeClaimAt = nowIso();
   req.user.chips += 100;
   await db.write();
-  return res.json({ reward: 100, chips: req.user.chips, claimed: true, claimedAt: req.user.lastFreeClaimAt });
+  const next = freeClaimMeta(req.user);
+  return res.json({ reward: 100, chips: req.user.chips, claimed: true, claimedAt: req.user.lastFreeClaimAt, nextAt: next.nextAt });
 });
 
 app.get('/api/notifications', authMiddleware, (req, res) => {
