@@ -148,6 +148,9 @@ const state = {
   freeClaimedAt: null,
   freeClaimNextAt: null,
   freeClaimRemainingMs: 0,
+  showMorePatchNotes: false,
+  lastRoundResultKey: '',
+  roundResultModal: null,
   currentBet: 5,
   selectedBotDifficulty: 'normal'
 };
@@ -169,6 +172,13 @@ function formatCooldown(ms) {
   const s = total % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
+
+const PATCH_NOTES = [
+  { date: '2026-02-13', bullets: ['Instant round-end handling for bust/blackjack.', 'Notifications overlay now renders above all UI.', 'Profile-only PIN controls with copy support.'] },
+  { date: '2026-02-12', bullets: ['Practice bot mode no longer affects real chips/stats.', 'Split flow keeps turn on same player until all split hands are played.'] },
+  { date: '2026-02-11', bullets: ['Per-view hand sanitization to prevent hidden-card leakage.', 'Challenge tiers and rewards persisted server-side.'] },
+  { date: '2026-02-10', bullets: ['Casino table restyle + improved card visuals.', 'Lobby create/join flows fully separated.'] }
+];
 
 function setStatus(message = '') {
   state.status = message;
@@ -270,6 +280,10 @@ function connectSocket() {
   });
   state.socket.on('match:state', (match) => {
     state.currentMatch = match;
+    const myBankroll = match.players?.[state.me?.id]?.bankroll;
+    if (state.me && Number.isFinite(myBankroll)) {
+      state.me.chips = myBankroll;
+    }
     if (typeof match.selectedBet === 'number') {
       const preferred = state.currentBet;
       state.currentBet = match.selectedBet;
@@ -282,6 +296,23 @@ function connectSocket() {
     render();
   });
   state.socket.on('match:error', ({ error }) => setError(error));
+  state.socket.on('round:result', ({ matchId, roundNumber, outcome, deltaChips }) => {
+    // One-shot modal trigger keyed by match+round to prevent duplicate firing.
+    const key = `${matchId}:${roundNumber}`;
+    if (state.lastRoundResultKey === key) return;
+    state.lastRoundResultKey = key;
+    state.roundResultModal = {
+      title: outcome === 'win' ? 'You Win' : outcome === 'lose' ? 'You Lose' : 'Push',
+      delta: deltaChips || 0,
+      detail: `Round ${roundNumber}`
+    };
+    render();
+  });
+  state.socket.on('user:update', ({ user }) => {
+    if (!user || !state.me || user.id !== state.me.id) return;
+    state.me = { ...state.me, ...user };
+    render();
+  });
   state.socket.on('match:ended', ({ reason }) => {
     setStatus(reason);
     state.currentMatch = null;
@@ -725,7 +756,7 @@ function renderNotificationBell() {
   return `
     <div class="notif-wrap">
       <button id="notifBell" class="ghost" aria-label="Notifications">
-        Bell ${unread > 0 ? `<span class="notif-badge">${unread}</span>` : ''}
+        Notifications ${unread > 0 ? `<span class="notif-badge">${unread}</span>` : ''}
       </button>
     </div>
   `;
@@ -809,6 +840,38 @@ function syncNotificationOverlay() {
       render();
     };
   });
+}
+
+function syncRoundResultModal() {
+  let mount = document.getElementById('roundResultMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'roundResultMount';
+    document.body.appendChild(mount);
+  }
+  if (!state.roundResultModal) {
+    mount.innerHTML = '';
+    return;
+  }
+  const delta = state.roundResultModal.delta || 0;
+  const sign = delta > 0 ? '+' : '';
+  mount.innerHTML = `
+    <div class="result-overlay">
+      <div class="result-modal card">
+        <h3>${state.roundResultModal.title}</h3>
+        <div class="muted">${state.roundResultModal.detail}</div>
+        <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${delta} chips</div>
+        <button id="roundResultContinue" class="primary">Continue</button>
+      </div>
+    </div>
+  `;
+  const continueBtn = document.getElementById('roundResultContinue');
+  if (continueBtn) {
+    continueBtn.onclick = () => {
+      state.roundResultModal = null;
+      render();
+    };
+  }
 }
 
 function renderTopbar(title = 'Blackjack Battle') {
@@ -904,15 +967,6 @@ function renderHome() {
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
     <p class="muted">${me.username}</p>
-    ${
-      state.newPin
-        ? `<div class="card section" style="margin-bottom:0.8rem">
-            <strong>Your login PIN: ${state.newPin}</strong>
-            <div class="muted">Save this PIN. It is required when logging in on new devices.</div>
-            <button id="copyPinHomeBtn" class="gold" style="margin-top:0.5rem">Copy PIN</button>
-          </div>`
-        : ''
-    }
 
     <div class="row">
       <div class="col card section reveal-panel glow-follow glow-follow--panel">
@@ -934,7 +988,7 @@ function renderHome() {
       <div class="col card section reveal-panel glow-follow glow-follow--panel">
         <h2>Stats</h2>
         <div class="kpis">
-          <div class="kpi"><div class="muted">Matches</div><strong>${me.stats.matchesPlayed}</strong></div>
+          <div class="kpi"><div class="muted">6–7 Dealt</div><strong>${me.stats.sixSevenDealt || 0}</strong></div>
           <div class="kpi"><div class="muted">Rounds Won</div><strong>${me.stats.roundsWon}</strong></div>
           <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon}</strong></div>
           <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost}</strong></div>
@@ -951,16 +1005,35 @@ function renderHome() {
       </div>
     </div>
 
+    <div class="card section" style="margin-top:1rem">
+      <h2>Patch Notes</h2>
+      ${
+        PATCH_NOTES.slice(0, state.showMorePatchNotes ? PATCH_NOTES.length : 3)
+          .map(
+            (entry) => `
+          <div class="patch-item">
+            <strong>${entry.date}</strong>
+            <ul>
+              ${entry.bullets.map((b) => `<li class="muted">${b}</li>`).join('')}
+            </ul>
+          </div>
+        `
+          )
+          .join('')
+      }
+      <button id="togglePatchNotesBtn" class="ghost">${state.showMorePatchNotes ? 'View less' : 'View more'}</button>
+    </div>
+
     ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     
   `;
 
   bindShellNav();
-  const copyPinHomeBtn = document.getElementById('copyPinHomeBtn');
-  if (copyPinHomeBtn) {
-    copyPinHomeBtn.onclick = async () => {
-      const ok = await safeCopy(state.newPin);
-      pushToast(ok ? 'PIN copied.' : "Couldn't copy — please select and copy manually.");
+  const togglePatchNotesBtn = document.getElementById('togglePatchNotesBtn');
+  if (togglePatchNotesBtn) {
+    togglePatchNotesBtn.onclick = () => {
+      state.showMorePatchNotes = !state.showMorePatchNotes;
+      render();
     };
   }
   document.getElementById('openLobbiesBtn').onclick = () => {
@@ -1027,6 +1100,7 @@ function renderProfile() {
         <strong>Login PIN:</strong>
         <span>${state.revealPin ? me.pin || '****' : me.pinMasked || '****'}</span>
         <button id="togglePinBtn" class="ghost" type="button">${state.revealPin ? 'Hide PIN' : 'Show PIN'}</button>
+        <button id="copyPinBtnProfile" class="ghost" type="button">Copy PIN</button>
       </div>
       ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     </div>
@@ -1037,6 +1111,13 @@ function renderProfile() {
     togglePinBtn.onclick = () => {
       state.revealPin = !state.revealPin;
       render();
+    };
+  }
+  const copyPinBtnProfile = document.getElementById('copyPinBtnProfile');
+  if (copyPinBtnProfile) {
+    copyPinBtnProfile.onclick = async () => {
+      const ok = await safeCopy(me.pin || '');
+      pushToast(ok ? 'PIN copied.' : "Couldn't copy — please select and copy manually.");
     };
   }
   document.getElementById('profileForm').onsubmit = (e) => {
@@ -1205,13 +1286,13 @@ function renderChallenges() {
         (groups[key] || [])
           .map(
             (c) => `
-          <div class="challenge">
+          <div class="challenge ${c.progress >= c.goal && !c.claimed ? 'challenge-ready' : ''}">
             <div>
               <div><strong>${c.title}</strong></div>
               <div class="muted">${c.description}</div>
               <div class="muted">${c.progress}/${c.goal} • Reward ${c.rewardChips} chips</div>
             </div>
-            <button data-claim="${c.id}" ${c.claimed || c.progress < c.goal ? 'disabled' : ''}>${c.claimed ? 'Claimed' : 'Claim'}</button>
+            <button class="${c.progress >= c.goal && !c.claimed ? 'claim-wiggle' : ''}" data-claim="${c.id}" ${c.claimed || c.progress < c.goal ? 'disabled' : ''}>${c.claimed ? 'Claimed' : 'Claim'}</button>
           </div>
         `
           )
@@ -1341,6 +1422,7 @@ function renderMatch() {
     NEXT_ROUND: 'Next Round'
   };
   const phaseLabel = phaseLabelMap[match.phase] || match.phase;
+  const roundResolved = match.phase === 'ROUND_RESOLVE' || match.phase === 'NEXT_ROUND';
   const canAct = myTurn && !waitingPressure && activeHand && !activeHand.locked;
   const canEditBet = Boolean(match.canEditBet);
   const canConfirmBet = Boolean(match.canConfirmBet);
@@ -1415,7 +1497,7 @@ function renderMatch() {
         </div>
       </div>
 
-      <div class="actions-panel card section" ${isBettingPhase ? 'style="display:none"' : ''}>
+      <div class="actions-panel card section" ${isBettingPhase || roundResolved ? 'style="display:none"' : ''}>
         <div class="bet-control">
           <div class="bet-head">
             <strong>Base Bet</strong>
@@ -1516,6 +1598,7 @@ function render() {
   bindNotificationUI();
   syncToasts();
   syncNotificationOverlay();
+  syncRoundResultModal();
   if (enteringFriends && state.token) loadFriendsData();
 }
 

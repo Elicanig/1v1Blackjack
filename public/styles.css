@@ -511,6 +511,31 @@ select {
   border: 1px solid rgba(241, 246, 237, 0.1);
 }
 
+.patch-item {
+  margin-bottom: 10px;
+}
+
+.patch-item ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.challenge-ready {
+  border-color: rgba(212, 175, 55, 0.62);
+  box-shadow: 0 0 0 1px rgba(212, 175, 55, 0.24) inset;
+}
+
+.claim-wiggle {
+  animation: claimWiggle 3.6s ease-in-out infinite;
+}
+
+@keyframes claimWiggle {
+  0%, 88%, 100% { transform: translateX(0); }
+  90% { transform: translateX(-1px) rotate(-0.9deg); }
+  93% { transform: translateX(1px) rotate(0.9deg); }
+  96% { transform: translateX(-1px) rotate(-0.6deg); }
+}
+
 .match {
   display: grid;
   gap: var(--space-3);
@@ -806,6 +831,36 @@ select {
   background: rgba(12, 22, 18, 0.9);
   box-shadow: var(--shadow-sm);
   color: var(--text-strong);
+}
+
+.result-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(2, 8, 6, 0.52);
+  display: grid;
+  place-items: center;
+}
+
+.result-modal {
+  width: min(360px, calc(100vw - 24px));
+  padding: 18px;
+  text-align: center;
+  animation: resultIn 180ms ease-out;
+}
+
+.result-delta {
+  margin: 10px 0 14px;
+  font-weight: 700;
+  font-size: 1.04rem;
+}
+
+.result-delta.pos { color: #7fe2b9; }
+.result-delta.neg { color: #e07f7f; }
+
+@keyframes resultIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @media (max-width: 900px) {

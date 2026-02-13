@@ -94,6 +94,10 @@ for (const user of db.data.users) {
     user.stats.blackjacks = 0;
     dbTouched = true;
   }
+  if (user.stats.sixSevenDealt === undefined) {
+    user.stats.sixSevenDealt = 0;
+    dbTouched = true;
+  }
   if (!user.challengeSets) {
     user.challengeSets = {};
     dbTouched = true;
@@ -282,6 +286,12 @@ function emitToUser(userId, event, payload) {
   if (socketId) io.to(socketId).emit(event, payload);
 }
 
+function emitUserUpdate(userId) {
+  const user = getUserById(userId);
+  if (!user) return;
+  emitToUser(userId, 'user:update', { user: sanitizeSelfUser(user) });
+}
+
 function pushNotification(userId, notification) {
   const user = getUserById(userId);
   if (!user) return;
@@ -427,6 +437,13 @@ function handMeta(cards) {
     isBust: total > 21,
     isNaturalBlackjack: cards.length === 2 && total === 21
   };
+}
+
+function isSixSevenStartingHand(cards) {
+  if (!Array.isArray(cards) || cards.length < 2) return false;
+  const a = cards[0]?.rank;
+  const b = cards[1]?.rank;
+  return (a === '6' && b === '7') || (a === '7' && b === '6');
 }
 
 function buildDeck() {
@@ -706,6 +723,7 @@ function beginActionPhase(match) {
   const baseBet = Math.max(1, match.round.baseBet || BASE_BET);
   const postedP1 = Math.min(baseBet, Math.max(0, getParticipantChips(match, p1)));
   const postedP2 = Math.min(baseBet, Math.max(0, getParticipantChips(match, p2)));
+  // Fresh 52-card deck is rebuilt and shuffled every round.
   const deck = buildDeck();
   const p1Cards = [drawCard({ deck }), drawCard({ deck })];
   const p2Cards = [drawCard({ deck }), drawCard({ deck })];
@@ -733,6 +751,24 @@ function beginActionPhase(match) {
       hand.stood = true;
       hand.locked = true;
     }
+  }
+
+  if (!match.isPractice) {
+    const userP1 = getUserById(p1);
+    const userP2 = getUserById(p2);
+    if (userP1 && isSixSevenStartingHand(match.round.players[p1].hands[0].cards)) userP1.stats.sixSevenDealt += 1;
+    if (userP2 && isSixSevenStartingHand(match.round.players[p2].hands[0].cards)) userP2.stats.sixSevenDealt += 1;
+    db.write();
+    emitUserUpdate(p1);
+    emitUserUpdate(p2);
+  }
+
+  // Instant round resolution for initial naturals.
+  const p1Natural = match.round.players[p1].hands[0].naturalBlackjack;
+  const p2Natural = match.round.players[p2].hands[0].naturalBlackjack;
+  if (p1Natural || p2Natural) {
+    resolveRound(match);
+    return;
   }
 
   match.phase = PHASES.ACTION_TURN;
@@ -901,7 +937,14 @@ function resolveRound(match) {
     if (userA) userA.stats.matchesPlayed += 1;
     if (userB) userB.stats.matchesPlayed += 1;
     db.write();
+    emitUserUpdate(aId);
+    emitUserUpdate(bId);
   }
+
+  const outcomeA = chipsDelta[aId] > 0 ? 'win' : chipsDelta[aId] < 0 ? 'lose' : 'push';
+  const outcomeB = chipsDelta[bId] > 0 ? 'win' : chipsDelta[bId] < 0 ? 'lose' : 'push';
+  emitToUser(aId, 'round:result', { matchId: match.id, roundNumber: match.roundNumber, outcome: outcomeA, deltaChips: chipsDelta[aId] });
+  emitToUser(bId, 'round:result', { matchId: match.id, roundNumber: match.roundNumber, outcome: outcomeB, deltaChips: chipsDelta[bId] });
 
   match.phase = PHASES.NEXT_ROUND;
   pushMatchState(match);
@@ -1126,7 +1169,8 @@ function applyAction(match, playerId, action) {
     if (total > 21) {
       hand.bust = true;
       hand.locked = true;
-      progressTurn(match, playerId);
+      // Instant round resolution on bust.
+      resolveRound(match);
       return { ok: true };
     }
     if (total === 21) {
@@ -1196,6 +1240,16 @@ function applyAction(match, playerId, action) {
     const idx = state.activeHandIndex;
     state.hands.splice(idx, 1, newOne, newTwo);
     state.activeHandIndex = idx;
+
+    if (!match.isPractice) {
+      const user = getUserById(playerId);
+      if (user) {
+        if (isSixSevenStartingHand(newOne.cards)) user.stats.sixSevenDealt += 1;
+        if (isSixSevenStartingHand(newTwo.cards)) user.stats.sixSevenDealt += 1;
+        db.write();
+        emitUserUpdate(playerId);
+      }
+    }
 
     const delta = hand.bet;
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
@@ -1364,7 +1418,8 @@ function buildNewUser(username) {
       pushes: 0,
       handsPush: 0,
       handsPlayed: 0,
-      blackjacks: 0
+      blackjacks: 0,
+      sixSevenDealt: 0
     },
     friends: [],
     challengeSets: {},
@@ -1751,6 +1806,7 @@ app.post('/api/free-claim', authMiddleware, async (req, res) => {
   req.user.lastFreeClaimAt = nowIso();
   req.user.chips += 100;
   await db.write();
+  emitUserUpdate(req.user.id);
   const next = freeClaimMeta(req.user);
   return res.json({ reward: 100, chips: req.user.chips, claimed: true, claimedAt: req.user.lastFreeClaimAt, nextAt: next.nextAt });
 });
@@ -1813,6 +1869,7 @@ app.post('/api/challenges/claim', authMiddleware, async (req, res) => {
   target.claimed = true;
   req.user.chips += target.rewardChips;
   await db.write();
+  emitUserUpdate(req.user.id);
   return res.json({ id: targetId, reward: target.rewardChips, chips: req.user.chips });
 });
 
