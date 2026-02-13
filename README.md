@@ -49,5 +49,8 @@ A playable 1v1 real-time web app that blends blackjack actions with head-to-head
 
 ## Notes
 - Match state is authoritative and server-side in memory.
-- Persistent entities (users/friends/lobbies/challenges) are in `data.json`.
+- Persistent entities (users/friends/lobbies/challenges) are in `db.json` under `DATA_DIR` (defaults to `/var/data`).
+- Render deployment:
+  - Mount a persistent disk to `/var/data` (or set `DATA_DIR` to your mount path).
+  - Set `SESSION_SECRET` (or `JWT_SECRET`) as an environment variable so auth tokens remain stable across deploys.
 - For production scale, replace in-memory match storage with Redis and add hardened auth/session handling.

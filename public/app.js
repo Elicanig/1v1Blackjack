@@ -116,7 +116,7 @@ function useHoverGlow() {
 
 function applyGlowFollowClasses() {
   app
-    .querySelectorAll('button.primary, button.gold, button.ghost, .bot-segmented button, .nav button:not(.warn), .card.section')
+    .querySelectorAll('button.primary, button.gold, button.ghost, .bot-segmented button, .tabs .nav-pill, .nav button:not(.warn), .card.section')
     .forEach((el) => el.classList.add('glow-follow'));
 }
 
@@ -928,15 +928,15 @@ function renderTopbar(title = 'Blackjack Battle') {
   return `
     <div class="card topbar">
       <div class="topbar-left">
-        <div class="logo">${title}</div>
+        <div class="logo" id="topLogo" tabindex="0">${title}</div>
         <div class="chip-balance"><span class="chip-icon">◎</span>${chipText}</div>
       </div>
       <div class="topbar-center tabs">
-        <button data-go="home" class="${state.view === 'home' ? 'nav-active' : ''}">Home</button>
-        <button data-go="profile" class="${state.view === 'profile' ? 'nav-active' : ''}">Profile</button>
-        <button data-go="friends" class="${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
-        <button data-go="lobbies" class="${state.view === 'lobbies' ? 'nav-active' : ''}">Lobbies</button>
-        <button data-go="challenges" class="${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
+        <button data-go="home" class="nav-pill ${state.view === 'home' ? 'nav-active' : ''}">Home</button>
+        <button data-go="profile" class="nav-pill ${state.view === 'profile' ? 'nav-active' : ''}">Profile</button>
+        <button data-go="friends" class="nav-pill ${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
+        <button data-go="lobbies" class="nav-pill ${state.view === 'lobbies' ? 'nav-active' : ''}">Lobbies</button>
+        <button data-go="challenges" class="nav-pill ${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
       </div>
       <div class="topbar-right nav">
         ${renderNotificationBell()}
@@ -956,6 +956,12 @@ function bindShellNav() {
   });
   const logoutBtn = document.getElementById('logoutBtn');
   if (logoutBtn) logoutBtn.onclick = logout;
+  const logo = document.getElementById('topLogo');
+  if (logo) {
+    logo.onmouseenter = () => logo.classList.add('shine');
+    logo.onmouseleave = () => logo.classList.remove('shine');
+    logo.onanimationend = () => logo.classList.remove('shine');
+  }
 }
 
 function renderAuth() {
@@ -1546,7 +1552,7 @@ function renderMatch() {
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
-    <main class="view-stack">
+    <main class="view-stack match-view">
       <div class="match table-layout card section reveal-panel">
       <div class="status-strip">
         <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
@@ -1585,29 +1591,31 @@ function renderMatch() {
           : ''
       }
 
-      <div class="match-zone opponent-zone" ${isBettingPhase ? 'style="display:none"' : ''}>
-        <div class="zone-head">
-          <h4>Opponent: ${playerName(oppId)}
+      <div class="zones-stack" ${isBettingPhase ? 'style="display:none"' : ''}>
+        <div class="match-zone opponent-zone">
+          <div class="zone-head">
+            <h4>Opponent: ${playerName(oppId)}
             ${
               state.floatingEmote && state.floatingEmote.fromUserId === oppId
                 ? `<span class="emote-bubble ${state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip'}">${state.floatingEmote.value}</span>`
                 : ''
             }
-          </h4>
-          <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
+            </h4>
+            <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
+          </div>
+          <div class="hands">
+            ${oppState.hands.map((h, idx) => renderHand(h, idx, idx === oppState.activeHandIndex)).join('')}
+          </div>
         </div>
-        <div class="hands">
-          ${oppState.hands.map((h, idx) => renderHand(h, idx, idx === oppState.activeHandIndex)).join('')}
-        </div>
-      </div>
 
-      <div class="match-zone you-zone" ${isBettingPhase ? 'style="display:none"' : ''}>
-        <div class="zone-head">
-          <h4>You: ${playerName(me.id)}</h4>
-          <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
-        </div>
-        <div class="hands">
-          ${myState.hands.map((h, idx) => renderHand(h, idx, idx === myState.activeHandIndex)).join('')}
+        <div class="match-zone you-zone">
+          <div class="zone-head">
+            <h4>You: ${playerName(me.id)}</h4>
+            <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
+          </div>
+          <div class="hands">
+            ${myState.hands.map((h, idx) => renderHand(h, idx, idx === myState.activeHandIndex)).join('')}
+          </div>
         </div>
       </div>
 

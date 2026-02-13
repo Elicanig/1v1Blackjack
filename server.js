@@ -7,6 +7,7 @@ import { Server } from 'socket.io';
 import { JSONFilePreset } from 'lowdb/node';
 import { nanoid } from 'nanoid';
 import path from 'path';
+import { mkdirSync, existsSync, copyFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,7 +21,8 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = "0.0.0.0";
-const JWT_SECRET = process.env.JWT_SECRET || 'blackjack-battle-dev-secret';
+// Keep auth secret stable across deploys via env (SESSION_SECRET preferred).
+const JWT_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET || 'blackjack-battle-dev-secret';
 const STARTING_CHIPS = 1000;
 const BASE_BET = 5;
 const MIN_BET = 5;
@@ -35,7 +37,21 @@ const PATCH_REPO = 'Elicanig/1v1Blackjack';
 const FRIEND_INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const EMOTE_COOLDOWN_MS = 2000;
 
-const db = await JSONFilePreset(path.join(__dirname, 'data.json'), {
+const configuredDataDir = process.env.DATA_DIR || '/var/data';
+let DATA_DIR = configuredDataDir;
+try {
+  mkdirSync(DATA_DIR, { recursive: true });
+} catch {
+  DATA_DIR = path.join(__dirname, '.data');
+  mkdirSync(DATA_DIR, { recursive: true });
+}
+const DB_PATH = path.join(DATA_DIR, 'db.json');
+const LEGACY_DB_PATH = path.join(__dirname, 'data.json');
+if (!existsSync(DB_PATH) && existsSync(LEGACY_DB_PATH)) {
+  copyFileSync(LEGACY_DB_PATH, DB_PATH);
+}
+
+const db = await JSONFilePreset(DB_PATH, {
   users: [],
   lobbies: [],
   friendInvites: [],
@@ -76,10 +92,11 @@ for (const user of db.data.users) {
     user.avatar = `https://api.dicebear.com/9.x/${encodeURIComponent(user.avatarStyle)}/svg?seed=${encodeURIComponent(user.avatarSeed)}`;
     dbTouched = true;
   }
-  if (!user.pin || !user.pinHash) {
-    const generatedPin = String(Math.floor(1000 + Math.random() * 9000));
-    user.pin = user.pin || generatedPin;
-    user.pinHash = user.pinHash || bcrypt.hashSync(user.pin, 10);
+  // Non-destructive PIN migration: never replace existing hashes.
+  if (!user.pinHash) {
+    const generatedPin = user.pin ? String(user.pin) : String(Math.floor(1000 + Math.random() * 9000));
+    user.pin = generatedPin;
+    user.pinHash = bcrypt.hashSync(generatedPin, 10);
     dbTouched = true;
   }
   if (!user.stats) {
@@ -376,8 +393,21 @@ function getUserById(id) {
 }
 
 function getUserByUsername(username) {
-  const normalized = normalizeUsername(username);
-  return db.data.users.find((u) => (u.usernameKey || normalizeUsername(u.username)) === normalized);
+  const raw = String(username || '').trim();
+  const normalized = normalizeUsername(raw);
+  if (!normalized) return null;
+  let user =
+    db.data.users.find((u) => normalizeUsername(u.usernameKey) === normalized) ||
+    db.data.users.find((u) => normalizeUsername(u.username) === normalized) ||
+    db.data.users.find((u) => String(u.username || '').trim() === raw) ||
+    db.data.users.find((u) => normalizeUsername(u.name) === normalized) ||
+    db.data.users.find((u) => normalizeUsername(u.handle) === normalized);
+
+  if (user && !user.usernameKey) {
+    user.usernameKey = normalizeUsername(user.username || raw);
+    void db.write();
+  }
+  return user;
 }
 
 function getFriendList(user) {

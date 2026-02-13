@@ -1,0 +1,126 @@
+{
+  "users": [
+    {
+      "id": "9ERrmbgtF_EuTqlwLvQHY",
+      "username": "EliCanig",
+      "passwordHash": "$2a$10$B.S3Iby1y.Q9/mdRdn2Is.cMEM5rFF2nJhZ03djk/rWeVh9bGSrCC",
+      "avatar": "https://api.dicebear.com/9.x/adventurer/svg?seed=EliCanig",
+      "bio": "Ready for Blackjack Battle.",
+      "chips": 1311,
+      "stats": {
+        "matchesPlayed": 3,
+        "roundsWon": 3,
+        "roundsLost": 0,
+        "handsWon": 3,
+        "handsLost": 0,
+        "handsPush": 0,
+        "pushes": 0,
+        "handsPlayed": 0,
+        "blackjacks": 0,
+        "sixSevenDealt": 0
+      },
+      "friends": [],
+      "challenges": {
+        "win_3_hands": {
+          "progress": 3,
+          "claimed": false
+        },
+        "win_with_split": {
+          "progress": 0,
+          "claimed": false
+        },
+        "play_5_rounds": {
+          "progress": 5,
+          "claimed": false
+        }
+      },
+      "lastDailyClaimAt": "2026-02-13T03:26:59.591Z",
+      "lastFreeClaimAt": "2026-02-13T04:33:21.903Z",
+      "selectedBet": 10,
+      "notifications": [],
+      "authToken": "bwV-fknEofUeoxwEul20SiZcQ8nsDVjMEe4a",
+      "avatarStyle": "adventurer",
+      "avatarSeed": "EliCanig",
+      "challengeSets": {},
+      "pin": "4576",
+      "pinHash": "$2a$10$rIMua7yQRFDQpZBhZiYBW.lykmJyzlgr9SDz1nQql8jJ.fISBOYty",
+      "usernameKey": "elicanig"
+    }
+  ],
+  "lobbies": [
+    {
+      "id": "jtM2LKl9",
+      "ownerId": "9ERrmbgtF_EuTqlwLvQHY",
+      "opponentId": "bot:medium:7QUEsQ",
+      "status": "full",
+      "type": "bot",
+      "botDifficulty": "medium",
+      "createdAt": "2026-02-13T03:35:34.278Z"
+    },
+    {
+      "id": "oIJ6yiHk",
+      "ownerId": "9ERrmbgtF_EuTqlwLvQHY",
+      "opponentId": "bot:normal:Rsd4wT",
+      "status": "full",
+      "type": "bot",
+      "botDifficulty": "normal",
+      "createdAt": "2026-02-13T03:38:26.142Z"
+    },
+    {
+      "id": "iN85sXws",
+      "ownerId": "9ERrmbgtF_EuTqlwLvQHY",
+      "opponentId": "bot:normal:VTmbvo",
+      "status": "full",
+      "type": "bot",
+      "botDifficulty": "normal",
+      "createdAt": "2026-02-13T03:53:57.333Z"
+    },
+    {
+      "id": "3YcYS3Uc",
+      "ownerId": "9ERrmbgtF_EuTqlwLvQHY",
+      "opponentId": "bot:normal:10o53I",
+      "status": "full",
+      "type": "bot",
+      "botDifficulty": "normal",
+      "createdAt": "2026-02-13T03:54:01.670Z"
+    },
+    {
+      "id": "SnPrY7IW",
+      "ownerId": "9ERrmbgtF_EuTqlwLvQHY",
+      "opponentId": "bot:normal:Jef8T4",
+      "status": "full",
+      "type": "bot",
+      "botDifficulty": "normal",
+      "createdAt": "2026-02-13T04:00:02.015Z"
+    },
+    {
+      "id": "auUnRt_R",
+      "ownerId": "9ERrmbgtF_EuTqlwLvQHY",
+      "opponentId": "bot:medium:BdtQAV",
+      "status": "full",
+      "type": "bot",
+      "botDifficulty": "medium",
+      "createdAt": "2026-02-13T04:02:25.902Z"
+    },
+    {
+      "id": "I3BhnxDt",
+      "ownerId": "9ERrmbgtF_EuTqlwLvQHY",
+      "opponentId": "bot:medium:b27MkX",
+      "status": "full",
+      "type": "bot",
+      "botDifficulty": "medium",
+      "createdAt": "2026-02-13T04:11:07.187Z"
+    },
+    {
+      "id": "8sQahTjE",
+      "ownerId": "9ERrmbgtF_EuTqlwLvQHY",
+      "opponentId": "bot:medium:BoNm07",
+      "status": "full",
+      "type": "bot",
+      "botDifficulty": "medium",
+      "createdAt": "2026-02-13T04:47:48.434Z"
+    }
+  ],
+  "friendInvites": [],
+  "friendRequests": []
+}
