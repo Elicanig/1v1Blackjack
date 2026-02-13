@@ -40,6 +40,10 @@ const db = await JSONFilePreset(path.join(__dirname, 'data.json'), {
 
 let dbTouched = false;
 for (const user of db.data.users) {
+  if (!user.usernameKey) {
+    user.usernameKey = normalizeUsername(user.username || '');
+    dbTouched = true;
+  }
   if (user.lastFreeClaimAt === undefined) {
     user.lastFreeClaimAt = null;
     dbTouched = true;
@@ -265,7 +269,7 @@ function getUserById(id) {
 
 function getUserByUsername(username) {
   const normalized = normalizeUsername(username);
-  return db.data.users.find((u) => normalizeUsername(u.username) === normalized);
+  return db.data.users.find((u) => (u.usernameKey || normalizeUsername(u.username)) === normalized);
 }
 
 function getFriendList(user) {
@@ -1007,7 +1011,6 @@ function getBotDifficulty(match, botId) {
 }
 
 function chooseBotAction(match, botId) {
-  // Difficulty affects decision quality only; deck generation remains uniform.
   const botState = match.round.players[botId];
   const hand = currentHand(botState);
   if (!hand) return 'stand';
@@ -1018,37 +1021,48 @@ function chooseBotAction(match, botId) {
   const opponentId = nextPlayerId(match, botId);
   const opponentState = match.round.players[opponentId];
   const opponentHand = currentHand(opponentState) || opponentState.hands[0];
-  const opponentUpCardTotal = opponentHand ? visibleTotal(opponentHand.cards, opponentHand.hidden) : 10;
+  const opponentUpCard = opponentHand?.cards?.[0] || null;
+  const opponentUpCardTotal = opponentUpCard ? cardValue(opponentUpCard) : 10;
   const total = handTotal(hand.cards);
-
-  let ideal = 'stand';
-  if (canSplit(hand) && ['A', '8'].includes(hand.cards[0].rank)) {
-    ideal = 'split';
-  } else if (!hand.doubled && hand.cards.length === 2 && (total === 11 || (total === 10 && opponentUpCardTotal <= 9))) {
-    ideal = 'double';
-  } else if (total <= 11) {
-    ideal = 'hit';
-  } else if (total >= 17) {
-    ideal = 'stand';
-  } else if (total === 16 && opponentUpCardTotal >= 10) {
-    ideal = 'surrender';
-  } else if (total >= 13 && total <= 16) {
-    ideal = opponentUpCardTotal >= 7 ? 'hit' : 'stand';
-  } else if (total === 12) {
-    ideal = opponentUpCardTotal >= 7 || opponentUpCardTotal <= 3 ? 'hit' : 'stand';
-  } else {
-    ideal = 'hit';
-  }
-
+  const meta = handMeta(hand.cards);
+  let ideal = basicStrategyAction(hand, meta, total, opponentUpCardTotal);
   if (!legal.includes(ideal)) ideal = legal[0];
 
   const difficulty = getBotDifficulty(match, botId);
-  const accuracy = BOT_ACCURACY[difficulty] || BOT_ACCURACY.normal;
+  const accuracy = difficulty === 'easy' ? 0.45 : difficulty === 'medium' ? 0.75 : 0.94;
   if (Math.random() <= accuracy) return ideal;
 
   const alternatives = legal.filter((a) => a !== ideal);
   if (!alternatives.length) return ideal;
   return alternatives[Math.floor(Math.random() * alternatives.length)];
+}
+
+function basicStrategyAction(hand, meta, total, up) {
+  if (canSplit(hand)) {
+    const r = hand.cards[0].rank;
+    if (r === 'A' || r === '8') return 'split';
+    if (r === '9' && ![7, 10, 11].includes(up)) return 'split';
+    if (r === '7' && up <= 7) return 'split';
+    if (r === '6' && up >= 2 && up <= 6) return 'split';
+    if ((r === '2' || r === '3') && up >= 2 && up <= 7) return 'split';
+    if (r === '4' && (up === 5 || up === 6)) return 'split';
+  }
+
+  if (meta.isSoft) {
+    if (total >= 19) return 'stand';
+    if (total === 18) return up >= 9 || up === 11 ? 'hit' : 'stand';
+    if (total === 17 || total === 16) return up >= 4 && up <= 6 ? 'double' : 'hit';
+    if (total === 15 || total === 14) return up >= 4 && up <= 6 ? 'double' : 'hit';
+    if (total === 13 || total === 12) return up >= 5 && up <= 6 ? 'double' : 'hit';
+  }
+
+  if (total >= 17) return 'stand';
+  if (total >= 13 && total <= 16) return up >= 7 ? 'hit' : 'stand';
+  if (total === 12) return up >= 4 && up <= 6 ? 'stand' : 'hit';
+  if (total === 11) return 'double';
+  if (total === 10) return up <= 9 ? 'double' : 'hit';
+  if (total === 9) return up >= 3 && up <= 6 ? 'double' : 'hit';
+  return 'hit';
 }
 
 function chooseBotPressureDecision(match, botId) {
@@ -1340,7 +1354,7 @@ function confirmBaseBet(match, playerId) {
 
 function createMatch(lobby, options = {}) {
   const playerIds = [lobby.ownerId, lobby.opponentId];
-  const isPractice = lobby.type === 'bot';
+  const isPractice = (lobby.stakeType || 'FAKE') === 'FAKE';
   const selectedBetById = {};
   for (const pid of playerIds) {
     if (isBotPlayer(pid)) {
@@ -1357,6 +1371,7 @@ function createMatch(lobby, options = {}) {
     playerIds,
     startingPlayerIndex: 0,
     roundNumber: 0,
+    stakeType: lobby.stakeType || (isPractice ? 'FAKE' : 'REAL'),
     isPractice,
     practiceBankrollById: isPractice
       ? playerIds.reduce((acc, pid) => {
@@ -1397,10 +1412,12 @@ function emitLobbyUpdate(lobby) {
 
 function buildNewUser(username) {
   const cleanUsername = String(username || '').trim();
+  const usernameKey = normalizeUsername(cleanUsername);
   const pin = String(Math.floor(1000 + Math.random() * 9000));
   const user = {
     id: nanoid(),
     username: cleanUsername,
+    usernameKey,
     authToken: nanoid(36),
     pin,
     pinHash: bcrypt.hashSync(pin, 10),
@@ -1761,10 +1778,11 @@ app.post('/api/lobbies/invite', authMiddleware, async (req, res) => {
 });
 
 async function createBotPracticeLobby(req, res) {
-  const { difficulty } = req.body || {};
+  const { difficulty, stakeType } = req.body || {};
   if (!['easy', 'medium', 'normal'].includes(difficulty)) {
     return res.status(400).json({ error: 'Difficulty must be easy, medium, or normal' });
   }
+  const resolvedStake = stakeType === 'REAL' ? 'REAL' : 'FAKE';
 
   const botId = `bot:${difficulty}:${nanoid(6)}`;
   const lobby = {
@@ -1773,6 +1791,7 @@ async function createBotPracticeLobby(req, res) {
     opponentId: botId,
     status: 'full',
     type: 'bot',
+    stakeType: resolvedStake,
     botDifficulty: difficulty,
     createdAt: nowIso()
   };

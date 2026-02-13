@@ -116,7 +116,7 @@ function useHoverGlow() {
 
 function applyGlowFollowClasses() {
   app
-    .querySelectorAll('button.primary, button.gold, button.ghost, .bot-segmented button, .nav button:not(.warn)')
+    .querySelectorAll('button.primary, button.gold, button.ghost, .bot-segmented button, .nav button:not(.warn), .card.section')
     .forEach((el) => el.classList.add('glow-follow'));
 }
 
@@ -152,7 +152,8 @@ const state = {
   lastRoundResultKey: '',
   roundResultModal: null,
   currentBet: 5,
-  selectedBotDifficulty: 'normal'
+  selectedBotDifficulty: 'normal',
+  botStakeType: 'FAKE'
 };
 
 let freeClaimTicker = null;
@@ -497,7 +498,7 @@ async function handleAuth(mode, form) {
     await loadMe();
   } catch (e) {
     if (mode === 'login') {
-      state.authNotice = 'Login failed. Check username and PIN.';
+      state.authNotice = 'Incorrect username or PIN.';
       render();
     } else {
       setError(e.message);
@@ -584,7 +585,7 @@ async function joinLobby(lobbyIdInput) {
       body: JSON.stringify({ lobbyId: code })
     });
     state.currentLobby = data.lobby;
-    goToView(data.matchId ? 'match' : 'lobby');
+    goToView(data.matchId ? 'match' : 'lobbies');
     state.lobbyJoinInput = code;
     state.socket?.emit('lobby:watch', data.lobby.id);
     if (!data.matchId) setStatus('Joined lobby. Waiting for match...');
@@ -674,17 +675,16 @@ function runNotificationAction(notification) {
   }
 }
 
-async function startBotMatch(difficulty) {
-  state.selectedBotDifficulty = difficulty;
+async function startBotMatch() {
   try {
     const data = await api('/api/lobbies/bot', {
       method: 'POST',
-      body: JSON.stringify({ difficulty })
+      body: JSON.stringify({ difficulty: state.selectedBotDifficulty, stakeType: state.botStakeType })
     });
     state.currentLobby = null;
     state.currentMatch = data.match;
     goToView('match');
-    setStatus(`Practice match started vs ${difficulty} bot.`);
+    setStatus(`${state.botStakeType === 'REAL' ? 'Real-chip' : 'Practice'} bot match started (${state.selectedBotDifficulty}).`);
   } catch (e) {
     setError(e.message);
   }
@@ -801,7 +801,10 @@ function syncNotificationOverlay() {
     <div class="notif-overlay-panel card">
       <div class="notif-head">
         <strong>Notifications</strong>
-        <button id="clearNotifBtn" class="ghost">Clear</button>
+        <div class="row">
+          <button id="clearNotifBtn" class="ghost">Clear</button>
+          <button id="closeNotifBtn" class="ghost">Close</button>
+        </div>
       </div>
       ${
         state.notifications.length
@@ -832,6 +835,11 @@ function syncNotificationOverlay() {
   }
   const clearBtn = document.getElementById('clearNotifBtn');
   if (clearBtn) clearBtn.onclick = clearNotifications;
+  const closeBtn = document.getElementById('closeNotifBtn');
+  if (closeBtn) closeBtn.onclick = () => {
+    state.notificationsOpen = false;
+    render();
+  };
   mount.querySelectorAll('[data-notif-action]').forEach((btn) => {
     btn.onclick = () => {
       const notif = state.notifications.find((n) => n.id === btn.dataset.notifAction);
@@ -878,16 +886,18 @@ function renderTopbar(title = 'Blackjack Battle') {
   const chipText = state.me?.chips?.toLocaleString?.() || '0';
   return `
     <div class="card topbar">
-      <div>
+      <div class="topbar-left">
         <div class="logo">${title}</div>
-        <div class="chip-balance">Chips ${chipText}</div>
+        <div class="chip-balance"><span class="chip-icon">◎</span>${chipText}</div>
       </div>
-      <div class="nav">
+      <div class="topbar-center tabs">
         <button data-go="home" class="${state.view === 'home' ? 'nav-active' : ''}">Home</button>
         <button data-go="profile" class="${state.view === 'profile' ? 'nav-active' : ''}">Profile</button>
         <button data-go="friends" class="${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
         <button data-go="lobbies" class="${state.view === 'lobbies' ? 'nav-active' : ''}">Lobbies</button>
         <button data-go="challenges" class="${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
+      </div>
+      <div class="topbar-right nav">
         ${renderNotificationBell()}
         <button class="warn" id="logoutBtn">Logout</button>
       </div>
@@ -966,10 +976,10 @@ function renderHome() {
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
-    <p class="muted">${me.username}</p>
-
-    <div class="row">
-      <div class="col card section reveal-panel glow-follow glow-follow--panel">
+    <main class="view-stack dashboard">
+      <p class="muted view-subtitle">${me.username}</p>
+      <div class="dashboard-grid">
+        <section class="col card section reveal-panel glow-follow glow-follow--panel">
         <h2>Play</h2>
         <p class="muted">Open Lobbies to create or join private 1v1 games.</p>
         <div class="row">
@@ -978,14 +988,20 @@ function renderHome() {
         </div>
         <div class="grid" style="margin-top:0.7rem">
           <div class="muted">Play Against Bot</div>
-          <div class="row bot-segmented">
+          <div class="bot-segmented bot-slider" data-diff-slider>
+            <div class="bot-slider-indicator" style="transform:translateX(${['easy', 'medium', 'normal'].indexOf(state.selectedBotDifficulty) * 100}%);"></div>
             <button data-bot="easy" class="${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">Easy</button>
             <button data-bot="medium" class="${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">Medium</button>
             <button data-bot="normal" class="${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">Normal</button>
           </div>
+          <div class="row bot-stake-row">
+            <label><input type="radio" name="botStake" value="REAL" ${state.botStakeType === 'REAL' ? 'checked' : ''} /> Real chips</label>
+            <label><input type="radio" name="botStake" value="FAKE" ${state.botStakeType === 'FAKE' ? 'checked' : ''} /> Practice (fake chips)</label>
+          </div>
+          <button class="gold" id="playBotBtn">Play Bot</button>
         </div>
-      </div>
-      <div class="col card section reveal-panel glow-follow glow-follow--panel">
+        </section>
+        <section class="col card section reveal-panel glow-follow glow-follow--panel">
         <h2>Stats</h2>
         <div class="kpis">
           <div class="kpi"><div class="muted">6–7 Dealt</div><strong>${me.stats.sixSevenDealt || 0}</strong></div>
@@ -1002,30 +1018,29 @@ function renderHome() {
           </div>
           <button class="gold" id="claimFreeBtn" ${state.freeClaimRemainingMs > 0 ? 'disabled' : ''}>${state.freeClaimRemainingMs > 0 ? 'On cooldown' : 'Claim +100'}</button>
         </div>
-      </div>
-    </div>
-
-    <div class="card section" style="margin-top:1rem">
-      <h2>Patch Notes</h2>
+        </section>
+        <section class="card section patch-card">
+          <h2>Patch Notes</h2>
       ${
         PATCH_NOTES.slice(0, state.showMorePatchNotes ? PATCH_NOTES.length : 3)
           .map(
             (entry) => `
-          <div class="patch-item">
-            <strong>${entry.date}</strong>
-            <ul>
+          <article class="patch-item">
+            <strong class="patch-date">${entry.date}</strong>
+            <ul class="patch-list">
               ${entry.bullets.map((b) => `<li class="muted">${b}</li>`).join('')}
             </ul>
-          </div>
+          </article>
         `
           )
           .join('')
       }
       <button id="togglePatchNotesBtn" class="ghost">${state.showMorePatchNotes ? 'View less' : 'View more'}</button>
-    </div>
+        </section>
+      </div>
 
-    ${state.status ? `<p class="muted">${state.status}</p>` : ''}
-    
+      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
+    </main>
   `;
 
   bindShellNav();
@@ -1045,8 +1060,19 @@ function renderHome() {
     render();
   };
   app.querySelectorAll('[data-bot]').forEach((btn) => {
-    btn.onclick = () => startBotMatch(btn.dataset.bot);
+    btn.onclick = () => {
+      state.selectedBotDifficulty = btn.dataset.bot;
+      render();
+    };
   });
+  app.querySelectorAll('input[name="botStake"]').forEach((el) => {
+    el.onchange = () => {
+      state.botStakeType = el.value;
+      render();
+    };
+  });
+  const playBotBtn = document.getElementById('playBotBtn');
+  if (playBotBtn) playBotBtn.onclick = () => startBotMatch();
 
   const claimBtn = document.getElementById('claimFreeBtn');
   if (claimBtn) claimBtn.onclick = claimFree100;
@@ -1059,8 +1085,8 @@ function renderProfile() {
   )}`;
   app.innerHTML = `
     ${renderTopbar('Profile')}
-
-    <div class="card section">
+    <main class="view-stack">
+      <div class="card section">
       <form id="profileForm" class="grid">
         <div class="row">
           <div class="col">
@@ -1103,7 +1129,8 @@ function renderProfile() {
         <button id="copyPinBtnProfile" class="ghost" type="button">Copy PIN</button>
       </div>
       ${state.status ? `<p class="muted">${state.status}</p>` : ''}
-    </div>
+      </div>
+    </main>
   `;
   bindShellNav();
   const togglePinBtn = document.getElementById('togglePinBtn');
@@ -1129,8 +1156,8 @@ function renderProfile() {
 function renderFriends() {
   app.innerHTML = `
     ${renderTopbar('Friends')}
-
-    <div class="row">
+    <main class="view-stack">
+      <div class="row">
       <div class="col card section">
         <h3>Send Friend Request</h3>
         <form id="friendForm" class="row">
@@ -1189,9 +1216,10 @@ function renderFriends() {
             : '<p class="muted">No pending requests.</p>'
         }
       </div>
-    </div>
+      </div>
 
-    ${state.status ? `<p class="muted">${state.status}</p>` : ''}
+      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
+    </main>
   `;
   bindShellNav();
 
@@ -1217,17 +1245,27 @@ function renderLobby() {
   const hasPrefilledCode = Boolean((state.lobbyJoinInput || '').trim());
   app.innerHTML = `
     ${renderTopbar('Lobbies')}
-
-    <div class="card section">
+    <main class="view-stack">
+      <div class="row lobby-grid">
+        <section class="col card section">
       <h3>Create Lobby</h3>
       <p class="muted">Create only when you want to host a private 1v1 room.</p>
       <button class="primary" id="createLobbyBtn">Create Lobby</button>
-    </div>
+        </section>
+        <section class="col card section">
+          <h3>Join Existing Lobby</h3>
+          <p class="muted">Enter a lobby code to join. This does not create a lobby.</p>
+          <form id="joinLobbyForm" class="row">
+            <input name="lobby_id" placeholder="Lobby code" value="${state.lobbyJoinInput || ''}" />
+            <button class="primary" type="submit">${hasPrefilledCode ? 'Join Lobby' : 'Join'}</button>
+          </form>
+        </section>
+      </div>
 
     ${
       lobby
         ? `
-      <div class="card section" style="margin-top:1rem">
+      <div class="card section">
         <div class="lobby">
           <div>
             <div><strong>Code:</strong> ${lobby.id}</div>
@@ -1241,17 +1279,9 @@ function renderLobby() {
         : ''
     }
 
-    <div class="card section" style="margin-top:1rem">
-      <h3>Join Existing Lobby</h3>
-      <p class="muted">Enter a lobby code to join. This does not create a lobby.</p>
-      <form id="joinLobbyForm" class="row">
-        <input name="lobby_id" placeholder="Lobby code" value="${state.lobbyJoinInput || ''}" />
-        <button class="primary" type="submit">${hasPrefilledCode ? 'Join Lobby' : 'Join'}</button>
-      </form>
-    </div>
-
     ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
+    </main>
   `;
 
   bindShellNav();
@@ -1302,12 +1332,12 @@ function renderChallenges() {
   `;
   app.innerHTML = `
     ${renderTopbar('Challenges')}
-
-    ${renderTier('Hourly Challenges', 'hourly')}
-    ${renderTier('Daily Challenges', 'daily')}
-    ${renderTier('Weekly Challenges', 'weekly')}
-
-    ${state.status ? `<p class="muted">${state.status}</p>` : ''}
+    <main class="view-stack">
+      ${renderTier('Hourly Challenges', 'hourly')}
+      ${renderTier('Daily Challenges', 'daily')}
+      ${renderTier('Weekly Challenges', 'weekly')}
+      ${state.status ? `<p class="muted">${state.status}</p>` : ''}
+    </main>
   `;
   bindShellNav();
 
@@ -1319,7 +1349,8 @@ function renderChallenges() {
 function renderNotifications() {
   app.innerHTML = `
     ${renderTopbar('Notifications')}
-    <div class="card section">
+    <main class="view-stack">
+      <div class="card section">
       ${
         state.notifications.length
           ? state.notifications
@@ -1338,7 +1369,8 @@ function renderNotifications() {
       <div class="row" style="margin-top:0.8rem">
         <button id="clearNotifViewBtn" class="ghost">Clear all</button>
       </div>
-    </div>
+      </div>
+    </main>
   `;
   bindShellNav();
   const clearBtn = document.getElementById('clearNotifViewBtn');
@@ -1438,8 +1470,8 @@ function renderMatch() {
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
-
-    <div class="match table-layout card section reveal-panel">
+    <main class="view-stack">
+      <div class="match table-layout card section reveal-panel">
       <div class="status-strip">
         <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
         <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${isBettingPhase ? 'Betting' : myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
@@ -1547,7 +1579,8 @@ function renderMatch() {
       </div>
 
       ${state.status ? `<p class="muted">${state.status}</p>` : ''}
-    </div>
+      </div>
+    </main>
   `;
   bindShellNav();
 
