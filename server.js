@@ -33,7 +33,8 @@ const BOT_BET_CONFIRM_MAX_MS = 600;
 const db = await JSONFilePreset(path.join(__dirname, 'data.json'), {
   users: [],
   lobbies: [],
-  friendInvites: []
+  friendInvites: [],
+  friendRequests: []
 });
 
 let dbTouched = false;
@@ -46,6 +47,14 @@ for (const user of db.data.users) {
     user.selectedBet = BASE_BET;
     dbTouched = true;
   }
+  if (!Array.isArray(user.notifications)) {
+    user.notifications = [];
+    dbTouched = true;
+  }
+}
+if (!Array.isArray(db.data.friendRequests)) {
+  db.data.friendRequests = [];
+  dbTouched = true;
 }
 if (dbTouched) await db.write();
 
@@ -165,6 +174,76 @@ function getFriendList(user) {
     .map((id) => getUserById(id))
     .filter(Boolean)
     .map((friend) => sanitizeUser(friend));
+}
+
+function normalizeLobbyCode(code) {
+  return String(code || '')
+    .trim()
+    .toUpperCase();
+}
+
+function emitToUser(userId, event, payload) {
+  const socketId = activeSessions.get(userId);
+  if (socketId) io.to(socketId).emit(event, payload);
+}
+
+function pushNotification(userId, notification) {
+  const user = getUserById(userId);
+  if (!user) return;
+  const payload = {
+    id: notification.id || nanoid(10),
+    type: notification.type || 'info',
+    message: notification.message || '',
+    createdAt: notification.createdAt || nowIso(),
+    action: notification.action || null,
+    read: false
+  };
+  user.notifications.unshift(payload);
+  user.notifications = user.notifications.slice(0, 60);
+  // Real-time inbox push for connected clients.
+  emitToUser(userId, 'notify:new', payload);
+}
+
+function buildFriendsPayload(user) {
+  const incoming = db.data.friendRequests
+    .filter((r) => r.toUserId === user.id && r.status === 'pending')
+    .map((r) => {
+      const from = getUserById(r.fromUserId);
+      return from
+        ? {
+            id: r.id,
+            username: from.username,
+            fromUserId: from.id,
+            createdAt: r.createdAt
+          }
+        : null;
+    })
+    .filter(Boolean);
+
+  const outgoing = db.data.friendRequests
+    .filter((r) => r.fromUserId === user.id && r.status === 'pending')
+    .map((r) => {
+      const to = getUserById(r.toUserId);
+      return to
+        ? {
+            id: r.id,
+            username: to.username,
+            toUserId: to.id,
+            createdAt: r.createdAt
+          }
+        : null;
+    })
+    .filter(Boolean);
+
+  const friends = user.friends
+    .map((id) => getUserById(id))
+    .filter(Boolean)
+    .map((friend) => ({
+      ...sanitizeUser(friend),
+      online: Boolean(activeSessions.get(friend.id))
+    }));
+
+  return { friends, incoming, outgoing };
 }
 
 function getParticipantChips(match, playerId) {
@@ -1050,9 +1129,15 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.get('/api/me', authMiddleware, (req, res) => {
+  const friendsData = buildFriendsPayload(req.user);
   return res.json({
     user: sanitizeUser(req.user),
-    friends: getFriendList(req.user),
+    friends: friendsData.friends,
+    friendRequests: {
+      incoming: friendsData.incoming,
+      outgoing: friendsData.outgoing
+    },
+    notifications: (req.user.notifications || []).slice(0, 30),
     freeClaimed: Boolean(req.user.lastFreeClaimAt),
     challenges: challengeCatalog.map((c) => ({ ...c, ...req.user.challenges[c.id] }))
   });
@@ -1067,18 +1152,109 @@ app.put('/api/profile', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/friends', authMiddleware, (req, res) => {
-  return res.json({ friends: getFriendList(req.user) });
+  return res.json(buildFriendsPayload(req.user));
 });
 
 app.post('/api/friends/add', authMiddleware, async (req, res) => {
+  // Backward-compatible alias to friend request flow.
   const { username } = req.body || {};
   const target = getUserByUsername(username || '');
   if (!target) return res.status(404).json({ error: 'User not found' });
   if (target.id === req.user.id) return res.status(400).json({ error: 'Cannot friend yourself' });
-  if (!req.user.friends.includes(target.id)) req.user.friends.push(target.id);
-  if (!target.friends.includes(req.user.id)) target.friends.push(req.user.id);
+  if (req.user.friends.includes(target.id)) return res.status(409).json({ error: 'Already friends' });
+  const existing = db.data.friendRequests.find(
+    (r) =>
+      ((r.fromUserId === req.user.id && r.toUserId === target.id) ||
+        (r.fromUserId === target.id && r.toUserId === req.user.id)) &&
+      r.status === 'pending'
+  );
+  if (existing) return res.status(409).json({ error: 'Friend request already pending' });
+  db.data.friendRequests.push({
+    id: nanoid(10),
+    fromUserId: req.user.id,
+    toUserId: target.id,
+    status: 'pending',
+    createdAt: nowIso()
+  });
+  pushNotification(target.id, {
+    type: 'friend_request',
+    message: `${req.user.username} sent you a friend request.`
+  });
   await db.write();
-  return res.json({ friends: getFriendList(req.user) });
+  return res.json(buildFriendsPayload(req.user));
+});
+
+app.get('/api/friends/list', authMiddleware, (req, res) => {
+  return res.json(buildFriendsPayload(req.user));
+});
+
+app.post('/api/friends/request', authMiddleware, async (req, res) => {
+  const { username } = req.body || {};
+  const target = getUserByUsername(username || '');
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.id === req.user.id) return res.status(400).json({ error: 'Cannot friend yourself' });
+  if (req.user.friends.includes(target.id)) return res.status(409).json({ error: 'Already friends' });
+  const existing = db.data.friendRequests.find(
+    (r) =>
+      ((r.fromUserId === req.user.id && r.toUserId === target.id) ||
+        (r.fromUserId === target.id && r.toUserId === req.user.id)) &&
+      r.status === 'pending'
+  );
+  if (existing) return res.status(409).json({ error: 'Friend request already pending' });
+  db.data.friendRequests.push({
+    id: nanoid(10),
+    fromUserId: req.user.id,
+    toUserId: target.id,
+    status: 'pending',
+    createdAt: nowIso()
+  });
+  pushNotification(target.id, {
+    type: 'friend_request',
+    message: `${req.user.username} sent you a friend request.`
+  });
+  await db.write();
+  return res.json(buildFriendsPayload(req.user));
+});
+
+app.post('/api/friends/accept', authMiddleware, async (req, res) => {
+  const { requestId, username } = req.body || {};
+  const reqObj = db.data.friendRequests.find((r) => r.id === requestId && r.toUserId === req.user.id && r.status === 'pending');
+  const target = username ? getUserByUsername(username) : null;
+  const fallback = target
+    ? db.data.friendRequests.find(
+        (r) => r.fromUserId === target.id && r.toUserId === req.user.id && r.status === 'pending'
+      )
+    : null;
+  const friendReq = reqObj || fallback;
+  if (!friendReq) return res.status(404).json({ error: 'Friend request not found' });
+  friendReq.status = 'accepted';
+  const from = getUserById(friendReq.fromUserId);
+  if (from) {
+    if (!req.user.friends.includes(from.id)) req.user.friends.push(from.id);
+    if (!from.friends.includes(req.user.id)) from.friends.push(req.user.id);
+    pushNotification(from.id, {
+      type: 'friend_accept',
+      message: `${req.user.username} accepted your friend request.`
+    });
+  }
+  await db.write();
+  return res.json(buildFriendsPayload(req.user));
+});
+
+app.post('/api/friends/decline', authMiddleware, async (req, res) => {
+  const { requestId, username } = req.body || {};
+  const reqObj = db.data.friendRequests.find((r) => r.id === requestId && r.toUserId === req.user.id && r.status === 'pending');
+  const target = username ? getUserByUsername(username) : null;
+  const fallback = target
+    ? db.data.friendRequests.find(
+        (r) => r.fromUserId === target.id && r.toUserId === req.user.id && r.status === 'pending'
+      )
+    : null;
+  const friendReq = reqObj || fallback;
+  if (!friendReq) return res.status(404).json({ error: 'Friend request not found' });
+  friendReq.status = 'declined';
+  await db.write();
+  return res.json(buildFriendsPayload(req.user));
 });
 
 app.post('/api/friends/invite-link', authMiddleware, async (req, res) => {
@@ -1114,11 +1290,21 @@ app.post('/api/friends/invite-link/accept', authMiddleware, async (req, res) => 
 });
 
 app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
+  const existing = db.data.lobbies.find(
+    (l) => l.ownerId === req.user.id && l.status === 'waiting' && l.type !== 'bot'
+  );
+  if (existing) {
+    return res.json({
+      lobby: existing,
+      link: `${req.protocol}://${req.get('host')}/lobbies?code=${existing.id}`
+    });
+  }
   const lobby = {
-    id: nanoid(8),
+    id: normalizeLobbyCode(nanoid(8)),
     ownerId: req.user.id,
     opponentId: null,
     status: 'waiting',
+    invited: [],
     createdAt: nowIso()
   };
   db.data.lobbies.push(lobby);
@@ -1126,22 +1312,30 @@ app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
 
   return res.json({
     lobby,
-    link: `${req.protocol}://${req.get('host')}/?joinLobby=${lobby.id}`
+    link: `${req.protocol}://${req.get('host')}/lobbies?code=${lobby.id}`
   });
 });
 
 app.post('/api/lobbies/join', authMiddleware, async (req, res) => {
   const { lobbyId } = req.body || {};
-  const lobby = db.data.lobbies.find((l) => l.id === lobbyId);
+  const normalized = normalizeLobbyCode(lobbyId);
+  const lobby = db.data.lobbies.find((l) => normalizeLobbyCode(l.id) === normalized);
   if (!lobby) return res.status(404).json({ error: 'Lobby not found' });
   if (lobby.ownerId === req.user.id) return res.status(400).json({ error: 'Cannot join your own lobby' });
   if (lobby.opponentId && lobby.opponentId !== req.user.id) return res.status(409).json({ error: 'Lobby full' });
+  if (Array.isArray(lobby.invited) && lobby.invited.length > 0 && !lobby.invited.includes(req.user.username)) {
+    return res.status(403).json({ error: 'You are not invited to this private lobby' });
+  }
 
   lobby.opponentId = req.user.id;
   lobby.status = 'full';
   await db.write();
 
   emitLobbyUpdate(lobby);
+  pushNotification(lobby.ownerId, {
+    type: 'lobby_joined',
+    message: `${req.user.username} joined your lobby.`
+  });
 
   let matchId = lobbyToMatch.get(lobby.id);
   if (!matchId) {
@@ -1153,10 +1347,42 @@ app.post('/api/lobbies/join', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/lobbies/:id', authMiddleware, (req, res) => {
-  const lobby = db.data.lobbies.find((l) => l.id === req.params.id);
+  const lobby = db.data.lobbies.find((l) => normalizeLobbyCode(l.id) === normalizeLobbyCode(req.params.id));
   if (!lobby) return res.status(404).json({ error: 'Lobby not found' });
   const matchId = lobbyToMatch.get(lobby.id) || null;
   return res.json({ lobby, matchId });
+});
+
+app.post('/api/lobbies/invite', authMiddleware, async (req, res) => {
+  const { username } = req.body || {};
+  const friend = getUserByUsername(username || '');
+  if (!friend) return res.status(404).json({ error: 'Friend not found' });
+  if (!req.user.friends.includes(friend.id)) return res.status(403).json({ error: 'Can only invite friends' });
+
+  let lobby = db.data.lobbies.find((l) => l.ownerId === req.user.id && l.status === 'waiting' && l.type !== 'bot');
+  if (!lobby) {
+    lobby = {
+      id: normalizeLobbyCode(nanoid(8)),
+      ownerId: req.user.id,
+      opponentId: null,
+      status: 'waiting',
+      invited: [],
+      createdAt: nowIso()
+    };
+    db.data.lobbies.push(lobby);
+  }
+  if (!Array.isArray(lobby.invited)) lobby.invited = [];
+  if (!lobby.invited.includes(friend.username)) lobby.invited.push(friend.username);
+
+  pushNotification(friend.id, {
+    type: 'lobby_invite',
+    message: `${req.user.username} invited you to a private lobby.`,
+    action: { label: 'Join', kind: 'join_lobby', data: { lobbyCode: lobby.id } }
+  });
+
+  await db.write();
+  emitLobbyUpdate(lobby);
+  return res.json({ lobby, link: `${req.protocol}://${req.get('host')}/lobbies?code=${lobby.id}` });
 });
 
 async function createBotPracticeLobby(req, res) {
@@ -1167,7 +1393,7 @@ async function createBotPracticeLobby(req, res) {
 
   const botId = `bot:${difficulty}:${nanoid(6)}`;
   const lobby = {
-    id: nanoid(8),
+    id: normalizeLobbyCode(nanoid(8)),
     ownerId: req.user.id,
     opponentId: botId,
     status: 'full',
@@ -1198,6 +1424,23 @@ app.post('/api/free-claim', authMiddleware, async (req, res) => {
   req.user.chips += 100;
   await db.write();
   return res.json({ reward: 100, chips: req.user.chips, claimed: true, claimedAt: req.user.lastFreeClaimAt });
+});
+
+app.get('/api/notifications', authMiddleware, (req, res) => {
+  return res.json({ notifications: (req.user.notifications || []).slice(0, 50) });
+});
+
+app.post('/api/notifications/clear', authMiddleware, async (req, res) => {
+  req.user.notifications = [];
+  await db.write();
+  return res.json({ notifications: [] });
+});
+
+app.post('/api/notifications/dismiss', authMiddleware, async (req, res) => {
+  const { id } = req.body || {};
+  req.user.notifications = (req.user.notifications || []).filter((n) => n.id !== id);
+  await db.write();
+  return res.json({ notifications: req.user.notifications });
 });
 
 app.post('/api/daily-claim', authMiddleware, async (req, res) => {
@@ -1252,6 +1495,8 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
   const userId = socket.user.id;
   activeSessions.set(userId, socket.id);
+  // Initial notification sync on connect.
+  socket.emit('notify:list', { notifications: (socket.user.notifications || []).slice(0, 30) });
 
   for (const match of matches.values()) {
     if (match.playerIds.includes(userId)) {

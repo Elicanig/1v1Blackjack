@@ -182,6 +182,48 @@ body {
   gap: var(--space-1);
 }
 
+.notif-wrap {
+  position: relative;
+}
+
+.notif-badge {
+  margin-left: 6px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 0.72rem;
+  background: var(--gold);
+  color: #1a140a;
+}
+
+.notif-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: min(340px, 90vw);
+  z-index: 20;
+  padding: 10px;
+}
+
+.notif-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.notif-item {
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(225, 235, 223, 0.12);
+  background: rgba(13, 25, 21, 0.72);
+  margin-bottom: 6px;
+  display: grid;
+  gap: 6px;
+}
+
 button,
 input,
 textarea {
@@ -723,6 +765,26 @@ select {
 .modal-panel {
   width: min(460px, 100%);
   padding: var(--space-3);
+}
+
+.toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 30;
+  display: grid;
+  gap: 8px;
+}
+
+.toast-item {
+  min-width: 220px;
+  max-width: 340px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(225, 235, 223, 0.16);
+  background: rgba(12, 22, 18, 0.9);
+  box-shadow: var(--shadow-sm);
+  color: var(--text-strong);
 }
 
 @media (max-width: 900px) {

@@ -2,6 +2,22 @@ import { formatHandTotalLine } from './match-view-model.js';
 const app = document.getElementById('app');
 let spotlightInitialized = false;
 let hoverGlowInitialized = false;
+const PERMISSION_ERROR_PATTERNS = [
+  /not allowed by the user agent/i,
+  /not allowed by the platform/i,
+  /permission denied/i,
+  /the request is not allowed/i
+];
+
+function initialViewFromPath() {
+  const pathname = window.location.pathname.toLowerCase();
+  if (pathname === '/profile') return 'profile';
+  if (pathname === '/friends') return 'friends';
+  if (pathname === '/lobbies' || pathname === '/lobby') return 'lobby';
+  if (pathname === '/challenges') return 'challenges';
+  if (pathname === '/match') return 'match';
+  return 'home';
+}
 
 function initCursorSpotlight() {
   if (spotlightInitialized) return;
@@ -140,15 +156,24 @@ const state = {
   token: localStorage.getItem('bb_token') || null,
   me: null,
   friends: [],
+  incomingRequests: [],
+  outgoingRequests: [],
+  notifications: [],
+  notificationsOpen: false,
+  toasts: [],
   challenges: [],
-  view: 'home',
+  view: initialViewFromPath(),
   socket: null,
   status: '',
   error: '',
   currentLobby: null,
   currentMatch: null,
   pendingFriendInviteCode: new URLSearchParams(window.location.search).get('friendInvite'),
-  pendingLobbyCode: new URLSearchParams(window.location.search).get('joinLobby'),
+  pendingLobbyCode:
+    new URLSearchParams(window.location.search).get('code') ||
+    new URLSearchParams(window.location.search).get('joinLobby'),
+  lobbyJoinInput: '',
+  lastRenderedView: '',
   freeClaimed: false,
   freeClaimedAt: null,
   currentBet: 5,
@@ -161,8 +186,30 @@ function setStatus(message = '') {
   render();
 }
 
+function pushToast(message, type = 'info') {
+  const toast = { id: Math.random().toString(36).slice(2), message, type };
+  state.toasts = [...state.toasts, toast].slice(-3);
+  render();
+  setTimeout(() => {
+    state.toasts = state.toasts.filter((t) => t.id !== toast.id);
+    render();
+  }, 2800);
+}
+
+function normalizeAppError(message) {
+  const text = String(message || '').trim();
+  if (!text) return '';
+  if (PERMISSION_ERROR_PATTERNS.some((pattern) => pattern.test(text))) return '';
+  return text;
+}
+
 function setError(message = '') {
-  state.error = message;
+  const safeMessage = normalizeAppError(message);
+  if (!safeMessage) {
+    if (message) console.warn('Suppressed browser/platform exception:', message);
+    return;
+  }
+  state.error = safeMessage;
   state.status = '';
   render();
 }
@@ -180,13 +227,47 @@ function api(path, options = {}) {
   });
 }
 
+async function safeCopy(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fallback below
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function connectSocket() {
   if (!state.token) return;
   if (state.socket) state.socket.disconnect();
 
   state.socket = io({ auth: { token: state.token } });
 
-  state.socket.on('connect_error', (e) => setError(e.message));
+  state.socket.on('connect_error', (e) => setError(e?.message || 'Connection error'));
+  state.socket.on('notify:list', ({ notifications }) => {
+    state.notifications = notifications || [];
+    render();
+  });
+  state.socket.on('notify:new', (notification) => {
+    state.notifications = [notification, ...state.notifications].slice(0, 60);
+    pushToast(notification.message, notification.type);
+  });
   state.socket.on('lobby:update', (lobby) => {
     state.currentLobby = lobby;
     render();
@@ -201,7 +282,7 @@ function connectSocket() {
         emitSetBaseBet(preferred);
       }
     }
-    state.view = 'match';
+    goToView('match');
     render();
   });
   state.socket.on('match:error', ({ error }) => setError(error));
@@ -209,7 +290,7 @@ function connectSocket() {
     setStatus(reason);
     state.currentMatch = null;
     state.currentLobby = null;
-    state.view = 'home';
+    goToView('home');
     loadMe();
   });
 }
@@ -220,6 +301,9 @@ async function loadMe() {
     const data = await api('/api/me');
     state.me = data.user;
     state.friends = data.friends || [];
+    state.incomingRequests = data.friendRequests?.incoming || [];
+    state.outgoingRequests = data.friendRequests?.outgoing || [];
+    state.notifications = data.notifications || [];
     state.challenges = data.challenges || [];
     state.freeClaimed = Boolean(data.freeClaimed || data.user?.hasClaimedFree100);
     state.freeClaimedAt = null;
@@ -236,9 +320,10 @@ async function loadMe() {
     }
 
     if (state.pendingLobbyCode) {
-      await joinLobby(state.pendingLobbyCode);
-      state.pendingLobbyCode = null;
+      state.lobbyJoinInput = String(state.pendingLobbyCode).trim();
+      goToView('lobby');
       clearQuery();
+      state.pendingLobbyCode = null;
     }
 
     render();
@@ -247,6 +332,9 @@ async function loadMe() {
     state.token = null;
     state.me = null;
     state.friends = [];
+    state.incomingRequests = [];
+    state.outgoingRequests = [];
+    state.notifications = [];
     state.challenges = [];
     state.freeClaimed = false;
     state.freeClaimedAt = null;
@@ -255,7 +343,23 @@ async function loadMe() {
 }
 
 function clearQuery() {
-  history.replaceState({}, '', '/');
+  history.replaceState({}, '', window.location.pathname);
+}
+
+function goToView(view) {
+  state.view = view;
+  const routes = {
+    home: '/',
+    profile: '/profile',
+    friends: '/friends',
+    lobby: '/lobbies',
+    challenges: '/challenges',
+    match: '/match'
+  };
+  const next = routes[view] || '/';
+  if (window.location.pathname !== next) {
+    history.replaceState({}, '', next);
+  }
 }
 
 function handCanSplit(hand) {
@@ -357,12 +461,14 @@ async function saveProfile(form) {
 async function addFriend(form) {
   const username = form.querySelector('[name="friend_username"]').value.trim();
   try {
-    const data = await api('/api/friends/add', {
+    const data = await api('/api/friends/request', {
       method: 'POST',
       body: JSON.stringify({ username })
     });
     state.friends = data.friends;
-    setStatus('Friend added.');
+    state.incomingRequests = data.incoming || [];
+    state.outgoingRequests = data.outgoing || [];
+    pushToast('Friend request sent.');
   } catch (e) {
     setError(e.message);
   }
@@ -371,8 +477,10 @@ async function addFriend(form) {
 async function createFriendInvite() {
   try {
     const data = await api('/api/friends/invite-link', { method: 'POST' });
-    await navigator.clipboard.writeText(data.link);
-    setStatus(`Friend invite link copied: ${data.link}`);
+    const ok = await safeCopy(data.link);
+    if (ok) pushToast('Friend invite link copied.');
+    else pushToast("Couldn't copy — select and copy manually.");
+    setStatus(data.link);
   } catch (e) {
     setError(e.message);
   }
@@ -395,9 +503,8 @@ async function createLobby() {
   try {
     const data = await api('/api/lobbies/create', { method: 'POST' });
     state.currentLobby = data.lobby;
-    state.view = 'lobby';
-    setStatus('Private lobby created. Link copied.');
-    await navigator.clipboard.writeText(data.link);
+    goToView('lobby');
+    setStatus(`Lobby ready: ${data.lobby.id}`);
     state.socket?.emit('lobby:watch', data.lobby.id);
     render();
   } catch (e) {
@@ -407,16 +514,100 @@ async function createLobby() {
 
 async function joinLobby(lobbyIdInput) {
   try {
+    const code = String(lobbyIdInput || '').trim().toUpperCase();
+    if (!code) return setError('Enter a lobby code.');
     const data = await api('/api/lobbies/join', {
       method: 'POST',
-      body: JSON.stringify({ lobbyId: lobbyIdInput })
+      body: JSON.stringify({ lobbyId: code })
     });
     state.currentLobby = data.lobby;
-    state.view = data.matchId ? 'match' : 'lobby';
+    goToView(data.matchId ? 'match' : 'lobby');
+    state.lobbyJoinInput = code;
     state.socket?.emit('lobby:watch', data.lobby.id);
     if (!data.matchId) setStatus('Joined lobby. Waiting for match...');
   } catch (e) {
     setError(e.message);
+  }
+}
+
+async function loadFriendsData() {
+  try {
+    const data = await api('/api/friends/list');
+    state.friends = data.friends || [];
+    state.incomingRequests = data.incoming || [];
+    state.outgoingRequests = data.outgoing || [];
+    render();
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+async function acceptRequest(requestId) {
+  try {
+    const data = await api('/api/friends/accept', {
+      method: 'POST',
+      body: JSON.stringify({ requestId })
+    });
+    state.friends = data.friends || [];
+    state.incomingRequests = data.incoming || [];
+    state.outgoingRequests = data.outgoing || [];
+    pushToast('Friend request accepted.');
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+async function declineRequest(requestId) {
+  try {
+    const data = await api('/api/friends/decline', {
+      method: 'POST',
+      body: JSON.stringify({ requestId })
+    });
+    state.friends = data.friends || [];
+    state.incomingRequests = data.incoming || [];
+    state.outgoingRequests = data.outgoing || [];
+    pushToast('Friend request declined.');
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+async function inviteFriendToLobby(username) {
+  try {
+    const data = await api('/api/lobbies/invite', {
+      method: 'POST',
+      body: JSON.stringify({ username })
+    });
+    state.currentLobby = data.lobby;
+    goToView('lobby');
+    state.socket?.emit('lobby:watch', data.lobby.id);
+    pushToast(`Invite sent to ${username}.`);
+    render();
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+function unreadCount() {
+  return (state.notifications || []).filter((n) => !n.read).length;
+}
+
+async function clearNotifications() {
+  try {
+    const data = await api('/api/notifications/clear', { method: 'POST' });
+    state.notifications = data.notifications || [];
+    render();
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+function runNotificationAction(notification) {
+  const action = notification?.action;
+  if (!action) return;
+  if (action.kind === 'join_lobby') {
+    const code = action.data?.lobbyCode;
+    if (code) joinLobby(code);
   }
 }
 
@@ -429,7 +620,7 @@ async function startBotMatch(difficulty) {
     });
     state.currentLobby = null;
     state.currentMatch = data.match;
-    state.view = 'match';
+    goToView('match');
     setStatus(`Practice match started vs ${difficulty} bot.`);
   } catch (e) {
     setError(e.message);
@@ -481,6 +672,73 @@ function logout() {
   state.currentLobby = null;
   localStorage.removeItem('bb_token');
   render();
+}
+
+function renderNotificationBell() {
+  const unread = unreadCount();
+  return `
+    <div class="notif-wrap">
+      <button id="notifBell" class="ghost">Notifications ${unread > 0 ? `<span class="notif-badge">${unread}</span>` : ''}</button>
+      ${
+        state.notificationsOpen
+          ? `<div class="notif-panel card">
+              <div class="notif-head">
+                <strong>Notifications</strong>
+                <button id="clearNotifBtn" class="ghost">Clear</button>
+              </div>
+              ${
+                state.notifications.length
+                  ? state.notifications
+                      .map(
+                        (n) => `
+                    <div class="notif-item">
+                      <div>${n.message}</div>
+                      ${
+                        n.action
+                          ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>`
+                          : ''
+                      }
+                    </div>
+                  `
+                      )
+                      .join('')
+                  : '<div class="muted">No notifications yet.</div>'
+              }
+            </div>`
+          : ''
+      }
+    </div>
+  `;
+}
+
+function bindNotificationUI() {
+  const bell = document.getElementById('notifBell');
+  if (bell) {
+    bell.onclick = () => {
+      state.notificationsOpen = !state.notificationsOpen;
+      render();
+    };
+  }
+  const clearBtn = document.getElementById('clearNotifBtn');
+  if (clearBtn) clearBtn.onclick = clearNotifications;
+  app.querySelectorAll('[data-notif-action]').forEach((btn) => {
+    btn.onclick = () => {
+      const notif = state.notifications.find((n) => n.id === btn.dataset.notifAction);
+      runNotificationAction(notif);
+      state.notificationsOpen = false;
+    };
+  });
+}
+
+function syncToasts() {
+  let wrap = document.getElementById('toastStack');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = 'toastStack';
+    wrap.className = 'toast-stack';
+    document.body.appendChild(wrap);
+  }
+  wrap.innerHTML = state.toasts.map((t) => `<div class="toast-item">${t.message}</div>`).join('');
 }
 
 function renderAuth() {
@@ -536,6 +794,7 @@ function renderHome() {
         <button data-go="friends" class="${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
         <button data-go="lobby" class="${state.view === 'lobby' ? 'nav-active' : ''}">Lobbies</button>
         <button data-go="challenges" class="${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
+        ${renderNotificationBell()}
         <button class="warn" id="logoutBtn">Logout</button>
       </div>
     </div>
@@ -581,7 +840,8 @@ function renderHome() {
 
   app.querySelectorAll('[data-go]').forEach((btn) => {
     btn.onclick = () => {
-      state.view = btn.dataset.go;
+      goToView(btn.dataset.go);
+      if (state.view === 'friends') loadFriendsData();
       render();
     };
   });
@@ -589,7 +849,7 @@ function renderHome() {
   document.getElementById('logoutBtn').onclick = logout;
   document.getElementById('createLobbyBtn').onclick = createLobby;
   document.getElementById('quickPlayBtn').onclick = () => {
-    state.view = 'friends';
+    goToView('friends');
     render();
   };
   app.querySelectorAll('[data-bot]').forEach((btn) => {
@@ -605,7 +865,7 @@ function renderProfile() {
   app.innerHTML = `
     <div class="card topbar">
       <div class="logo">Profile</div>
-      <div class="nav"><button id="backHome">Back</button></div>
+      <div class="nav"><button id="backHome">Back</button>${renderNotificationBell()}</div>
     </div>
 
     <div class="card section">
@@ -633,7 +893,7 @@ function renderProfile() {
   `;
 
   document.getElementById('backHome').onclick = () => {
-    state.view = 'home';
+    goToView('home');
     render();
   };
   document.getElementById('profileForm').onsubmit = (e) => {
@@ -646,17 +906,35 @@ function renderFriends() {
   app.innerHTML = `
     <div class="card topbar">
       <div class="logo">Friends</div>
-      <div class="nav"><button id="backHome">Back</button></div>
+      <div class="nav"><button id="backHome">Back</button>${renderNotificationBell()}</div>
     </div>
 
     <div class="row">
       <div class="col card section">
-        <h3>Add Friend by Username</h3>
+        <h3>Send Friend Request</h3>
         <form id="friendForm" class="row">
           <input name="friend_username" placeholder="Friend username" />
-          <button class="primary" type="submit">Add</button>
+          <button class="primary" type="submit">Request</button>
         </form>
         <button id="inviteLinkBtn" style="margin-top:0.7rem">Generate Friend Invite Link</button>
+        <h3 style="margin-top:1rem">Incoming Requests</h3>
+        ${
+          state.incomingRequests.length
+            ? state.incomingRequests
+                .map(
+                  (r) => `
+            <div class="friend">
+              <div><strong>${r.username}</strong></div>
+              <div class="row">
+                <button class="primary" data-accept="${r.id}">Accept</button>
+                <button class="warn" data-decline="${r.id}">Decline</button>
+              </div>
+            </div>
+          `
+                )
+                .join('')
+            : '<p class="muted">No incoming requests.</p>'
+        }
       </div>
       <div class="col card section">
         <h3>Friend List</h3>
@@ -667,13 +945,21 @@ function renderFriends() {
           <div class="friend">
             <div>
               <strong>${f.username}</strong>
-              <div class="muted">${f.chips} chips</div>
+              <div class="muted">${f.online ? 'Online' : 'Offline'} • ${f.chips} chips</div>
             </div>
-            <button data-invite="${f.id}">Invite to Lobby</button>
+            <button data-invite="${f.username}">Invite</button>
           </div>
         `
           )
           .join('')}
+        <h3 style="margin-top:1rem">Outgoing Pending</h3>
+        ${
+          state.outgoingRequests.length
+            ? state.outgoingRequests
+                .map((r) => `<div class="friend"><div><strong>${r.username}</strong></div><span class="muted">Pending…</span></div>`)
+                .join('')
+            : '<p class="muted">No pending requests.</p>'
+        }
       </div>
     </div>
 
@@ -682,7 +968,7 @@ function renderFriends() {
   `;
 
   document.getElementById('backHome').onclick = () => {
-    state.view = 'home';
+    goToView('home');
     render();
   };
 
@@ -692,24 +978,36 @@ function renderFriends() {
   };
 
   document.getElementById('inviteLinkBtn').onclick = createFriendInvite;
+  app.querySelectorAll('[data-accept]').forEach((btn) => {
+    btn.onclick = () => acceptRequest(btn.dataset.accept);
+  });
+  app.querySelectorAll('[data-decline]').forEach((btn) => {
+    btn.onclick = () => declineRequest(btn.dataset.decline);
+  });
   app.querySelectorAll('[data-invite]').forEach((btn) => {
-    btn.onclick = () => createLobby();
+    btn.onclick = () => inviteFriendToLobby(btn.dataset.invite);
   });
 }
 
 function renderLobby() {
   const lobby = state.currentLobby;
+  const hasPrefilledCode = Boolean((state.lobbyJoinInput || '').trim());
   app.innerHTML = `
     <div class="card topbar">
-      <div class="logo">Lobby</div>
-      <div class="nav"><button id="backHome">Back</button></div>
+      <div class="logo">Lobbies</div>
+      <div class="nav"><button id="backHome">Back</button>${renderNotificationBell()}</div>
     </div>
 
     <div class="card section">
-      ${
-        !lobby
-          ? '<p class="muted">No lobby active.</p>'
-          : `
+      <h3>Create Lobby</h3>
+      <p class="muted">Create only when you want to host a private 1v1 room.</p>
+      <button class="primary" id="createLobbyBtn">Create Private Lobby</button>
+    </div>
+
+    ${
+      lobby
+        ? `
+      <div class="card section" style="margin-top:1rem">
         <div class="lobby">
           <div>
             <div><strong>Code:</strong> ${lobby.id}</div>
@@ -719,15 +1017,16 @@ function renderLobby() {
           <button id="copyLobbyCode">Copy Join Code</button>
         </div>
         <p class="muted">Share this lobby code with one friend. Match starts when both players are connected.</p>
-      `
-      }
-    </div>
+      </div>`
+        : ''
+    }
 
     <div class="card section" style="margin-top:1rem">
       <h3>Join Existing Lobby</h3>
+      <p class="muted">Enter a lobby code to join. This does not create a lobby.</p>
       <form id="joinLobbyForm" class="row">
-        <input name="lobby_id" placeholder="Lobby code" />
-        <button class="primary" type="submit">Join</button>
+        <input name="lobby_id" placeholder="Lobby code" value="${state.lobbyJoinInput || ''}" />
+        <button class="primary" type="submit">${hasPrefilledCode ? 'Join Lobby' : 'Join'}</button>
       </form>
     </div>
 
@@ -736,22 +1035,27 @@ function renderLobby() {
   `;
 
   document.getElementById('backHome').onclick = () => {
-    state.view = 'home';
+    goToView('home');
     render();
   };
+  const createBtn = document.getElementById('createLobbyBtn');
+  if (createBtn) createBtn.onclick = createLobby;
 
   document.getElementById('joinLobbyForm').onsubmit = (e) => {
     e.preventDefault();
-    const code = e.currentTarget.querySelector('[name="lobby_id"]').value.trim();
+    const code = e.currentTarget.querySelector('[name="lobby_id"]').value.trim().toUpperCase();
+    state.lobbyJoinInput = code;
     if (code) joinLobby(code);
   };
 
   const copyBtn = document.getElementById('copyLobbyCode');
   if (copyBtn && lobby) {
     copyBtn.onclick = async () => {
-      const link = `${window.location.origin}/?joinLobby=${lobby.id}`;
-      await navigator.clipboard.writeText(link);
-      setStatus(`Lobby link copied: ${link}`);
+      const link = `${window.location.origin}/lobbies?code=${lobby.id}`;
+      const ok = await safeCopy(link);
+      if (ok) pushToast('Lobby link copied.');
+      else pushToast("Couldn't copy — select and copy manually.");
+      setStatus(link);
     };
   }
 }
@@ -760,7 +1064,7 @@ function renderChallenges() {
   app.innerHTML = `
     <div class="card topbar">
       <div class="logo">Challenges</div>
-      <div class="nav"><button id="backHome">Back</button></div>
+      <div class="nav"><button id="backHome">Back</button>${renderNotificationBell()}</div>
     </div>
 
     <div class="card section">
@@ -786,7 +1090,7 @@ function renderChallenges() {
   `;
 
   document.getElementById('backHome').onclick = () => {
-    state.view = 'home';
+    goToView('home');
     render();
   };
 
@@ -843,7 +1147,7 @@ function renderMatch() {
   const match = state.currentMatch;
   const me = state.me;
   if (!match) {
-    state.view = 'home';
+    goToView('home');
     return render();
   }
 
@@ -884,6 +1188,7 @@ function renderMatch() {
       <div class="logo">Blackjack Battle</div>
       <div class="nav">
         <button id="backHome">Home</button>
+        ${renderNotificationBell()}
       </div>
     </div>
 
@@ -1000,7 +1305,7 @@ function renderMatch() {
   `;
 
   document.getElementById('backHome').onclick = () => {
-    state.view = 'home';
+    goToView('home');
     render();
   };
 
@@ -1025,6 +1330,8 @@ function renderMatch() {
 }
 
 function render() {
+  const enteringFriends = state.lastRenderedView !== 'friends' && state.view === 'friends';
+  state.lastRenderedView = state.view;
   app.dataset.view = state.view;
   if (!state.token || !state.me) {
     renderAuth();
@@ -1044,9 +1351,16 @@ function render() {
     }
   }
   applyGlowFollowClasses();
+  bindNotificationUI();
+  syncToasts();
+  if (enteringFriends && state.token) loadFriendsData();
 }
 
 (async function init() {
+  window.addEventListener('popstate', () => {
+    state.view = initialViewFromPath();
+    render();
+  });
   initCursorSpotlight();
   useHoverGlow();
   render();
