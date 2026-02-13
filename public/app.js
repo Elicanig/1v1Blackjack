@@ -2,6 +2,7 @@ import { formatHandTotalLine } from './match-view-model.js';
 const app = document.getElementById('app');
 let spotlightInitialized = false;
 let hoverGlowInitialized = false;
+let inviteCountdownTicker = null;
 const PERMISSION_ERROR_PATTERNS = [
   /not allowed by the user agent/i,
   /not allowed by the platform/i,
@@ -84,9 +85,10 @@ function useHoverGlow() {
   const onOver = (e) => {
     const el = e.target.closest?.('.glow-follow');
     if (el) {
+      if (el.classList.contains('is-hovering')) return;
       el.classList.add('is-hovering');
       const r = el.getBoundingClientRect();
-      queue(el, r.width / 2, r.height / 2, r.width, r.height);
+      queue(el, e.clientX - r.left, e.clientY - r.top, r.width, r.height);
     }
   };
 
@@ -152,6 +154,7 @@ const state = {
   freeClaimRemainingMs: 0,
   showMorePatchNotes: false,
   friendInvite: null,
+  friendInviteRemainingMs: 0,
   lastRoundResultKey: '',
   roundResultModal: null,
   currentBet: 5,
@@ -197,6 +200,39 @@ function pushToast(message, type = 'info') {
     state.toasts = state.toasts.filter((t) => t.id !== toast.id);
     render();
   }, 2500);
+}
+
+function inviteRemainingMs() {
+  if (!state.friendInvite?.expiresAt) return 0;
+  const expiresAt = new Date(state.friendInvite.expiresAt).getTime();
+  return Math.max(0, expiresAt - Date.now());
+}
+
+function formatInviteCountdown(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function syncInviteCountdownUI() {
+  const label = document.getElementById('inviteCountdown');
+  const copyBtn = document.getElementById('copyInviteLinkBtn');
+  if (!label) return;
+  state.friendInviteRemainingMs = inviteRemainingMs();
+  const expired = state.friendInviteRemainingMs <= 0;
+  label.textContent = expired ? 'Expired' : `Expires in ${formatInviteCountdown(state.friendInviteRemainingMs)}`;
+  if (copyBtn) copyBtn.disabled = expired;
+}
+
+function syncFreeClaimUI() {
+  const label = document.getElementById('freeClaimCountdown');
+  const btn = document.getElementById('claimFreeBtn');
+  if (!label || !btn) return;
+  const onCooldown = state.freeClaimRemainingMs > 0;
+  label.textContent = onCooldown ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now';
+  btn.disabled = onCooldown;
+  btn.textContent = onCooldown ? 'On cooldown' : 'Claim +100';
 }
 
 async function loadPatchNotes() {
@@ -582,6 +618,7 @@ async function createFriendInvite(regenerate = false) {
       token: data.token,
       expiresAt: data.expiresAt
     };
+    state.friendInviteRemainingMs = inviteRemainingMs();
     const ok = await safeCopy(data.inviteUrl);
     if (ok) pushToast(regenerate ? 'Invite link regenerated and copied.' : 'Friend invite link copied.');
     else pushToast("Couldn't copy — select and copy manually.");
@@ -928,7 +965,7 @@ function renderTopbar(title = 'Blackjack Battle') {
   return `
     <div class="card topbar">
       <div class="topbar-left">
-        <div class="logo" id="topLogo" tabindex="0">${title}</div>
+        <div class="logo" id="topLogo" tabindex="0"><span>${title}</span></div>
         <div class="chip-balance"><span class="chip-icon">◎</span>${chipText}</div>
       </div>
       <div class="topbar-center tabs">
@@ -1064,7 +1101,7 @@ function renderHome() {
         <div class="free-claim-card">
           <div>
             <strong>Free 100 Chips</strong>
-            <div class="muted">${state.freeClaimRemainingMs > 0 ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now'}</div>
+            <div class="muted" id="freeClaimCountdown">${state.freeClaimRemainingMs > 0 ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now'}</div>
           </div>
           <button class="gold" id="claimFreeBtn" ${state.freeClaimRemainingMs > 0 ? 'disabled' : ''}>${state.freeClaimRemainingMs > 0 ? 'On cooldown' : 'Claim +100'}</button>
         </div>
@@ -1137,6 +1174,7 @@ function renderHome() {
 
   const claimBtn = document.getElementById('claimFreeBtn');
   if (claimBtn) claimBtn.onclick = claimFree100;
+  syncFreeClaimUI();
 }
 
 function renderProfile() {
@@ -1214,6 +1252,8 @@ function renderProfile() {
 }
 
 function renderFriends() {
+  const inviteRemaining = state.friendInvite ? inviteRemainingMs() : 0;
+  const inviteExpired = inviteRemaining <= 0;
   app.innerHTML = `
     ${renderTopbar('Friends')}
     <main class="view-stack">
@@ -1234,8 +1274,9 @@ function renderFriends() {
               ? `<div class="grid" style="margin-top:0.55rem">
                   <input value="${state.friendInvite.url}" readonly />
                   <div class="row">
-                    <button id="copyInviteLinkBtn" class="ghost" type="button">Copy</button>
-                    <span class="muted">Expires ${new Date(state.friendInvite.expiresAt).toLocaleString()}</span>
+                    <button id="copyInviteLinkBtn" class="ghost" type="button" ${inviteExpired ? 'disabled' : ''}>Copy</button>
+                    <span class="muted" id="inviteCountdown">${inviteExpired ? 'Expired' : `Expires in ${formatInviteCountdown(inviteRemaining)}`}</span>
+                    <span class="muted">(${new Date(state.friendInvite.expiresAt).toLocaleTimeString()})</span>
                   </div>
                 </div>`
               : ''
@@ -1309,10 +1350,15 @@ function renderFriends() {
   const copyInviteBtn = document.getElementById('copyInviteLinkBtn');
   if (copyInviteBtn) {
     copyInviteBtn.onclick = async () => {
+      if (inviteRemainingMs() <= 0) {
+        pushToast('Invite expired. Regenerate to get a new link.');
+        return;
+      }
       const ok = await safeCopy(state.friendInvite?.url || '');
       pushToast(ok ? 'Invite link copied.' : "Couldn't copy — please select and copy manually.");
     };
   }
+  syncInviteCountdownUI();
   app.querySelectorAll('[data-accept]').forEach((btn) => {
     btn.onclick = () => acceptRequest(btn.dataset.accept);
   });
@@ -1779,9 +1825,15 @@ function render() {
   if (!freeClaimTicker) {
     freeClaimTicker = setInterval(() => {
       if (!state.token || !state.me || !state.freeClaimNextAt) return;
-      const prev = state.freeClaimRemainingMs;
       updateFreeClaimCountdown();
-      if (state.view === 'home' && prev !== state.freeClaimRemainingMs) render();
+      if (state.view === 'home') syncFreeClaimUI();
+    }, 1000);
+  }
+  if (!inviteCountdownTicker) {
+    inviteCountdownTicker = setInterval(() => {
+      if (!state.friendInvite) return;
+      if (state.view === 'friends') syncInviteCountdownUI();
+      else state.friendInviteRemainingMs = inviteRemainingMs();
     }, 1000);
   }
   render();

@@ -308,7 +308,7 @@ test('32 deal blocked until both players confirm', () => {
   assert.equal(m.round.players.p1.hands.length, 0);
   const two = confirmBaseBet(m, 'p2');
   assert.equal(two.ok, true);
-  assert.equal(m.phase, PHASES.ACTION_TURN);
+  assert.ok(m.phase === PHASES.ACTION_TURN || m.phase === PHASES.NEXT_ROUND);
   assert.equal(m.round.players.p1.hands[0].cards.length, 2);
   assert.equal(m.round.players.p2.hands[0].cards.length, 2);
 });

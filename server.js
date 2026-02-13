@@ -34,7 +34,7 @@ const BOT_BET_CONFIRM_MIN_MS = 200;
 const BOT_BET_CONFIRM_MAX_MS = 600;
 const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
 const PATCH_REPO = 'Elicanig/1v1Blackjack';
-const FRIEND_INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+const FRIEND_INVITE_TTL_MS = 30 * 60 * 1000;
 const EMOTE_COOLDOWN_MS = 2000;
 
 const configuredDataDir = process.env.DATA_DIR || '/var/data';
