@@ -13,58 +13,26 @@ function initialViewFromPath() {
   const pathname = window.location.pathname.toLowerCase();
   if (pathname === '/profile') return 'profile';
   if (pathname === '/friends') return 'friends';
-  if (pathname === '/lobbies' || pathname === '/lobby') return 'lobby';
+  if (pathname === '/lobbies' || pathname === '/lobby') return 'lobbies';
   if (pathname === '/challenges') return 'challenges';
+  if (pathname === '/notifications') return 'notifications';
   if (pathname === '/match') return 'match';
   return 'home';
+}
+
+function joinCodeFromLocation() {
+  const fromQuery = new URLSearchParams(window.location.search).get('code') || new URLSearchParams(window.location.search).get('joinLobby');
+  if (fromQuery) return fromQuery;
+  const hash = window.location.hash || '';
+  const qIdx = hash.indexOf('?');
+  if (qIdx === -1) return '';
+  const query = hash.slice(qIdx + 1);
+  return new URLSearchParams(query).get('code') || '';
 }
 
 function initCursorSpotlight() {
   if (spotlightInitialized) return;
   spotlightInitialized = true;
-
-  const root = document.documentElement;
-  const media = window.matchMedia('(prefers-reduced-motion: reduce)');
-  let raf = null;
-  let px = window.innerWidth / 2;
-  let py = window.innerHeight / 2;
-  let enabled = !media.matches;
-
-  const apply = () => {
-    raf = null;
-    if (!enabled) return;
-    root.style.setProperty('--mx', `${px}px`);
-    root.style.setProperty('--my', `${py}px`);
-    root.style.setProperty('--spotlight-alpha', '0.42');
-  };
-
-  const onMove = (e) => {
-    if (!enabled) return;
-    px = e.clientX;
-    py = e.clientY;
-    if (!raf) raf = requestAnimationFrame(apply);
-  };
-
-  const onLeave = () => {
-    root.style.setProperty('--spotlight-alpha', '0');
-  };
-
-  const onEnter = () => {
-    if (!enabled) return;
-    root.style.setProperty('--spotlight-alpha', '0.42');
-  };
-
-  const onPrefChange = () => {
-    enabled = !media.matches;
-    if (!enabled) {
-      root.style.setProperty('--spotlight-alpha', '0');
-    }
-  };
-
-  window.addEventListener('pointermove', onMove, { passive: true });
-  window.addEventListener('pointerleave', onLeave, { passive: true });
-  window.addEventListener('pointerenter', onEnter, { passive: true });
-  media.addEventListener('change', onPrefChange);
 }
 
 function useHoverGlow() {
@@ -139,10 +107,10 @@ function useHoverGlow() {
     if (reduced) onWindowLeave();
   };
 
-  document.addEventListener('pointermove', onMove, { passive: true });
-  document.addEventListener('pointerover', onOver, { passive: true });
-  document.addEventListener('pointerout', onOut, { passive: true });
-  window.addEventListener('pointerleave', onWindowLeave, { passive: true });
+  app.addEventListener('pointermove', onMove, { passive: true });
+  app.addEventListener('pointerover', onOver, { passive: true });
+  app.addEventListener('pointerout', onOut, { passive: true });
+  app.addEventListener('pointerleave', onWindowLeave, { passive: true });
   media.addEventListener('change', onPrefChange);
 }
 
@@ -153,7 +121,9 @@ function applyGlowFollowClasses() {
 }
 
 const state = {
-  token: localStorage.getItem('bb_token') || null,
+  token: localStorage.getItem('bb_auth_token') || localStorage.getItem('bb_token') || null,
+  authUsername: localStorage.getItem('bb_auth_username') || '',
+  authNotice: '',
   me: null,
   friends: [],
   incomingRequests: [],
@@ -169,9 +139,7 @@ const state = {
   currentLobby: null,
   currentMatch: null,
   pendingFriendInviteCode: new URLSearchParams(window.location.search).get('friendInvite'),
-  pendingLobbyCode:
-    new URLSearchParams(window.location.search).get('code') ||
-    new URLSearchParams(window.location.search).get('joinLobby'),
+  pendingLobbyCode: joinCodeFromLocation(),
   lobbyJoinInput: '',
   lastRenderedView: '',
   freeClaimed: false,
@@ -208,6 +176,12 @@ function setError(message = '') {
   if (!safeMessage) {
     if (message) console.warn('Suppressed browser/platform exception:', message);
     return;
+  }
+  if (/invalid user|invalid token|invalid auth/i.test(safeMessage)) {
+    state.authNotice = 'Session expired, please login.';
+    state.error = '';
+    state.me = null;
+    return render();
   }
   state.error = safeMessage;
   state.status = '';
@@ -298,8 +272,14 @@ function connectSocket() {
 async function loadMe() {
   if (!state.token) return;
   try {
+    const auth = await api('/api/auth/me', { method: 'POST', body: JSON.stringify({ authToken: state.token }) });
+    if (!auth?.ok) throw new Error('Invalid auth');
     const data = await api('/api/me');
     state.me = data.user;
+    state.authUsername = data.user.username;
+    localStorage.setItem('bb_auth_token', state.token);
+    localStorage.setItem('bb_auth_username', state.authUsername);
+    localStorage.setItem('bb_token', state.token);
     state.friends = data.friends || [];
     state.incomingRequests = data.friendRequests?.incoming || [];
     state.outgoingRequests = data.friendRequests?.outgoing || [];
@@ -321,15 +301,19 @@ async function loadMe() {
 
     if (state.pendingLobbyCode) {
       state.lobbyJoinInput = String(state.pendingLobbyCode).trim();
-      goToView('lobby');
+      goToView('lobbies');
       clearQuery();
       state.pendingLobbyCode = null;
     }
 
     render();
   } catch (e) {
+    localStorage.removeItem('bb_auth_token');
+    localStorage.removeItem('bb_auth_username');
     localStorage.removeItem('bb_token');
     state.token = null;
+    state.authUsername = '';
+    state.authNotice = 'Session expired, please login.';
     state.me = null;
     state.friends = [];
     state.incomingRequests = [];
@@ -348,12 +332,14 @@ function clearQuery() {
 
 function goToView(view) {
   state.view = view;
+  state.error = '';
   const routes = {
     home: '/',
     profile: '/profile',
     friends: '/friends',
-    lobby: '/lobbies',
+    lobbies: '/lobbies',
     challenges: '/challenges',
+    notifications: '/notifications',
     match: '/match'
   };
   const next = routes[view] || '/';
@@ -426,30 +412,47 @@ function adjustBet(delta) {
 
 async function handleAuth(mode, form) {
   const username = form.querySelector('[name="username"]').value.trim();
-  const password = form.querySelector('[name="password"]').value;
-  if (!username || !password) return setError('Username and password required');
+  const authToken = form.querySelector('[name="auth_token"]')?.value.trim();
+  if (!username) return setError('Username required');
   try {
-    const data = await api(`/api/${mode}`, {
+    const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
+    const payload = mode === 'register' ? { username } : { username, authToken };
+    const data = await api(endpoint, {
       method: 'POST',
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify(payload)
     });
-    state.token = data.token;
-    localStorage.setItem('bb_token', data.token);
-    setStatus(mode === 'register' ? 'Account created.' : 'Logged in.');
+    state.token = data.authToken;
+    state.authUsername = username;
+    state.authNotice = '';
+    localStorage.setItem('bb_auth_token', data.authToken);
+    localStorage.setItem('bb_auth_username', username);
+    localStorage.setItem('bb_token', data.authToken);
+    if (mode === 'register') {
+      const copied = await safeCopy(data.authToken);
+      setStatus(copied ? 'Account created. Session token copied.' : `Account created. Session token: ${data.authToken}`);
+    } else {
+      setStatus('Logged in.');
+    }
     connectSocket();
     await loadMe();
   } catch (e) {
-    setError(e.message);
+    if (mode === 'login') {
+      state.authNotice = 'Login failed. Check username and session token.';
+      render();
+    } else {
+      setError(e.message);
+    }
   }
 }
 
 async function saveProfile(form) {
-  const avatar = form.querySelector('[name="avatar"]').value.trim();
+  const avatarStyle = form.querySelector('[name="avatar_style"]').value.trim();
+  const avatarSeed = form.querySelector('[name="avatar_seed"]').value.trim();
   const bio = form.querySelector('[name="bio"]').value.trim();
   try {
     const data = await api('/api/profile', {
       method: 'PUT',
-      body: JSON.stringify({ avatar, bio })
+      body: JSON.stringify({ avatarStyle, avatarSeed, bio })
     });
     state.me = data.user;
     setStatus('Profile saved.');
@@ -503,7 +506,7 @@ async function createLobby() {
   try {
     const data = await api('/api/lobbies/create', { method: 'POST' });
     state.currentLobby = data.lobby;
-    goToView('lobby');
+    goToView('lobbies');
     setStatus(`Lobby ready: ${data.lobby.id}`);
     state.socket?.emit('lobby:watch', data.lobby.id);
     render();
@@ -579,7 +582,7 @@ async function inviteFriendToLobby(username) {
       body: JSON.stringify({ username })
     });
     state.currentLobby = data.lobby;
-    goToView('lobby');
+    goToView('lobbies');
     state.socket?.emit('lobby:watch', data.lobby.id);
     pushToast(`Invite sent to ${username}.`);
     render();
@@ -671,6 +674,8 @@ function logout() {
   state.currentMatch = null;
   state.currentLobby = null;
   localStorage.removeItem('bb_token');
+  localStorage.removeItem('bb_auth_token');
+  localStorage.removeItem('bb_auth_username');
   render();
 }
 
@@ -741,6 +746,36 @@ function syncToasts() {
   wrap.innerHTML = state.toasts.map((t) => `<div class="toast-item">${t.message}</div>`).join('');
 }
 
+function renderTopbar(title = 'Blackjack Battle') {
+  return `
+    <div class="card topbar">
+      <div class="logo">${title}</div>
+      <div class="nav">
+        <button data-go="home" class="${state.view === 'home' ? 'nav-active' : ''}">Home</button>
+        <button data-go="profile" class="${state.view === 'profile' ? 'nav-active' : ''}">Profile</button>
+        <button data-go="friends" class="${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
+        <button data-go="lobbies" class="${state.view === 'lobbies' ? 'nav-active' : ''}">Lobbies</button>
+        <button data-go="challenges" class="${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
+        <button data-go="notifications" class="${state.view === 'notifications' ? 'nav-active' : ''}">Notifications</button>
+        ${renderNotificationBell()}
+        <button class="warn" id="logoutBtn">Logout</button>
+      </div>
+    </div>
+  `;
+}
+
+function bindShellNav() {
+  app.querySelectorAll('[data-go]').forEach((btn) => {
+    btn.onclick = () => {
+      goToView(btn.dataset.go);
+      if (state.view === 'friends') loadFriendsData();
+      render();
+    };
+  });
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (logoutBtn) logoutBtn.onclick = logout;
+}
+
 function renderAuth() {
   app.innerHTML = `
     <div class="card auth">
@@ -748,10 +783,10 @@ function renderAuth() {
       <p class="muted">1v1 real-time blackjack with poker-style pressure betting.</p>
       <div class="grid">
         <form id="loginForm" class="section card">
-          <h3>Login</h3>
+          <h3>Login With Session Token</h3>
           <div class="grid">
-            <input name="username" placeholder="Username" autocomplete="username" />
-            <input name="password" type="password" placeholder="Password" autocomplete="current-password" />
+            <input name="username" placeholder="Username" autocomplete="username" value="${state.authUsername || ''}" />
+            <input name="auth_token" placeholder="Session token (optional)" autocomplete="off" />
             <button class="primary" type="submit">Login</button>
           </div>
         </form>
@@ -759,11 +794,11 @@ function renderAuth() {
           <h3>Register</h3>
           <div class="grid">
             <input name="username" placeholder="Unique username" autocomplete="username" />
-            <input name="password" type="password" placeholder="Password" autocomplete="new-password" />
-            <button class="gold" type="submit">Create Account</button>
+            <button class="gold" type="submit">Create Account + Token</button>
           </div>
         </form>
       </div>
+      ${state.authNotice ? `<p class="muted">${state.authNotice}</p>` : ''}
       ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
       ${state.status ? `<p class="muted">${state.status}</p>` : ''}
     </div>
@@ -783,28 +818,15 @@ function renderHome() {
   const me = state.me;
 
   app.innerHTML = `
-    <div class="card topbar">
-      <div>
-        <div class="logo">Blackjack Battle</div>
-        <div class="muted">${me.username} • ${me.chips} chips</div>
-      </div>
-      <div class="nav">
-        <button data-go="home" class="${state.view === 'home' ? 'nav-active' : ''}">Home</button>
-        <button data-go="profile" class="${state.view === 'profile' ? 'nav-active' : ''}">Profile</button>
-        <button data-go="friends" class="${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
-        <button data-go="lobby" class="${state.view === 'lobby' ? 'nav-active' : ''}">Lobbies</button>
-        <button data-go="challenges" class="${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
-        ${renderNotificationBell()}
-        <button class="warn" id="logoutBtn">Logout</button>
-      </div>
-    </div>
+    ${renderTopbar('Blackjack Battle')}
+    <p class="muted">${me.username} • ${me.chips} chips</p>
 
     <div class="row">
       <div class="col card section reveal-panel glow-follow glow-follow--panel">
         <h2>Play</h2>
-        <p class="muted">Host a private 1v1 lobby or jump in using your friend link.</p>
+        <p class="muted">Open Lobbies to create or join private 1v1 games.</p>
         <div class="row">
-          <button class="primary" id="createLobbyBtn">Create Private Lobby</button>
+          <button class="primary" id="openLobbiesBtn">Lobbies</button>
           <button class="ghost" id="quickPlayBtn">Quick Play</button>
         </div>
         <div class="grid" style="margin-top:0.7rem">
@@ -823,6 +845,7 @@ function renderHome() {
           <div class="kpi"><div class="muted">Rounds Won</div><strong>${me.stats.roundsWon}</strong></div>
           <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon}</strong></div>
           <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost}</strong></div>
+          <div class="kpi"><div class="muted">Pushes</div><strong>${me.stats.pushes || me.stats.handsPush || 0}</strong></div>
         </div>
         <div class="free-claim-card">
           <div>
@@ -835,19 +858,14 @@ function renderHome() {
     </div>
 
     ${state.status ? `<p class="muted">${state.status}</p>` : ''}
-    ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
+    
   `;
 
-  app.querySelectorAll('[data-go]').forEach((btn) => {
-    btn.onclick = () => {
-      goToView(btn.dataset.go);
-      if (state.view === 'friends') loadFriendsData();
-      render();
-    };
-  });
-
-  document.getElementById('logoutBtn').onclick = logout;
-  document.getElementById('createLobbyBtn').onclick = createLobby;
+  bindShellNav();
+  document.getElementById('openLobbiesBtn').onclick = () => {
+    goToView('lobbies');
+    render();
+  };
   document.getElementById('quickPlayBtn').onclick = () => {
     goToView('friends');
     render();
@@ -862,11 +880,11 @@ function renderHome() {
 
 function renderProfile() {
   const me = state.me;
+  const preview = `https://api.dicebear.com/9.x/${encodeURIComponent(me.avatarStyle || 'adventurer')}/svg?seed=${encodeURIComponent(
+    me.avatarSeed || me.username
+  )}`;
   app.innerHTML = `
-    <div class="card topbar">
-      <div class="logo">Profile</div>
-      <div class="nav"><button id="backHome">Back</button>${renderNotificationBell()}</div>
-    </div>
+    ${renderTopbar('Profile')}
 
     <div class="card section">
       <form id="profileForm" class="grid">
@@ -876,8 +894,25 @@ function renderProfile() {
             <input value="${me.username}" disabled />
           </div>
           <div class="col">
-            <label>Avatar URL</label>
-            <input name="avatar" value="${me.avatar || ''}" />
+            <label>Avatar Style</label>
+            <select name="avatar_style">
+              ${['adventurer', 'pixel-art', 'bottts', 'fun-emoji']
+                .map((s) => `<option value="${s}" ${me.avatarStyle === s ? 'selected' : ''}>${s}</option>`)
+                .join('')}
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="col">
+            <label>Avatar Seed</label>
+            <input name="avatar_seed" value="${me.avatarSeed || me.username}" />
+          </div>
+          <div class="col">
+            <label>Preview</label>
+            <div style="display:flex;align-items:center;gap:10px">
+              <img src="${preview}" alt="avatar preview" style="width:44px;height:44px;border-radius:999px;border:1px solid rgba(255,255,255,0.15)" />
+              <span class="muted">Generated automatically</span>
+            </div>
           </div>
         </div>
         <div>
@@ -888,14 +923,9 @@ function renderProfile() {
       </form>
       <p class="muted">Chip balance: ${me.chips}</p>
       ${state.status ? `<p class="muted">${state.status}</p>` : ''}
-      ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
     </div>
   `;
-
-  document.getElementById('backHome').onclick = () => {
-    goToView('home');
-    render();
-  };
+  bindShellNav();
   document.getElementById('profileForm').onsubmit = (e) => {
     e.preventDefault();
     saveProfile(e.currentTarget);
@@ -904,10 +934,7 @@ function renderProfile() {
 
 function renderFriends() {
   app.innerHTML = `
-    <div class="card topbar">
-      <div class="logo">Friends</div>
-      <div class="nav"><button id="backHome">Back</button>${renderNotificationBell()}</div>
-    </div>
+    ${renderTopbar('Friends')}
 
     <div class="row">
       <div class="col card section">
@@ -964,13 +991,8 @@ function renderFriends() {
     </div>
 
     ${state.status ? `<p class="muted">${state.status}</p>` : ''}
-    ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
   `;
-
-  document.getElementById('backHome').onclick = () => {
-    goToView('home');
-    render();
-  };
+  bindShellNav();
 
   document.getElementById('friendForm').onsubmit = (e) => {
     e.preventDefault();
@@ -993,15 +1015,12 @@ function renderLobby() {
   const lobby = state.currentLobby;
   const hasPrefilledCode = Boolean((state.lobbyJoinInput || '').trim());
   app.innerHTML = `
-    <div class="card topbar">
-      <div class="logo">Lobbies</div>
-      <div class="nav"><button id="backHome">Back</button>${renderNotificationBell()}</div>
-    </div>
+    ${renderTopbar('Lobbies')}
 
     <div class="card section">
       <h3>Create Lobby</h3>
       <p class="muted">Create only when you want to host a private 1v1 room.</p>
-      <button class="primary" id="createLobbyBtn">Create Private Lobby</button>
+      <button class="primary" id="createLobbyBtn">Create Lobby</button>
     </div>
 
     ${
@@ -1034,10 +1053,7 @@ function renderLobby() {
     ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
   `;
 
-  document.getElementById('backHome').onclick = () => {
-    goToView('home');
-    render();
-  };
+  bindShellNav();
   const createBtn = document.getElementById('createLobbyBtn');
   if (createBtn) createBtn.onclick = createLobby;
 
@@ -1061,41 +1077,76 @@ function renderLobby() {
 }
 
 function renderChallenges() {
-  app.innerHTML = `
-    <div class="card topbar">
-      <div class="logo">Challenges</div>
-      <div class="nav"><button id="backHome">Back</button>${renderNotificationBell()}</div>
-    </div>
-
-    <div class="card section">
-      ${(state.challenges || [])
-        .map(
-          (c) => `
-        <div class="challenge">
-          <div>
-            <div><strong>${c.title}</strong></div>
-            <div class="muted">${c.progress}/${c.target} • Reward ${c.reward} chips</div>
+  const groups = state.challenges || { hourly: [], daily: [], weekly: [] };
+  const renderTier = (label, key) => `
+    <div class="card section" style="margin-top:1rem">
+      <h3>${label}</h3>
+      ${
+        (groups[key] || [])
+          .map(
+            (c) => `
+          <div class="challenge">
+            <div>
+              <div><strong>${c.title}</strong></div>
+              <div class="muted">${c.description}</div>
+              <div class="muted">${c.progress}/${c.goal} • Reward ${c.rewardChips} chips</div>
+            </div>
+            <button data-claim="${c.id}" ${c.claimed || c.progress < c.goal ? 'disabled' : ''}>${c.claimed ? 'Claimed' : 'Claim'}</button>
           </div>
-          <button data-claim="${c.id}" ${c.claimed || c.progress < c.target ? 'disabled' : ''}>${
-            c.claimed ? 'Claimed' : 'Claim'
-          }</button>
-        </div>
-      `
-        )
-        .join('')}
+        `
+          )
+          .join('') || '<p class="muted">No active challenges.</p>'
+      }
     </div>
+  `;
+  app.innerHTML = `
+    ${renderTopbar('Challenges')}
+
+    ${renderTier('Hourly Challenges', 'hourly')}
+    ${renderTier('Daily Challenges', 'daily')}
+    ${renderTier('Weekly Challenges', 'weekly')}
 
     ${state.status ? `<p class="muted">${state.status}</p>` : ''}
-    ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
   `;
-
-  document.getElementById('backHome').onclick = () => {
-    goToView('home');
-    render();
-  };
+  bindShellNav();
 
   app.querySelectorAll('[data-claim]').forEach((btn) => {
     btn.onclick = () => claimChallenge(btn.dataset.claim);
+  });
+}
+
+function renderNotifications() {
+  app.innerHTML = `
+    ${renderTopbar('Notifications')}
+    <div class="card section">
+      ${
+        state.notifications.length
+          ? state.notifications
+              .map(
+                (n) => `
+            <div class="notif-item">
+              <div>${n.message}</div>
+              <div class="muted">${new Date(n.createdAt).toLocaleString()}</div>
+              ${n.action ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>` : ''}
+            </div>
+          `
+              )
+              .join('')
+          : '<p class="muted">No notifications yet.</p>'
+      }
+      <div class="row" style="margin-top:0.8rem">
+        <button id="clearNotifViewBtn" class="ghost">Clear all</button>
+      </div>
+    </div>
+  `;
+  bindShellNav();
+  const clearBtn = document.getElementById('clearNotifViewBtn');
+  if (clearBtn) clearBtn.onclick = clearNotifications;
+  app.querySelectorAll('[data-notif-action]').forEach((btn) => {
+    btn.onclick = () => {
+      const notif = state.notifications.find((n) => n.id === btn.dataset.notifAction);
+      runNotificationAction(notif);
+    };
   });
 }
 
@@ -1184,13 +1235,7 @@ function renderMatch() {
       : 'Waiting for next turn.';
 
   app.innerHTML = `
-    <div class="card topbar">
-      <div class="logo">Blackjack Battle</div>
-      <div class="nav">
-        <button id="backHome">Home</button>
-        ${renderNotificationBell()}
-      </div>
-    </div>
+    ${renderTopbar('Blackjack Battle')}
 
     <div class="match table-layout card section reveal-panel">
       <div class="status-strip">
@@ -1300,14 +1345,9 @@ function renderMatch() {
       </div>
 
       ${state.status ? `<p class="muted">${state.status}</p>` : ''}
-      ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
     </div>
   `;
-
-  document.getElementById('backHome').onclick = () => {
-    goToView('home');
-    render();
-  };
+  bindShellNav();
 
   app.querySelectorAll('[data-action]').forEach((btn) => {
     btn.onclick = () => emitAction(btn.dataset.action);
@@ -1340,10 +1380,12 @@ function render() {
       renderProfile();
     } else if (state.view === 'friends') {
       renderFriends();
-    } else if (state.view === 'lobby') {
+    } else if (state.view === 'lobbies') {
       renderLobby();
     } else if (state.view === 'challenges') {
       renderChallenges();
+    } else if (state.view === 'notifications') {
+      renderNotifications();
     } else if (state.view === 'match') {
       renderMatch();
     } else {
@@ -1365,9 +1407,11 @@ function render() {
   useHoverGlow();
   render();
   if (state.token) {
-    connectSocket();
     await loadMe();
-    await loadChallenges();
-    render();
+    if (state.token && state.me) {
+      connectSocket();
+      await loadChallenges();
+      render();
+    }
   }
 })();

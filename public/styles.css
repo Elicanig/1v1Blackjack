@@ -36,9 +36,6 @@
 
   --shadow-sm: 0 6px 14px rgba(1, 7, 5, 0.24);
   --shadow-md: 0 14px 30px rgba(2, 11, 8, 0.32);
-  --mx: 50vw;
-  --my: 50vh;
-  --spotlight-alpha: 0;
 }
 
 * {
@@ -52,18 +49,14 @@ body {
   line-height: 1.45;
   letter-spacing: 0.005em;
   min-height: 100vh;
-  background:
-    radial-gradient(1200px 700px at 50% 20%, rgba(79, 132, 104, 0.16), transparent 65%),
-    linear-gradient(165deg, var(--bg-felt-0), var(--bg-felt-1) 42%, var(--bg-felt-2));
+  background: linear-gradient(165deg, var(--bg-felt-0), var(--bg-felt-1) 42%, var(--bg-felt-2));
 }
 
 .bg {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background:
-    radial-gradient(circle at 50% 50%, transparent 45%, rgba(0, 0, 0, 0.45) 100%),
-    repeating-radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.02) 0, rgba(255, 255, 255, 0.02) 1px, transparent 1px, transparent 8px);
+  background: radial-gradient(circle at 50% 50%, transparent 45%, rgba(0, 0, 0, 0.45) 100%);
 }
 
 .bg::before,
@@ -75,18 +68,13 @@ body {
 }
 
 .bg::before {
-  background:
-    radial-gradient(900px 500px at 25% 30%, rgba(205, 167, 100, 0.09), transparent 65%),
-    radial-gradient(1200px 600px at 72% 68%, rgba(66, 168, 135, 0.08), transparent 68%);
-  animation: ambientBeam 11s ease-in-out infinite alternate;
+  background: none;
+  animation: none;
 }
 
 .bg::after {
-  background:
-    radial-gradient(circle at var(--mx) var(--my), rgba(205, 167, 100, calc(0.16 * var(--spotlight-alpha))), transparent 52%),
-    radial-gradient(circle at var(--mx) var(--my), rgba(66, 168, 135, calc(0.12 * var(--spotlight-alpha))), transparent 66%);
-  opacity: 1;
-  transition: opacity 220ms ease;
+  background: none;
+  opacity: 0;
 }
 
 .noise {
@@ -271,6 +259,8 @@ button {
     transparent 60%
   );
   transition: opacity 220ms ease, background 90ms linear;
+  will-change: opacity, background;
+  transform: translateZ(0);
 }
 
 .glow-follow.is-hovering::before {

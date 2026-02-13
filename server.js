@@ -51,6 +51,46 @@ for (const user of db.data.users) {
     user.notifications = [];
     dbTouched = true;
   }
+  if (!user.authToken) {
+    user.authToken = nanoid(36);
+    dbTouched = true;
+  }
+  if (!user.avatarStyle) {
+    user.avatarStyle = 'adventurer';
+    dbTouched = true;
+  }
+  if (!user.avatarSeed) {
+    user.avatarSeed = user.username || nanoid(6);
+    dbTouched = true;
+  }
+  if (!user.avatar) {
+    user.avatar = `https://api.dicebear.com/9.x/${encodeURIComponent(user.avatarStyle)}/svg?seed=${encodeURIComponent(user.avatarSeed)}`;
+    dbTouched = true;
+  }
+  if (!user.stats) {
+    user.stats = {};
+    dbTouched = true;
+  }
+  if (user.stats.pushes === undefined) {
+    user.stats.pushes = user.stats.handsPush || 0;
+    dbTouched = true;
+  }
+  if (user.stats.handsPush === undefined) {
+    user.stats.handsPush = user.stats.pushes || 0;
+    dbTouched = true;
+  }
+  if (user.stats.handsPlayed === undefined) {
+    user.stats.handsPlayed = 0;
+    dbTouched = true;
+  }
+  if (user.stats.blackjacks === undefined) {
+    user.stats.blackjacks = 0;
+    dbTouched = true;
+  }
+  if (!user.challengeSets) {
+    user.challengeSets = {};
+    dbTouched = true;
+  }
 }
 if (!Array.isArray(db.data.friendRequests)) {
   db.data.friendRequests = [];
@@ -69,11 +109,35 @@ const disconnectTimers = new Map();
 const botTurnTimers = new Map();
 const botBetConfirmTimers = new Map();
 
-const challengeCatalog = [
-  { id: 'win_3_hands', title: 'Win 3 hands', target: 3, reward: 120 },
-  { id: 'win_with_split', title: 'Win with a split hand', target: 1, reward: 160 },
-  { id: 'play_5_rounds', title: 'Play 5 rounds', target: 5, reward: 90 }
-];
+const CHALLENGE_COUNTS = { hourly: 3, daily: 7, weekly: 5 };
+const CHALLENGE_POOLS = {
+  hourly: [
+    { key: 'hourly_hands_played_6', title: 'Hot Streak Warmup', description: 'Play 6 hands', goal: 6, rewardChips: 12, event: 'hand_played' },
+    { key: 'hourly_hands_won_3', title: 'Quick Closer', description: 'Win 3 hands', goal: 3, rewardChips: 20, event: 'hand_won' },
+    { key: 'hourly_pushes_2', title: 'Even Odds', description: 'Get 2 pushes', goal: 2, rewardChips: 16, event: 'push' },
+    { key: 'hourly_blackjack_1', title: 'Natural Edge', description: 'Hit 1 natural blackjack', goal: 1, rewardChips: 25, event: 'blackjack' },
+    { key: 'hourly_rounds_2', title: 'Table Presence', description: 'Play 2 rounds', goal: 2, rewardChips: 10, event: 'round_played' }
+  ],
+  daily: [
+    { key: 'daily_hands_played_20', title: 'Daily Grinder', description: 'Play 20 hands', goal: 20, rewardChips: 70, event: 'hand_played' },
+    { key: 'daily_hands_won_10', title: 'Ten Up', description: 'Win 10 hands', goal: 10, rewardChips: 110, event: 'hand_won' },
+    { key: 'daily_pushes_6', title: 'Knife Edge', description: 'Get 6 pushes', goal: 6, rewardChips: 80, event: 'push' },
+    { key: 'daily_blackjack_3', title: 'Triple Natural', description: 'Hit 3 natural blackjacks', goal: 3, rewardChips: 130, event: 'blackjack' },
+    { key: 'daily_rounds_8', title: 'Session Pro', description: 'Play 8 rounds', goal: 8, rewardChips: 60, event: 'round_played' },
+    { key: 'daily_split_win_2', title: 'Split Specialist', description: 'Win 2 split hands', goal: 2, rewardChips: 95, event: 'split_win' },
+    { key: 'daily_hands_lost_8', title: 'Learn and Adapt', description: 'Complete 8 losing hands', goal: 8, rewardChips: 55, event: 'hand_lost' },
+    { key: 'daily_round_win_3', title: 'Closer', description: 'Win 3 rounds', goal: 3, rewardChips: 120, event: 'round_won' }
+  ],
+  weekly: [
+    { key: 'weekly_hands_played_90', title: 'High Volume', description: 'Play 90 hands', goal: 90, rewardChips: 260, event: 'hand_played' },
+    { key: 'weekly_hands_won_40', title: 'Heat Check', description: 'Win 40 hands', goal: 40, rewardChips: 420, event: 'hand_won' },
+    { key: 'weekly_pushes_18', title: 'Deadlock', description: 'Get 18 pushes', goal: 18, rewardChips: 320, event: 'push' },
+    { key: 'weekly_blackjack_10', title: 'High Roller Naturals', description: 'Hit 10 natural blackjacks', goal: 10, rewardChips: 600, event: 'blackjack' },
+    { key: 'weekly_rounds_35', title: 'Table Marathon', description: 'Play 35 rounds', goal: 35, rewardChips: 240, event: 'round_played' },
+    { key: 'weekly_split_win_12', title: 'Split Maestro', description: 'Win 12 split hands', goal: 12, rewardChips: 520, event: 'split_win' },
+    { key: 'weekly_round_win_14', title: 'Weekly Victor', description: 'Win 14 rounds', goal: 14, rewardChips: 480, event: 'round_won' }
+  ]
+};
 
 const BOT_ACCURACY = {
   easy: 0.5,
@@ -140,11 +204,23 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeUsername(username) {
+  return String(username || '').trim().toLowerCase();
+}
+
+function avatarUrl(style, seed) {
+  const safeStyle = String(style || 'adventurer').trim().toLowerCase() || 'adventurer';
+  const safeSeed = String(seed || 'player').trim() || 'player';
+  return `https://api.dicebear.com/9.x/${encodeURIComponent(safeStyle)}/svg?seed=${encodeURIComponent(safeSeed)}`;
+}
+
 function sanitizeUser(user) {
   return {
     id: user.id,
     username: user.username,
     avatar: user.avatar,
+    avatarStyle: user.avatarStyle || 'adventurer',
+    avatarSeed: user.avatarSeed || user.username,
     bio: user.bio,
     chips: user.chips,
     stats: user.stats,
@@ -153,20 +229,13 @@ function sanitizeUser(user) {
   };
 }
 
-function createChallengeState() {
-  const state = {};
-  for (const c of challengeCatalog) {
-    state[c.id] = { progress: 0, claimed: false };
-  }
-  return state;
-}
-
 function getUserById(id) {
   return db.data.users.find((u) => u.id === id);
 }
 
 function getUserByUsername(username) {
-  return db.data.users.find((u) => u.username.toLowerCase() === username.toLowerCase());
+  const normalized = normalizeUsername(username);
+  return db.data.users.find((u) => normalizeUsername(u.username) === normalized);
 }
 
 function getFriendList(user) {
@@ -273,10 +342,15 @@ function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Missing token' });
+  const directUser = db.data.users.find((u) => u.authToken === token);
+  if (directUser) {
+    req.user = directUser;
+    return next();
+  }
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = getUserById(decoded.userId);
-    if (!user) return res.status(401).json({ error: 'Invalid user' });
+    if (!user) return res.status(401).json({ error: 'Invalid auth' });
     req.user = user;
     return next();
   } catch {
@@ -285,7 +359,8 @@ function authMiddleware(req, res, next) {
 }
 
 function issueToken(user) {
-  return jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
+  if (!user.authToken) user.authToken = nanoid(36);
+  return user.authToken;
 }
 
 function cardValue(card) {
@@ -461,10 +536,73 @@ function pushMatchState(match) {
   }
 }
 
-function addChallengeProgress(user, id, amount) {
-  if (!user.challenges[id]) return;
-  const target = challengeCatalog.find((c) => c.id === id)?.target || 0;
-  user.challenges[id].progress = Math.min(target, user.challenges[id].progress + amount);
+function challengeExpiresAt(tier, from = new Date()) {
+  const ts = new Date(from);
+  if (tier === 'hourly') {
+    ts.setMinutes(0, 0, 0);
+    ts.setHours(ts.getHours() + 1);
+    return ts.toISOString();
+  }
+  if (tier === 'daily') {
+    ts.setHours(24, 0, 0, 0);
+    return ts.toISOString();
+  }
+  const day = ts.getDay();
+  const daysUntilMonday = ((8 - day) % 7) || 7;
+  ts.setDate(ts.getDate() + daysUntilMonday);
+  ts.setHours(0, 0, 0, 0);
+  return ts.toISOString();
+}
+
+function pickChallengeItems(tier, count) {
+  const pool = [...(CHALLENGE_POOLS[tier] || [])];
+  for (let i = pool.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, Math.min(count, pool.length));
+}
+
+function refreshChallengesForUser(user, force = false) {
+  let changed = false;
+  if (!user.challengeSets) user.challengeSets = {};
+  const now = new Date();
+  for (const tier of ['hourly', 'daily', 'weekly']) {
+    const current = user.challengeSets[tier];
+    const expired = !current?.expiresAt || new Date(current.expiresAt).getTime() <= now.getTime();
+    if (force || !current || expired || !Array.isArray(current.items)) {
+      const expiresAt = challengeExpiresAt(tier, now);
+      const items = pickChallengeItems(tier, CHALLENGE_COUNTS[tier]).map((def) => ({
+        id: `${tier}_${nanoid(8)}`,
+        key: def.key,
+        tier,
+        title: def.title,
+        description: def.description,
+        goal: def.goal,
+        progress: 0,
+        rewardChips: def.rewardChips,
+        event: def.event,
+        expiresAt,
+        claimed: false
+      }));
+      user.challengeSets[tier] = { tier, expiresAt, items };
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function recordChallengeEvent(user, event, amount = 1) {
+  if (!user || !event || amount <= 0) return;
+  refreshChallengesForUser(user);
+  for (const tier of ['hourly', 'daily', 'weekly']) {
+    const list = user.challengeSets?.[tier]?.items || [];
+    for (const item of list) {
+      if (item.claimed) continue;
+      if (item.event !== event) continue;
+      item.progress = Math.min(item.goal, item.progress + amount);
+    }
+  }
 }
 
 function startRound(match) {
@@ -510,8 +648,9 @@ function startRound(match) {
 
   const u1 = getUserById(p1);
   const u2 = getUserById(p2);
-  if (u1) addChallengeProgress(u1, 'play_5_rounds', 1);
-  if (u2) addChallengeProgress(u2, 'play_5_rounds', 1);
+  if (u1) recordChallengeEvent(u1, 'round_played', 1);
+  if (u2) recordChallengeEvent(u2, 'round_played', 1);
+  db.write();
 
   pushMatchState(match);
   scheduleBotBetConfirm(match);
@@ -635,14 +774,19 @@ function resolveRound(match) {
 
   function applyHandOutcomeStats(user, ownId, out) {
     if (!user) return;
+    user.stats.handsPlayed = (user.stats.handsPlayed || 0) + 1;
+    recordChallengeEvent(user, 'hand_played', 1);
     if (out.winner === ownId) {
       user.stats.handsWon += 1;
-      addChallengeProgress(user, 'win_3_hands', 1);
-      if (out.splitWin) addChallengeProgress(user, 'win_with_split', 1);
+      recordChallengeEvent(user, 'hand_won', 1);
+      if (out.splitWin) recordChallengeEvent(user, 'split_win', 1);
     } else if (out.loser === ownId) {
       user.stats.handsLost += 1;
+      recordChallengeEvent(user, 'hand_lost', 1);
     } else {
-      user.stats.handsPush += 1;
+      user.stats.pushes = (user.stats.pushes || 0) + 1;
+      user.stats.handsPush = user.stats.pushes;
+      recordChallengeEvent(user, 'push', 1);
     }
   }
 
@@ -651,13 +795,34 @@ function resolveRound(match) {
     applyHandOutcomeStats(userB, bId, out);
   }
 
+  if (userA) {
+    const naturals = a.hands.filter((h) => handMeta(h.cards).isNaturalBlackjack).length;
+    if (naturals > 0) {
+      userA.stats.blackjacks = (userA.stats.blackjacks || 0) + naturals;
+      recordChallengeEvent(userA, 'blackjack', naturals);
+    }
+  }
+  if (userB) {
+    const naturals = b.hands.filter((h) => handMeta(h.cards).isNaturalBlackjack).length;
+    if (naturals > 0) {
+      userB.stats.blackjacks = (userB.stats.blackjacks || 0) + naturals;
+      recordChallengeEvent(userB, 'blackjack', naturals);
+    }
+  }
+
   const netA = chipsDelta[aId];
 
   if (netA > 0) {
-    if (userA) userA.stats.roundsWon += 1;
+    if (userA) {
+      userA.stats.roundsWon += 1;
+      recordChallengeEvent(userA, 'round_won', 1);
+    }
     if (userB) userB.stats.roundsLost += 1;
   } else if (netA < 0) {
-    if (userB) userB.stats.roundsWon += 1;
+    if (userB) {
+      userB.stats.roundsWon += 1;
+      recordChallengeEvent(userB, 'round_won', 1);
+    }
     if (userA) userA.stats.roundsLost += 1;
   }
 
@@ -1085,18 +1250,16 @@ function emitLobbyUpdate(lobby) {
   }
 }
 
-app.post('/api/register', async (req, res) => {
-  const { username, password } = req.body || {};
-  if (!username || !password) return res.status(400).json({ error: 'Missing fields' });
-  if (username.length < 3) return res.status(400).json({ error: 'Username too short' });
-  if (getUserByUsername(username)) return res.status(409).json({ error: 'Username already exists' });
-
-  const hash = await bcrypt.hash(password, 10);
+function buildNewUser(username, passwordHash = null) {
+  const cleanUsername = String(username || '').trim();
   const user = {
     id: nanoid(),
-    username,
-    passwordHash: hash,
-    avatar: `https://api.dicebear.com/9.x/adventurer/svg?seed=${encodeURIComponent(username)}`,
+    username: cleanUsername,
+    authToken: nanoid(36),
+    passwordHash,
+    avatarStyle: 'adventurer',
+    avatarSeed: cleanUsername,
+    avatar: avatarUrl('adventurer', cleanUsername),
     bio: 'Ready for Blackjack Battle.',
     chips: STARTING_CHIPS,
     stats: {
@@ -1105,31 +1268,88 @@ app.post('/api/register', async (req, res) => {
       roundsLost: 0,
       handsWon: 0,
       handsLost: 0,
-      handsPush: 0
+      pushes: 0,
+      handsPush: 0,
+      handsPlayed: 0,
+      blackjacks: 0
     },
     friends: [],
-    challenges: createChallengeState(),
+    challengeSets: {},
     lastDailyClaimAt: null,
     lastFreeClaimAt: null,
-    selectedBet: BASE_BET
+    selectedBet: BASE_BET,
+    notifications: []
   };
+  refreshChallengesForUser(user, true);
+  return user;
+}
+
+app.post('/api/auth/register', async (req, res) => {
+  const { username } = req.body || {};
+  const cleanUsername = String(username || '').trim();
+  if (!cleanUsername) return res.status(400).json({ ok: false, error: 'Username required' });
+  if (cleanUsername.length < 3) return res.status(400).json({ ok: false, error: 'Username too short' });
+  if (getUserByUsername(cleanUsername)) return res.status(409).json({ ok: false, error: 'Username already exists' });
+
+  const user = buildNewUser(cleanUsername);
   db.data.users.push(user);
   await db.write();
+  return res.json({ ok: true, userId: user.id, authToken: user.authToken, user: sanitizeUser(user) });
+});
 
-  return res.json({ token: issueToken(user), user: sanitizeUser(user) });
+app.post('/api/auth/login', (req, res) => {
+  const { username, authToken } = req.body || {};
+  const user = getUserByUsername(username || '');
+  if (!user) return res.status(401).json({ ok: false, error: 'Invalid auth' });
+  if (!authToken) {
+    if (!user.authToken) user.authToken = nanoid(36);
+    db.write();
+    return res.json({ ok: true, user: sanitizeUser(user), authToken: user.authToken });
+  }
+  if (user.authToken !== authToken) {
+    return res.status(401).json({ ok: false, error: 'Invalid auth' });
+  }
+  return res.json({ ok: true, user: sanitizeUser(user), authToken: user.authToken });
+});
+
+app.post('/api/auth/me', (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : (req.body?.authToken || '');
+  const user = db.data.users.find((u) => u.authToken === token);
+  if (!user) return res.status(401).json({ ok: false, error: 'Invalid auth' });
+  return res.json({ ok: true, user: sanitizeUser(user), authToken: user.authToken });
+});
+
+app.post('/api/register', async (req, res) => {
+  const { username, password } = req.body || {};
+  const cleanUsername = String(username || '').trim();
+  if (!cleanUsername || !password) return res.status(400).json({ error: 'Missing fields' });
+  if (cleanUsername.length < 3) return res.status(400).json({ error: 'Username too short' });
+  if (getUserByUsername(cleanUsername)) return res.status(409).json({ error: 'Username already exists' });
+  const hash = await bcrypt.hash(password, 10);
+  const user = buildNewUser(cleanUsername, hash);
+  db.data.users.push(user);
+  await db.write();
+  return res.json({ token: issueToken(user), user: sanitizeUser(user), authToken: user.authToken });
 });
 
 app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body || {};
+  const { username, password, authToken } = req.body || {};
   const user = getUserByUsername(username || '');
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  if (authToken && user.authToken === authToken) {
+    return res.json({ token: issueToken(user), user: sanitizeUser(user), authToken: user.authToken });
+  }
+  if (!user.passwordHash) return res.status(401).json({ error: 'Invalid credentials' });
   const ok = await bcrypt.compare(password || '', user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
-  return res.json({ token: issueToken(user), user: sanitizeUser(user) });
+  return res.json({ token: issueToken(user), user: sanitizeUser(user), authToken: user.authToken });
 });
 
-app.get('/api/me', authMiddleware, (req, res) => {
+app.get('/api/me', authMiddleware, async (req, res) => {
   const friendsData = buildFriendsPayload(req.user);
+  const refreshed = refreshChallengesForUser(req.user);
+  if (refreshed) await db.write();
   return res.json({
     user: sanitizeUser(req.user),
     friends: friendsData.friends,
@@ -1139,13 +1359,20 @@ app.get('/api/me', authMiddleware, (req, res) => {
     },
     notifications: (req.user.notifications || []).slice(0, 30),
     freeClaimed: Boolean(req.user.lastFreeClaimAt),
-    challenges: challengeCatalog.map((c) => ({ ...c, ...req.user.challenges[c.id] }))
+    challenges: {
+      hourly: req.user.challengeSets.hourly?.items || [],
+      daily: req.user.challengeSets.daily?.items || [],
+      weekly: req.user.challengeSets.weekly?.items || []
+    }
   });
 });
 
 app.put('/api/profile', authMiddleware, async (req, res) => {
-  const { avatar, bio } = req.body || {};
-  if (typeof avatar === 'string') req.user.avatar = avatar.slice(0, 300);
+  const { avatar, avatarStyle, avatarSeed, bio } = req.body || {};
+  if (typeof avatarStyle === 'string') req.user.avatarStyle = avatarStyle.slice(0, 80);
+  if (typeof avatarSeed === 'string') req.user.avatarSeed = avatarSeed.slice(0, 120);
+  if (typeof avatar === 'string' && !avatarStyle && !avatarSeed) req.user.avatar = avatar.slice(0, 300);
+  req.user.avatar = avatarUrl(req.user.avatarStyle, req.user.avatarSeed || req.user.username);
   if (typeof bio === 'string') req.user.bio = bio.slice(0, 300);
   await db.write();
   return res.json({ user: sanitizeUser(req.user) });
@@ -1455,36 +1682,50 @@ app.post('/api/daily-claim', authMiddleware, async (req, res) => {
   return res.json({ reward: DAILY_REWARD, chips: req.user.chips, claimedAt: req.user.lastDailyClaimAt });
 });
 
-app.get('/api/challenges', authMiddleware, (req, res) => {
+app.get('/api/challenges', authMiddleware, async (req, res) => {
+  const refreshed = refreshChallengesForUser(req.user);
+  if (refreshed) await db.write();
+  const payload = {
+    hourly: req.user.challengeSets.hourly?.items || [],
+    daily: req.user.challengeSets.daily?.items || [],
+    weekly: req.user.challengeSets.weekly?.items || []
+  };
   return res.json({
-    challenges: challengeCatalog.map((c) => ({ ...c, ...req.user.challenges[c.id] }))
+    challenges: payload
   });
 });
 
 app.post('/api/challenges/claim', authMiddleware, async (req, res) => {
-  const { id } = req.body || {};
-  const challenge = challengeCatalog.find((c) => c.id === id);
-  if (!challenge) return res.status(404).json({ error: 'Challenge not found' });
-
-  const state = req.user.challenges[id];
-  if (!state) return res.status(404).json({ error: 'Challenge state missing' });
-  if (state.claimed) return res.status(409).json({ error: 'Already claimed' });
-  if (state.progress < challenge.target) return res.status(400).json({ error: 'Not complete' });
-
-  state.claimed = true;
-  req.user.chips += challenge.reward;
+  const { id, challengeId } = req.body || {};
+  const targetId = id || challengeId;
+  refreshChallengesForUser(req.user);
+  const tiers = ['hourly', 'daily', 'weekly'];
+  let target = null;
+  for (const tier of tiers) {
+    target = (req.user.challengeSets[tier]?.items || []).find((c) => c.id === targetId);
+    if (target) break;
+  }
+  if (!target) return res.status(404).json({ error: 'Challenge not found' });
+  if (target.claimed) return res.status(409).json({ error: 'Already claimed' });
+  if (target.progress < target.goal) return res.status(400).json({ error: 'Not complete' });
+  target.claimed = true;
+  req.user.chips += target.rewardChips;
   await db.write();
-
-  return res.json({ id, reward: challenge.reward, chips: req.user.chips });
+  return res.json({ id: targetId, reward: target.rewardChips, chips: req.user.chips });
 });
 
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
   if (!token) return next(new Error('Missing token'));
+  const directUser = db.data.users.find((u) => u.authToken === token);
+  if (directUser) {
+    socket.user = directUser;
+    return next();
+  }
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = getUserById(decoded.userId);
-    if (!user) return next(new Error('Invalid user'));
+    if (!user) return next(new Error('Invalid auth'));
     socket.user = user;
     return next();
   } catch {
