@@ -192,6 +192,7 @@ function formatCooldown(ms) {
 }
 
 const FALLBACK_PATCH_NOTES = [
+  { date: '2026-02-14', title: 'Match UI fit and polish pass', bullets: ['Match layout cleaned up for no-overlap/no-scroll card-first flow.', 'Logo shine slowed down and stats/rules strip refinements applied.'] },
   { date: '2026-02-13', title: 'Gameplay and polish updates', bullets: ['Instant round-end handling for bust and naturals.', 'Improved notifications overlay and profile PIN controls.'] },
   { date: '2026-02-12', title: 'Practice and split flow updates', bullets: ['Practice bot mode no longer affects real chips/stats.', 'Split flow now stays on the same player until all split hands are completed.'] },
   { date: '2026-02-11', title: 'Security and progression improvements', bullets: ['Per-view hand sanitization prevents hidden-card leakage.', 'Challenge tiers and rewards are persisted server-side.'] }
@@ -1198,12 +1199,12 @@ function renderHome() {
         <section class="col card section reveal-panel glow-follow glow-follow--panel">
         <h2>Stats</h2>
         <div class="kpis">
-          <div class="kpi"><div class="muted">6–7 Dealt</div><strong>${me.stats.sixSevenDealt || 0}</strong></div>
-          <div class="kpi"><div class="muted">Rounds Won</div><strong>${me.stats.roundsWon}</strong></div>
+          <div class="kpi"><div class="muted">Total Matches</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
           <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon}</strong></div>
           <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost}</strong></div>
           <div class="kpi"><div class="muted">Pushes</div><strong>${me.stats.pushes || me.stats.handsPush || 0}</strong></div>
           <div class="kpi"><div class="muted">Blackjacks</div><strong>${me.stats.blackjacks || 0}</strong></div>
+          <div class="kpi"><div class="muted">6–7 Dealt</div><strong>${me.stats.sixSevenDealt || 0}</strong></div>
         </div>
         <div class="free-claim-card">
           <div>
@@ -1266,7 +1267,7 @@ function renderHome() {
       }
       <button id="togglePatchNotesBtn" class="ghost">${state.showMorePatchNotes ? 'View less' : 'View more'}</button>
         </section>
-        <section class="card section rules-strip">
+        <section class="card section patch-card rules-strip">
           <div>
             <strong>Rules:</strong> Blackjack 3:2 • 1 deck • reshuffle each round • surrender available
           </div>
@@ -1928,42 +1929,39 @@ function renderMatch() {
           <div class="muted">Base bet posted: ${match.baseBet} ${match.allInPlayers?.[oppId] ? `• ${playerName(oppId)} is all-in` : ''}</div>
         </div>
 
-        <div class="actions actions-primary">
+        <div class="actions actions-compact">
           <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
           <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
-        </div>
-        <div class="actions actions-secondary">
           <button data-action="double" title="${canAct ? 'Double bet, take one card, lock hand' : actionHint}" ${!canAct || activeHand.doubled ? 'disabled' : ''}>Double</button>
           <button data-action="split" title="${handCanSplit(activeHand) ? 'Split pair into two hands' : 'Split requires pair'}" ${!canAct || !handCanSplit(activeHand) ? 'disabled' : ''}>Split</button>
           <button class="warn" data-action="surrender" title="${canAct ? 'Lose 75% and lock hand' : actionHint}" ${!canAct ? 'disabled' : ''}>Surrender</button>
+          ${
+            isPvpMatch
+              ? `<button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
+                 <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>`
+              : ''
+          }
         </div>
         ${
-          isPvpMatch
+          isPvpMatch && state.emotePickerOpen
             ? `<div class="emote-row">
-                <button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
-                ${
-                  state.emotePickerOpen
-                    ? `<div class="emote-popover card">
-                        <div class="emote-grid">
-                          <button data-emote-type="emoji" data-emote-value="😂">😂</button>
-                          <button data-emote-type="emoji" data-emote-value="😭">😭</button>
-                          <button data-emote-type="emoji" data-emote-value="👍">👍</button>
-                          <button data-emote-type="emoji" data-emote-value="😡">😡</button>
-                        </div>
-                        <div class="emote-quips">
-                          <button data-emote-type="quip" data-emote-value="Bitchmade">Bitchmade</button>
-                          <button data-emote-type="quip" data-emote-value="Fuck you">Fuck you</button>
-                          <button data-emote-type="quip" data-emote-value="Skill issue">Skill issue</button>
-                          <button data-emote-type="quip" data-emote-value="L">L</button>
-                        </div>
-                      </div>`
-                    : ''
-                }
-                <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>
+                <div class="emote-popover card">
+                  <div class="emote-grid">
+                    <button data-emote-type="emoji" data-emote-value="😂">😂</button>
+                    <button data-emote-type="emoji" data-emote-value="😭">😭</button>
+                    <button data-emote-type="emoji" data-emote-value="👍">👍</button>
+                    <button data-emote-type="emoji" data-emote-value="😡">😡</button>
+                  </div>
+                  <div class="emote-quips">
+                    <button data-emote-type="quip" data-emote-value="Bitchmade">Bitchmade</button>
+                    <button data-emote-type="quip" data-emote-value="Fuck you">Fuck you</button>
+                    <button data-emote-type="quip" data-emote-value="Skill issue">Skill issue</button>
+                    <button data-emote-type="quip" data-emote-value="L">L</button>
+                  </div>
+                </div>
               </div>`
             : ''
         }
-        <div class="muted">${actionHint}</div>
       </div>
 
       ${
@@ -1995,6 +1993,7 @@ function renderMatch() {
                 } / Opponent ${opponentConnected ? 'online' : 'offline'}`
           }
         </div>
+        <div class="muted">${actionHint}</div>
       </details>
 
       </div>

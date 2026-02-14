@@ -172,6 +172,15 @@ let patchNotesCache = { at: 0, payload: null };
 
 const LOCAL_PATCH_NOTES = [
   {
+    date: '2026-02-14',
+    title: 'Match layout + home polish',
+    bullets: [
+      'Match screen now uses a cards-first, non-overlapping viewport layout.',
+      'Logo shine timing, stats ordering/labels, and rules strip alignment were refined.'
+    ],
+    body: 'Match screen now uses a cards-first, non-overlapping viewport layout.\nLogo shine timing, stats ordering/labels, and rules strip alignment were refined.'
+  },
+  {
     date: '2026-02-13',
     title: 'Gameplay and polish updates',
     bullets: [

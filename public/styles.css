@@ -274,7 +274,7 @@ body::after {
     linear-gradient(90deg, #f1f2ec 0%, #f1f2ec 40%, rgba(224, 189, 123, 0.9) 50%, #f1f2ec 60%, #f1f2ec 100%);
   background-size: 240% 100%;
   background-position: -120% 0;
-  animation: logoShine 620ms ease-out 1;
+  animation: logoShine 1800ms ease-out 1;
 }
 
 @keyframes logoShine {
@@ -800,6 +800,15 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  width: 100%;
+}
+
+.rules-strip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  min-height: 36px;
 }
 
 .friend,
@@ -872,12 +881,14 @@ select:focus-visible {
 }
 
 .match-view {
+  height: calc(100vh - 110px);
   min-height: calc(100vh - 110px);
+  overflow: hidden;
 }
 
 .zones-stack {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(180px, 1fr) minmax(180px, 1fr);
   gap: var(--space-2);
   min-height: 0;
   overflow: hidden;
@@ -916,7 +927,7 @@ select:focus-visible {
   background: rgba(11, 23, 19, 0.56);
   padding: 10px;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .zone-head {
@@ -956,7 +967,7 @@ select:focus-visible {
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 8px;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .hand {
@@ -1086,10 +1097,11 @@ select:focus-visible {
 .actions-panel {
   background: rgba(10, 21, 18, 0.78);
   margin-top: auto;
-  position: sticky;
-  bottom: 0;
+  position: relative;
   z-index: 3;
-  padding: 14px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
 }
 
 .leave-btn {
@@ -1106,6 +1118,18 @@ select:focus-visible {
 .match-details summary {
   cursor: pointer;
   color: var(--muted);
+}
+
+.actions-compact {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.actions-compact button {
+  min-height: 34px;
+  padding: 7px 11px;
+  font-size: 0.88rem;
 }
 
 .bet-control {
@@ -1245,16 +1269,16 @@ select:focus-visible {
 .result-delta.neg { color: #e07f7f; }
 
 .emote-row {
-  margin-top: var(--space-2);
+  margin-top: 0;
   position: relative;
-  width: fit-content;
+  width: 100%;
 }
 
 .emote-popover {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  width: min(280px, calc(100vw - 40px));
+  position: relative;
+  bottom: auto;
+  left: auto;
+  width: min(360px, 100%);
   padding: 10px;
   z-index: 4;
 }
@@ -1381,6 +1405,10 @@ select:focus-visible {
     flex: 1 1 calc(50% - var(--space-2));
   }
 
+  .actions-compact {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
   .free-claim-card {
     flex-direction: column;
     align-items: stretch;
@@ -1406,7 +1434,21 @@ select:focus-visible {
   }
 
   .actions-panel {
-    padding: 10px;
+    padding: 8px;
+  }
+
+  .actions-compact button {
+    min-height: 32px;
+    padding: 6px 9px;
+    font-size: 0.84rem;
+  }
+
+  .zones-stack {
+    grid-template-rows: minmax(150px, 1fr) minmax(150px, 1fr);
+  }
+
+  .match-zone {
+    padding: 8px;
   }
 }
 
