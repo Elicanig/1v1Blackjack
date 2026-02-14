@@ -170,6 +170,8 @@ body::after {
 #app[data-view='match'] {
   height: 100vh;
   max-height: 100vh;
+  max-width: min(96vw, 1440px);
+  width: 100%;
   padding: var(--s-2) var(--s-3);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -970,11 +972,12 @@ select:focus-visible {
   border-radius: var(--radius-sm);
   border: 1px solid rgba(236, 241, 233, 0.11);
   background: rgba(11, 23, 19, 0.56);
-  padding: 8px;
+  padding: 10px 14px;
   min-height: 0;
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
 }
 
 .zone-head {
@@ -1015,21 +1018,28 @@ select:focus-visible {
   gap: 8px;
   min-height: 0;
   height: 100%;
+  width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 2px;
   align-items: stretch;
+  justify-content: flex-start;
 }
 
 .hand {
   border-radius: var(--radius-sm);
   border: 1px solid rgba(236, 241, 233, 0.12);
   padding: 8px;
-  min-width: min(230px, 58%);
-  flex: 0 0 min(230px, 58%);
+  min-width: min(460px, 48%);
+  flex: 0 0 min(460px, 48%);
   background: rgba(13, 26, 22, 0.7);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   overflow: visible;
+}
+
+.hands .hand:only-child {
+  min-width: 100%;
+  flex-basis: 100%;
 }
 
 .hand.active {
