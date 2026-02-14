@@ -298,6 +298,7 @@ const RULES = {
   BOTH_BUST_IS_PUSH: true,
   SURRENDER_LOSS_FRACTION: 0.75,
   MAX_SPLITS: 3,
+  MAX_DOUBLES_PER_HAND: 2,
   ALL_IN_ON_INSUFFICIENT_BASE_BET: true
 };
 
@@ -746,6 +747,7 @@ function newHand(cards, hidden, bet = BASE_BET, splitDepth = 0) {
     surrendered: false,
     bust: false,
     doubled: false,
+    doubleCount: 0,
     wasSplitHand: splitDepth > 0,
     naturalBlackjack: false
   };
@@ -813,6 +815,7 @@ function buildClientState(match, viewerId) {
           surrendered: hand.surrendered,
           bust: hand.bust,
           doubled: hand.doubled,
+          doubleCount: hand.doubleCount || 0,
           splitDepth: hand.splitDepth,
           totalKnown: !hasHiddenToViewer,
           visibleTotal: visibleMeta.total,
@@ -848,6 +851,7 @@ function buildClientState(match, viewerId) {
     canConfirmBet: match.phase === PHASES.ROUND_INIT && !round.betConfirmedByPlayer?.[viewerId],
     betConfirmedByPlayer: round.betConfirmedByPlayer,
     minBet: MIN_BET,
+    maxDoublesPerHand: RULES.MAX_DOUBLES_PER_HAND,
     maxBetCap: MAX_BET_CAP,
     betControllerId: match.betControllerId,
     postedBetByPlayer: round.postedBetByPlayer,
@@ -1406,7 +1410,7 @@ function visibleTotal(cards, hiddenFlags) {
 function legalActionsForHand(hand) {
   if (!hand || hand.locked || hand.stood || hand.bust || hand.surrendered) return [];
   const actions = ['hit', 'stand', 'surrender'];
-  if (!hand.doubled) actions.push('double');
+  if ((hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
   if (canSplit(hand)) actions.push('split');
   return actions;
 }
@@ -1625,22 +1629,33 @@ function applyAction(match, playerId, action) {
   }
 
   if (action === 'double') {
-    if (hand.locked || hand.doubled) return { error: 'Hand cannot double down' };
+    if (hand.locked || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
     match.round.firstActionTaken = true;
     const delta = hand.bet;
     if (!canAffordIncrement(match, playerId, delta)) return { error: 'Insufficient chips to double' };
     hand.bet *= 2;
-    hand.doubled = true;
+    hand.doubleCount = (hand.doubleCount || 0) + 1;
+    hand.doubled = hand.doubleCount > 0;
     hand.cards.push(drawCard(match.round));
     hand.hidden.push(false);
-    if (handTotal(hand.cards) > 21) {
+    const total = handTotal(hand.cards);
+    if (total > 21) {
       hand.bust = true;
+      hand.locked = true;
+      // Bust ends the round immediately.
+      resolveRound(match);
+      return { ok: true };
     }
-    hand.locked = true;
+    if (total >= 21 || hand.doubleCount >= RULES.MAX_DOUBLES_PER_HAND) {
+      hand.locked = true;
+      hand.stood = true;
+    }
 
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
     match.round.pendingPressure = {
       initiatorId: playerId,
+      initiatorHandIndex: state.activeHandIndex,
+      resumeTurnIfPossible: true,
       opponentId,
       type: 'double',
       delta,
@@ -1679,6 +1694,8 @@ function applyAction(match, playerId, action) {
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
     match.round.pendingPressure = {
       initiatorId: playerId,
+      initiatorHandIndex: state.activeHandIndex,
+      resumeTurnIfPossible: true,
       opponentId,
       type: 'split',
       delta,
@@ -1719,8 +1736,24 @@ function applyPressureDecision(match, playerId, decision) {
 
   match.round.pendingPressure = null;
   match.phase = PHASES.ACTION_TURN;
-
-  progressTurn(match, pressure.initiatorId);
+  const initiatorState = match.round.players[pressure.initiatorId];
+  const resumeIndex = Number.isInteger(pressure.initiatorHandIndex)
+    ? pressure.initiatorHandIndex
+    : initiatorState.activeHandIndex;
+  const initiatorHand = initiatorState.hands[resumeIndex] || null;
+  const canResume =
+    Boolean(pressure.resumeTurnIfPossible) &&
+    initiatorHand &&
+    !initiatorHand.locked &&
+    !initiatorHand.stood &&
+    !initiatorHand.bust &&
+    !initiatorHand.surrendered;
+  if (canResume) {
+    initiatorState.activeHandIndex = resumeIndex;
+    match.round.turnPlayerId = pressure.initiatorId;
+  } else {
+    progressTurn(match, pressure.initiatorId);
+  }
   return { ok: true };
 }
 

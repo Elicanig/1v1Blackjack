@@ -979,6 +979,7 @@ select:focus-visible {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
+  position: relative;
 }
 
 .zone-head {
@@ -1068,7 +1069,8 @@ select:focus-visible {
 
 .hand-meta {
   min-width: 0;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
+  line-height: 1.1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1086,8 +1088,14 @@ select:focus-visible {
 }
 
 .hand-status {
-  min-height: 16px;
-  font-size: 0.76rem;
+  min-height: 0;
+  font-size: 0.74rem;
+  line-height: 1.1;
+  margin-bottom: 2px;
+}
+
+.hand-status:empty {
+  display: none;
 }
 
 .cards {
@@ -1100,6 +1108,26 @@ select:focus-visible {
   overflow-x: auto;
   overflow-y: visible;
   padding-bottom: 2px;
+}
+
+.cardsRow {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 3px 4px 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(205, 167, 100, 0.35) transparent;
+}
+
+.cardsRow::-webkit-scrollbar {
+  height: 6px;
+}
+
+.cardsRow::-webkit-scrollbar-thumb {
+  background: rgba(205, 167, 100, 0.3);
+  border-radius: 999px;
 }
 
 .playing-card {
@@ -1262,6 +1290,31 @@ select:focus-visible {
   padding: 7px 12px;
 }
 
+.emote-overlay-bubble {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  z-index: 9;
+  pointer-events: none;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(236, 241, 233, 0.2);
+  background: rgba(8, 19, 16, 0.9);
+  box-shadow: var(--shadow-sm);
+  animation: emotePop 180ms ease-out;
+}
+
+.emote-overlay-bubble.emoji {
+  font-size: 1.12rem;
+  line-height: 1;
+  padding: 4px 8px;
+}
+
+.emote-overlay-bubble.quip {
+  font-size: 0.84rem;
+  color: var(--text);
+}
+
 .pressure-chip {
   border-color: rgba(212, 175, 55, 0.6);
   background: rgba(212, 175, 55, 0.2);
@@ -1330,6 +1383,11 @@ select:focus-visible {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
   align-items: center;
+}
+
+.betting-leave-row {
+  display: flex;
+  justify-content: center;
 }
 
 .actions-secondary {

@@ -393,7 +393,7 @@ function connectSocket() {
         state.floatingEmote = null;
         render();
       }
-    }, 2000);
+    }, 4000);
   });
   state.socket.on('lobby:update', (lobby) => {
     state.currentLobby = lobby;
@@ -1816,13 +1816,14 @@ function renderHand(hand, index, active, pressureTagged = false) {
   if (hand.surrendered) labels.push('Surrendered');
   if (hand.stood) labels.push('Stood');
   if (hand.locked && !hand.bust && !hand.surrendered && !hand.stood) labels.push('Locked');
-  if (hand.doubled) labels.push('Doubled');
-  if (hand.isSoft) labels.push('Soft');
   if (hand.outcome) labels.push(hand.outcome.toUpperCase());
-  if (active && !hand.locked) labels.unshift('Active');
   const isActive = active && !hand.locked;
-  const metaLine = `${formatHandTotalLine(hand)}${isActive ? ' · Active' : ''}`;
-  const statusLine = labels.filter((label) => label !== 'Active').join(' • ') || 'In play';
+  const metaParts = [formatHandTotalLine(hand)];
+  if (isActive) metaParts.push('Active');
+  if (hand.isSoft) metaParts.push('Soft');
+  if (!hand.locked && !hand.bust && !hand.surrendered && !hand.stood) metaParts.push('In play');
+  const metaLine = metaParts.join(' • ');
+  const statusLine = labels.join(' • ');
 
   return `
     <div class="hand ${active ? 'active' : ''}">
@@ -1834,11 +1835,17 @@ function renderHand(hand, index, active, pressureTagged = false) {
         <span class="hand-chip">Bet: ${hand.bet}</span>
       </div>
       <div class="muted hand-status">${statusLine}</div>
-      <div class="cards card-count-${Math.min(hand.cards.length, 7)}">
+      <div class="cards cardsRow card-count-${Math.min(hand.cards.length, 7)}">
         ${hand.cards.map((card, cardIndex) => renderPlayingCard(card, cardIndex)).join('')}
       </div>
     </div>
   `;
+}
+
+function renderEmoteBubble(playerId) {
+  if (!state.floatingEmote || state.floatingEmote.fromUserId !== playerId) return '';
+  const bubbleClass = state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip';
+  return `<div class="emote-overlay-bubble ${bubbleClass}">${state.floatingEmote.value}</div>`;
 }
 
 function renderPlayingCard(card, cardIndex = 0) {
@@ -1952,14 +1959,9 @@ function renderMatch() {
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
                 <div class="match-zone opponent-zone">
+                  ${renderEmoteBubble(oppId)}
                   <div class="zone-head">
-                    <h4>Opponent: ${playerName(oppId)}
-                    ${
-                      state.floatingEmote && state.floatingEmote.fromUserId === oppId
-                        ? `<span class="emote-bubble ${state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip'}">${state.floatingEmote.value}</span>`
-                        : ''
-                    }
-                    </h4>
+                    <h4>Opponent: ${playerName(oppId)}</h4>
                     <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
                   </div>
                   <div class="hands">
@@ -1967,6 +1969,7 @@ function renderMatch() {
                   </div>
                 </div>
                 <div class="match-zone you-zone">
+                  ${renderEmoteBubble(me.id)}
                   <div class="zone-head">
                     <h4>You: ${playerName(me.id)}</h4>
                     <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
@@ -1980,7 +1983,7 @@ function renderMatch() {
                   <div class="actions actions-main">
                     <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
                     <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
-                    <button data-action="double" title="${canAct ? 'Double bet, take one card, lock hand' : actionHint}" ${!canAct || activeHand.doubled ? 'disabled' : ''}>Double</button>
+                    <button data-action="double" title="${canAct ? 'Increase current bet and draw one card' : actionHint}" ${!canAct || (activeHand.doubleCount || 0) >= (match.maxDoublesPerHand || 2) ? 'disabled' : ''}>Double</button>
                     <button data-action="split" title="${handCanSplit(activeHand) ? 'Split pair into two hands' : 'Split requires pair'}" ${!canAct || !handCanSplit(activeHand) ? 'disabled' : ''}>Split</button>
                     <button class="warn" data-action="surrender" title="${canAct ? 'Lose 75% and lock hand' : actionHint}" ${!canAct ? 'disabled' : ''}>Surrender</button>
                   </div>
@@ -2012,8 +2015,8 @@ function renderMatch() {
                         </div>`
                       : ''
                   }
-                  ${
-                    state.leaveMatchModal
+                ${
+                  state.leaveMatchModal
                       ? `<div class="leave-inline">
                         <strong>Leave Match?</strong>
                         <p class="muted">You will forfeit this round and end the match.</p>
@@ -2040,6 +2043,25 @@ function renderMatch() {
                   <div class="muted">${actionHint}</div>
                 </details>
               </section>`
+        }
+        ${
+          isBettingPhase && isPvpMatch
+            ? `<div class="betting-leave-row">
+                 <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>
+               </div>`
+            : ''
+        }
+        ${
+          isBettingPhase && state.leaveMatchModal
+            ? `<div class="leave-inline">
+                 <strong>Leave Match?</strong>
+                 <p class="muted">You will forfeit this round and end the match.</p>
+                 <div class="pressure-actions">
+                   <button id="confirmLeaveMatchBtn" class="warn">Leave Match</button>
+                   <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
+                 </div>
+               </div>`
+            : ''
         }
       </div>
     </main>
