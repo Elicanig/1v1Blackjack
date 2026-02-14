@@ -192,6 +192,7 @@ function formatCooldown(ms) {
 }
 
 const FALLBACK_PATCH_NOTES = [
+  { date: '2026-02-15', title: 'Account persistence hardening', bullets: ['Fix: accounts now persist across deployments and patches (no forced re-registration).', 'Storage boot now loads existing persistent data without reseeding users.'] },
   { date: '2026-02-14', title: 'Match UI fit and polish pass', bullets: ['Match layout cleaned up for no-overlap/no-scroll card-first flow.', 'Logo shine slowed down and stats/rules strip refinements applied.'] },
   { date: '2026-02-13', title: 'Gameplay and polish updates', bullets: ['Instant round-end handling for bust and naturals.', 'Improved notifications overlay and profile PIN controls.'] },
   { date: '2026-02-12', title: 'Practice and split flow updates', bullets: ['Practice bot mode no longer affects real chips/stats.', 'Split flow now stays on the same player until all split hands are completed.'] },

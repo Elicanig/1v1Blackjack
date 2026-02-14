@@ -53,4 +53,7 @@ A playable 1v1 real-time web app that blends blackjack actions with head-to-head
 - Render deployment:
   - Mount a persistent disk to `/var/data` (or set `DATA_DIR` to your mount path).
   - Set `SESSION_SECRET` (or `JWT_SECRET`) as an environment variable so auth tokens remain stable across deploys.
+  - On boot, server logs storage status:
+    - `loaded X users from storage` when existing data is reused
+    - `created new storage file` only when storage does not exist yet
 - For production scale, replace in-memory match storage with Redis and add hardened auth/session handling.

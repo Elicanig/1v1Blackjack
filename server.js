@@ -7,7 +7,7 @@ import { Server } from 'socket.io';
 import { JSONFilePreset } from 'lowdb/node';
 import { nanoid } from 'nanoid';
 import path from 'path';
-import { mkdirSync, existsSync, copyFileSync } from 'fs';
+import { mkdirSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -39,7 +39,7 @@ const EMOTE_COOLDOWN_MS = 2000;
 const FRIEND_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 
-const configuredDataDir = process.env.DATA_DIR || '/var/data';
+const configuredDataDir = process.env.DATA_DIR || process.env.RENDER_DISK_PATH || '/var/data';
 let DATA_DIR = configuredDataDir;
 try {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -48,10 +48,7 @@ try {
   mkdirSync(DATA_DIR, { recursive: true });
 }
 const DB_PATH = path.join(DATA_DIR, 'db.json');
-const LEGACY_DB_PATH = path.join(__dirname, 'data.json');
-if (!existsSync(DB_PATH) && existsSync(LEGACY_DB_PATH)) {
-  copyFileSync(LEGACY_DB_PATH, DB_PATH);
-}
+const hadExistingStorage = existsSync(DB_PATH);
 
 const db = await JSONFilePreset(DB_PATH, {
   users: [],
@@ -60,6 +57,22 @@ const db = await JSONFilePreset(DB_PATH, {
   friendRequests: [],
   friendChallenges: []
 });
+
+if (process.env.NODE_ENV !== 'test') {
+  // eslint-disable-next-line no-console
+  console.log(`[storage] using ${DB_PATH}`);
+  if (DATA_DIR !== configuredDataDir) {
+    // eslint-disable-next-line no-console
+    console.warn('[storage] configured data directory unavailable; fell back to local .data (not deploy-persistent)');
+  }
+  if (hadExistingStorage) {
+    // eslint-disable-next-line no-console
+    console.log(`[storage] loaded ${db.data.users.length} users from storage`);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log('[storage] created new storage file');
+  }
+}
 
 let dbTouched = false;
 for (const user of db.data.users) {
@@ -171,6 +184,15 @@ const emoteCooldownByUser = new Map();
 let patchNotesCache = { at: 0, payload: null };
 
 const LOCAL_PATCH_NOTES = [
+  {
+    date: '2026-02-15',
+    title: 'Account persistence hardening',
+    bullets: [
+      'Fix: accounts now persist across deployments and patches (no forced re-registration).',
+      'Storage boot now loads existing persistent data without reseeding users.'
+    ],
+    body: 'Fix: accounts now persist across deployments and patches (no forced re-registration).\nStorage boot now loads existing persistent data without reseeding users.'
+  },
   {
     date: '2026-02-14',
     title: 'Match layout + home polish',
