@@ -1945,7 +1945,10 @@ function renderMatch() {
                       <button data-bet-quick="25" class="gold" ${!canEditBet ? 'disabled' : ''}>+25</button>
                     </div>
                     <div class="bet-confirm-row">
-                      <button id="confirmBetBtn" class="primary" ${!canConfirmBet ? 'disabled' : ''}>Confirm Bet</button>
+                      <div class="bet-confirm-actions">
+                        <button id="confirmBetBtn" class="primary" ${!canConfirmBet ? 'disabled' : ''}>Confirm Bet</button>
+                        <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>
+                      </div>
                       <div class="muted">${myConfirmed ? 'You confirmed.' : 'Waiting for your confirmation.'} ${oppConfirmed ? 'Opponent confirmed.' : 'Waiting for opponent...'}</div>
                     </div>
                   </div>
@@ -2043,13 +2046,6 @@ function renderMatch() {
                   <div class="muted">${actionHint}</div>
                 </details>
               </section>`
-        }
-        ${
-          isBettingPhase && isPvpMatch
-            ? `<div class="betting-leave-row">
-                 <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>
-               </div>`
-            : ''
         }
         ${
           isBettingPhase && state.leaveMatchModal

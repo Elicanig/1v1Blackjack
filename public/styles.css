@@ -1260,20 +1260,22 @@ select:focus-visible {
 }
 
 .actions-main {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 10px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 14px;
   width: 100%;
-  max-width: 980px;
+  max-width: 940px;
   margin: 0 auto;
-  align-items: stretch;
 }
 
 .actions-main button {
   min-height: 40px;
-  padding: 8px 14px;
+  min-width: 128px;
+  padding: 8px 16px;
   font-size: 0.9rem;
-  min-width: 0;
+  flex: 0 0 auto;
   white-space: nowrap;
   border-radius: 12px;
 }
@@ -1385,9 +1387,16 @@ select:focus-visible {
   align-items: center;
 }
 
-.betting-leave-row {
+.bet-confirm-actions {
   display: flex;
-  justify-content: center;
+  align-items: center;
+  gap: 10px;
+}
+
+.bet-confirm-actions button {
+  min-height: 38px;
+  padding: 7px 14px;
+  border-radius: 12px;
 }
 
 .actions-secondary {
@@ -1648,13 +1657,15 @@ select:focus-visible {
   }
 
   .actions-main {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    flex-wrap: wrap;
+    justify-content: center;
     gap: 8px;
   }
 
   .actions-main button {
     font-size: 0.84rem;
     min-height: 36px;
+    min-width: 112px;
   }
 
   .bet-confirm-row {
@@ -1693,6 +1704,7 @@ select:focus-visible {
     min-height: 34px;
     padding: 6px 10px;
     font-size: 0.82rem;
+    min-width: 104px;
   }
 
   .play-layout {
