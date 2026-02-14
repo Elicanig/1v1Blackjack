@@ -255,6 +255,9 @@ body::after {
   color: var(--text-strong);
   position: relative;
   width: fit-content;
+  display: inline-block;
+  transform: none !important;
+  margin: 0;
 }
 
 .logo span {
@@ -275,8 +278,8 @@ body::after {
 }
 
 @keyframes logoShine {
-  from { transform: translateX(0) skewX(-20deg); }
-  to { transform: translateX(340%) skewX(-20deg); }
+  from { background-position: -120% 0; }
+  to { background-position: 120% 0; }
 }
 
 .chip-balance {
@@ -727,6 +730,7 @@ select:focus-visible {
   line-height: 1;
   padding-left: 14px;
   padding-right: 14px;
+  text-align: center;
 }
 
 .invite-link-tools {
@@ -744,6 +748,58 @@ select:focus-visible {
 .patch-body {
   margin-top: 6px;
   white-space: pre-wrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.status-online {
+  background: #59cc97;
+}
+
+.status-offline {
+  background: #7e8d84;
+}
+
+.status-in_match {
+  background: #d9ac66;
+}
+
+.bet-history {
+  margin-top: 12px;
+}
+
+.history-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: 64px 92px 72px 52px 58px;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.history-row .gain {
+  color: #7fe2b9;
+}
+
+.history-row .loss {
+  color: #e08a8a;
+}
+
+.rules-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .friend,
@@ -809,7 +865,7 @@ select:focus-visible {
   max-height: min(calc(100vh - 136px), 820px);
   overflow: hidden;
   gap: var(--space-2);
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   background:
     radial-gradient(circle at 50% 40%, rgba(62, 112, 88, 0.22), transparent 70%),
     rgba(8, 19, 16, 0.72);
@@ -824,6 +880,7 @@ select:focus-visible {
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--space-2);
   min-height: 0;
+  overflow: hidden;
 }
 
 .status-strip {
@@ -1033,6 +1090,22 @@ select:focus-visible {
   bottom: 0;
   z-index: 3;
   padding: 14px;
+}
+
+.leave-btn {
+  margin-left: 6px;
+}
+
+.match-details {
+  border-radius: 10px;
+  border: 1px solid rgba(236, 241, 233, 0.1);
+  background: rgba(10, 21, 18, 0.55);
+  padding: 6px 10px;
+}
+
+.match-details summary {
+  cursor: pointer;
+  color: var(--muted);
 }
 
 .bet-control {
@@ -1295,6 +1368,11 @@ select:focus-visible {
     grid-template-rows: 1fr;
   }
 
+  .rules-strip {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
   .hands {
     grid-template-columns: 1fr;
   }
@@ -1306,6 +1384,29 @@ select:focus-visible {
   .free-claim-card {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+@media (max-height: 800px) {
+  .table-layout {
+    height: min(calc(100vh - 120px), 700px);
+    gap: 8px;
+  }
+
+  .section {
+    padding: 14px;
+  }
+
+  .status-strip {
+    padding: 8px;
+  }
+
+  .playing-card {
+    width: clamp(42px, 5.6vh, 64px);
+  }
+
+  .actions-panel {
+    padding: 10px;
   }
 }
 

@@ -36,6 +36,8 @@ const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
 const PATCH_REPO = 'Elicanig/1v1Blackjack';
 const FRIEND_INVITE_TTL_MS = 30 * 60 * 1000;
 const EMOTE_COOLDOWN_MS = 2000;
+const FRIEND_CHALLENGE_TTL_MS = 10 * 60 * 1000;
+const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 
 const configuredDataDir = process.env.DATA_DIR || '/var/data';
 let DATA_DIR = configuredDataDir;
@@ -55,7 +57,8 @@ const db = await JSONFilePreset(DB_PATH, {
   users: [],
   lobbies: [],
   friendInvites: [],
-  friendRequests: []
+  friendRequests: [],
+  friendChallenges: []
 });
 
 let dbTouched = false;
@@ -66,6 +69,14 @@ for (const user of db.data.users) {
   }
   if (user.lastFreeClaimAt === undefined) {
     user.lastFreeClaimAt = null;
+    dbTouched = true;
+  }
+  if (user.lastStreakClaimAt === undefined) {
+    user.lastStreakClaimAt = null;
+    dbTouched = true;
+  }
+  if (user.streakCount === undefined) {
+    user.streakCount = 0;
     dbTouched = true;
   }
   if (user.selectedBet === undefined) {
@@ -127,9 +138,21 @@ for (const user of db.data.users) {
     user.challengeSets = {};
     dbTouched = true;
   }
+  if (!Array.isArray(user.betHistory)) {
+    user.betHistory = [];
+    dbTouched = true;
+  }
+  if (!Array.isArray(user.skillChallenges)) {
+    user.skillChallenges = [];
+    dbTouched = true;
+  }
 }
 if (!Array.isArray(db.data.friendRequests)) {
   db.data.friendRequests = [];
+  dbTouched = true;
+}
+if (!Array.isArray(db.data.friendChallenges)) {
+  db.data.friendChallenges = [];
   dbTouched = true;
 }
 if (dbTouched) await db.write();
@@ -206,6 +229,13 @@ const CHALLENGE_POOLS = {
     { key: 'weekly_round_win_14', title: 'Weekly Victor', description: 'Win 14 rounds', goal: 14, rewardChips: 480, event: 'round_won' }
   ]
 };
+
+const SKILL_CHALLENGE_DEFS = [
+  { key: 'skill_win_no_bust', title: 'Clean Win', description: 'Win 2 hands without busting', goal: 2, rewardChips: 40, event: 'win_no_bust' },
+  { key: 'skill_stand_16', title: 'Disciplined Stand', description: 'Stand on 16+ three times', goal: 3, rewardChips: 35, event: 'stand_16_plus' },
+  { key: 'skill_blackjack', title: 'Natural Talent', description: 'Get a blackjack', goal: 1, rewardChips: 50, event: 'blackjack' },
+  { key: 'skill_practice_hands', title: 'Practice Reps', description: 'Play 5 hands in practice', goal: 5, rewardChips: 30, event: 'practice_hand_played' }
+];
 
 const BOT_ACCURACY = {
   easy: 0.5,
@@ -345,13 +375,29 @@ async function getPatchNotesPayload() {
 }
 
 function freeClaimMeta(user) {
-  const lastTs = user?.lastFreeClaimAt ? new Date(user.lastFreeClaimAt).getTime() : 0;
+  const lastClaim = user?.lastStreakClaimAt || user?.lastFreeClaimAt || null;
+  const lastTs = lastClaim ? new Date(lastClaim).getTime() : 0;
   const nextTs = lastTs ? lastTs + FREE_CLAIM_COOLDOWN_MS : 0;
   const nowTs = Date.now();
+  const streakCount = Math.max(0, Number(user?.streakCount || 0));
+  const nextReward = STREAK_REWARDS[streakCount % STREAK_REWARDS.length];
   return {
     available: !lastTs || nowTs >= nextTs,
-    nextAt: nextTs ? new Date(nextTs).toISOString() : null
+    nextAt: nextTs ? new Date(nextTs).toISOString() : null,
+    streakCount,
+    nextReward
   };
+}
+
+function sameUtcDay(a, b) {
+  if (!a || !b) return false;
+  return new Date(a).toISOString().slice(0, 10) === new Date(b).toISOString().slice(0, 10);
+}
+
+function previousUtcDayIso(isoDate) {
+  const d = new Date(isoDate);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
 }
 
 function normalizeUsername(username) {
@@ -365,6 +411,7 @@ function avatarUrl(style, seed) {
 }
 
 function sanitizeUser(user) {
+  const streak = freeClaimMeta(user);
   return {
     id: user.id,
     username: user.username,
@@ -375,8 +422,11 @@ function sanitizeUser(user) {
     bio: user.bio,
     chips: user.chips,
     stats: user.stats,
+    betHistory: (user.betHistory || []).slice(0, 10),
     selectedBet: user.selectedBet || BASE_BET,
-    hasClaimedFree100: Boolean(user.lastFreeClaimAt)
+    hasClaimedFree100: Boolean(user.lastStreakClaimAt || user.lastFreeClaimAt),
+    streakCount: streak.streakCount,
+    nextStreakReward: streak.nextReward
   };
 }
 
@@ -451,6 +501,13 @@ function pushNotification(userId, notification) {
   emitToUser(userId, 'notify:new', payload);
 }
 
+function isUserInActiveMatch(userId) {
+  for (const match of matches.values()) {
+    if (match.playerIds.includes(userId)) return true;
+  }
+  return false;
+}
+
 function buildFriendsPayload(user) {
   const incoming = db.data.friendRequests
     .filter((r) => r.toUserId === user.id && r.status === 'pending')
@@ -487,10 +544,32 @@ function buildFriendsPayload(user) {
     .filter(Boolean)
     .map((friend) => ({
       ...sanitizeUser(friend),
-      online: Boolean(activeSessions.get(friend.id))
+      online: Boolean(activeSessions.get(friend.id)),
+      presence: isUserInActiveMatch(friend.id) ? 'in_match' : activeSessions.get(friend.id) ? 'online' : 'offline'
+    }));
+  const incomingChallenges = (db.data.friendChallenges || [])
+    .filter((c) => c.toUserId === user.id && c.status === 'pending' && new Date(c.expiresAt).getTime() > Date.now())
+    .map((c) => ({
+      id: c.id,
+      fromUserId: c.fromUserId,
+      fromUsername: getUserById(c.fromUserId)?.username || 'Unknown',
+      bet: c.bet,
+      message: c.message || '',
+      expiresAt: c.expiresAt
     }));
 
-  return { friends, incoming, outgoing };
+  const outgoingChallenges = (db.data.friendChallenges || [])
+    .filter((c) => c.fromUserId === user.id && c.status === 'pending' && new Date(c.expiresAt).getTime() > Date.now())
+    .map((c) => ({
+      id: c.id,
+      toUserId: c.toUserId,
+      toUsername: getUserById(c.toUserId)?.username || 'Unknown',
+      bet: c.bet,
+      message: c.message || '',
+      expiresAt: c.expiresAt
+    }));
+
+  return { friends, incoming, outgoing, incomingChallenges, outgoingChallenges };
 }
 
 function getParticipantChips(match, playerId) {
@@ -522,6 +601,17 @@ function setParticipantChips(match, playerId, chips) {
 
 function canAffordIncrement(match, playerId, amount) {
   return getParticipantChips(match, playerId) >= amount;
+}
+
+function appendBetHistory(user, entry) {
+  if (!user) return;
+  if (!Array.isArray(user.betHistory)) user.betHistory = [];
+  user.betHistory.unshift({
+    id: nanoid(8),
+    time: nowIso(),
+    ...entry
+  });
+  user.betHistory = user.betHistory.slice(0, 10);
 }
 
 function authMiddleware(req, res, next) {
@@ -806,6 +896,34 @@ function recordChallengeEvent(user, event, amount = 1) {
   }
 }
 
+function ensureSkillChallenges(user) {
+  if (!Array.isArray(user.skillChallenges) || user.skillChallenges.length === 0) {
+    user.skillChallenges = SKILL_CHALLENGE_DEFS.map((def) => ({
+      id: def.key,
+      key: def.key,
+      title: def.title,
+      description: def.description,
+      goal: def.goal,
+      progress: 0,
+      rewardChips: def.rewardChips,
+      event: def.event,
+      claimed: false
+    }));
+    return true;
+  }
+  return false;
+}
+
+function recordSkillEvent(user, event, amount = 1) {
+  if (!user || !event || amount <= 0) return;
+  ensureSkillChallenges(user);
+  for (const item of user.skillChallenges) {
+    if (item.claimed) continue;
+    if (item.event !== event) continue;
+    item.progress = Math.min(item.goal, (item.progress || 0) + amount);
+  }
+}
+
 function startRound(match) {
   const [p1, p2] = match.playerIds;
   const controllerId = match.betControllerId || p1;
@@ -1044,6 +1162,21 @@ function resolveRound(match) {
     }
   }
 
+  for (const out of outcomes) {
+    const handA = a.hands[out.handIndex] || a.hands[0];
+    const handB = b.hands[0];
+    if (userA) {
+      if (match.isPractice) recordSkillEvent(userA, 'practice_hand_played', 1);
+      if (out.winner === aId && handA && !handA.bust) recordSkillEvent(userA, 'win_no_bust', 1);
+      if (handA?.naturalBlackjack) recordSkillEvent(userA, 'blackjack', 1);
+    }
+    if (userB) {
+      if (match.isPractice) recordSkillEvent(userB, 'practice_hand_played', 1);
+      if (out.winner === bId && handB && !handB.bust) recordSkillEvent(userB, 'win_no_bust', 1);
+      if (handB?.naturalBlackjack) recordSkillEvent(userB, 'blackjack', 1);
+    }
+  }
+
   if (!match.isPractice && userA) {
     const naturals = a.hands.filter((h) => handMeta(h.cards).isNaturalBlackjack).length;
     if (naturals > 0) {
@@ -1078,9 +1211,34 @@ function resolveRound(match) {
   if (!match.isPractice) {
     if (userA) userA.stats.matchesPlayed += 1;
     if (userB) userB.stats.matchesPlayed += 1;
+  }
+
+  if (!match.isPractice) {
+    for (let idx = 0; idx < outcomes.length; idx += 1) {
+      const out = outcomes[idx];
+      const handA = a.hands[out.handIndex] || a.hands[0];
+      const handB = b.hands[0];
+      appendBetHistory(userA, {
+        mode: match.stakeType === 'REAL' ? 'PvP Real' : 'PvP',
+        bet: handA?.bet || match.round.baseBet,
+        result: out.winner === aId ? 'Win' : out.loser === aId ? 'Loss' : 'Push',
+        net: out.winner === aId ? out.amount : out.loser === aId ? -out.amount : 0,
+        notes: handA?.naturalBlackjack ? 'blackjack' : handA?.wasSplitHand ? 'split' : ''
+      });
+      appendBetHistory(userB, {
+        mode: match.stakeType === 'REAL' ? 'PvP Real' : 'PvP',
+        bet: handB?.bet || match.round.baseBet,
+        result: out.winner === bId ? 'Win' : out.loser === bId ? 'Loss' : 'Push',
+        net: out.winner === bId ? out.amount : out.loser === bId ? -out.amount : 0,
+        notes: handB?.naturalBlackjack ? 'blackjack' : handB?.wasSplitHand ? 'split' : ''
+      });
+    }
+  }
+
+  if (userA || userB) {
     db.write();
-    emitUserUpdate(aId);
-    emitUserUpdate(bId);
+    if (userA) emitUserUpdate(aId);
+    if (userB) emitUserUpdate(bId);
   }
 
   const outcomeA = chipsDelta[aId] > 0 ? 'win' : chipsDelta[aId] < 0 ? 'lose' : 'push';
@@ -1338,6 +1496,11 @@ function applyAction(match, playerId, action) {
 
   if (action === 'stand') {
     match.round.firstActionTaken = true;
+    const total = handTotal(hand.cards);
+    if (!isBotPlayer(playerId) && total >= 16) {
+      const user = getUserById(playerId);
+      if (user) recordSkillEvent(user, 'stand_16_plus', 1);
+    }
     hand.stood = true;
     hand.locked = true;
     progressTurn(match, playerId);
@@ -1548,6 +1711,56 @@ function emitLobbyUpdate(lobby) {
   }
 }
 
+function cleanupMatch(match) {
+  const timer = botTurnTimers.get(match.id);
+  if (timer) {
+    clearTimeout(timer);
+    botTurnTimers.delete(match.id);
+  }
+  const betTimer = botBetConfirmTimers.get(`${match.id}:bet`);
+  if (betTimer) {
+    clearTimeout(betTimer);
+    botBetConfirmTimers.delete(`${match.id}:bet`);
+  }
+  for (const pid of match.playerIds) {
+    const key = `${match.id}:${pid}`;
+    const dcTimer = disconnectTimers.get(key);
+    if (dcTimer) {
+      clearTimeout(dcTimer);
+      disconnectTimers.delete(key);
+    }
+  }
+  matches.delete(match.id);
+  if (match.lobbyId) {
+    lobbyToMatch.delete(match.lobbyId);
+    const lobby = db.data.lobbies.find((l) => l.id === match.lobbyId);
+    if (lobby) lobby.status = 'closed';
+  }
+}
+
+function leaveMatchByForfeit(match, leaverId) {
+  const opponentId = match.playerIds.find((id) => id !== leaverId);
+  const leaverUser = !isBotPlayer(leaverId) ? getUserById(leaverId) : null;
+  const opponentUser = !isBotPlayer(opponentId) ? getUserById(opponentId) : null;
+  if (leaverUser && opponentUser && !match.isPractice) {
+    const currentPot =
+      (match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0) +
+      (match.round?.players?.[opponentId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0);
+    const award = Math.max(match.round?.baseBet || BASE_BET, Math.min(leaverUser.chips, currentPot || BASE_BET));
+    leaverUser.chips = Math.max(0, leaverUser.chips - award);
+    opponentUser.chips += award;
+    appendBetHistory(leaverUser, { mode: 'PvP Real', bet: award, result: 'Forfeit', net: -award, notes: 'left match' });
+    appendBetHistory(opponentUser, { mode: 'PvP Real', bet: award, result: 'Win', net: award, notes: 'opponent left' });
+    emitUserUpdate(leaverUser.id);
+    emitUserUpdate(opponentUser.id);
+    db.write();
+  }
+
+  emitToUser(leaverId, 'match:ended', { reason: 'You left the match.' });
+  if (opponentId) emitToUser(opponentId, 'match:ended', { reason: 'Opponent left — you win by forfeit.' });
+  cleanupMatch(match);
+}
+
 function buildNewUser(username) {
   const cleanUsername = String(username || '').trim();
   const usernameKey = normalizeUsername(cleanUsername);
@@ -1581,9 +1794,14 @@ function buildNewUser(username) {
     lastDailyClaimAt: null,
     lastFreeClaimAt: null,
     selectedBet: BASE_BET,
-    notifications: []
+    notifications: [],
+    betHistory: [],
+    lastStreakClaimAt: null,
+    streakCount: 0,
+    skillChallenges: []
   };
   refreshChallengesForUser(user, true);
+  ensureSkillChallenges(user);
   return user;
 }
 
@@ -1649,8 +1867,10 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/me', authMiddleware, async (req, res) => {
   const friendsData = buildFriendsPayload(req.user);
   const refreshed = refreshChallengesForUser(req.user);
+  const refreshedSkills = ensureSkillChallenges(req.user);
   if (refreshed) await db.write();
   const freeClaim = freeClaimMeta(req.user);
+  if (refreshedSkills) await db.write();
   return res.json({
     user: sanitizeSelfUser(req.user),
     friends: friendsData.friends,
@@ -1658,14 +1878,21 @@ app.get('/api/me', authMiddleware, async (req, res) => {
       incoming: friendsData.incoming,
       outgoing: friendsData.outgoing
     },
+    friendChallenges: {
+      incoming: friendsData.incomingChallenges || [],
+      outgoing: friendsData.outgoingChallenges || []
+    },
     notifications: (req.user.notifications || []).slice(0, 30),
     freeClaimed: !freeClaim.available,
     freeClaimAvailable: freeClaim.available,
     freeClaimNextAt: freeClaim.nextAt,
+    streakCount: freeClaim.streakCount,
+    nextStreakReward: freeClaim.nextReward,
     challenges: {
       hourly: req.user.challengeSets.hourly?.items || [],
       daily: req.user.challengeSets.daily?.items || [],
-      weekly: req.user.challengeSets.weekly?.items || []
+      weekly: req.user.challengeSets.weekly?.items || [],
+      skill: req.user.skillChallenges || []
     }
   });
 });
@@ -1826,6 +2053,90 @@ app.post('/api/friends/invite-link/accept', authMiddleware, async (req, res) => 
   return res.json({ friends: getFriendList(req.user), inviter: sanitizeUser(inviter) });
 });
 
+app.post('/api/friends/challenge', authMiddleware, async (req, res) => {
+  const { toUsername, bet, message } = req.body || {};
+  const target = getUserByUsername(toUsername || '');
+  if (!target) return res.status(404).json({ error: 'Friend not found' });
+  if (!req.user.friends.includes(target.id)) return res.status(403).json({ error: 'Can only challenge friends' });
+  const amount = Math.max(MIN_BET, Math.min(MAX_BET_CAP, Number(bet) || BASE_BET));
+  const maxAllowed = Math.min(req.user.chips || 0, target.chips || 0);
+  if (maxAllowed < MIN_BET) return res.status(400).json({ error: 'Insufficient chips for challenge bet' });
+  const finalBet = Math.min(amount, maxAllowed);
+  const challenge = {
+    id: nanoid(10),
+    fromUserId: req.user.id,
+    toUserId: target.id,
+    bet: finalBet,
+    message: String(message || '').slice(0, 120),
+    status: 'pending',
+    createdAt: nowIso(),
+    expiresAt: new Date(Date.now() + FRIEND_CHALLENGE_TTL_MS).toISOString()
+  };
+  db.data.friendChallenges.push(challenge);
+  pushNotification(target.id, {
+    type: 'friend_challenge',
+    message: `${req.user.username} challenged you for ${finalBet} chips.`,
+    action: { label: 'Open', kind: 'friend_challenge', data: { challengeId: challenge.id } }
+  });
+  await db.write();
+  return res.json({ challenge });
+});
+
+app.post('/api/friends/challenge/respond', authMiddleware, async (req, res) => {
+  const { challengeId, decision } = req.body || {};
+  const challenge = (db.data.friendChallenges || []).find((c) => c.id === challengeId && c.toUserId === req.user.id && c.status === 'pending');
+  if (!challenge) return res.status(404).json({ error: 'Challenge not found' });
+  if (new Date(challenge.expiresAt).getTime() <= Date.now()) {
+    challenge.status = 'expired';
+    await db.write();
+    return res.status(410).json({ error: 'Challenge expired' });
+  }
+
+  const challenger = getUserById(challenge.fromUserId);
+  if (!challenger) return res.status(404).json({ error: 'Challenger unavailable' });
+
+  if (decision === 'decline') {
+    challenge.status = 'declined';
+    pushNotification(challenger.id, {
+      type: 'friend_challenge_declined',
+      message: `${req.user.username} declined your challenge.`
+    });
+    await db.write();
+    return res.json({ ok: true, status: 'declined' });
+  }
+
+  const finalBet = Math.max(MIN_BET, Math.min(challenge.bet, req.user.chips || 0, challenger.chips || 0, MAX_BET_CAP));
+  if (finalBet < MIN_BET) return res.status(400).json({ error: 'Insufficient chips to accept' });
+  challenge.status = 'accepted';
+
+  const lobby = {
+    id: normalizeLobbyCode(nanoid(8)),
+    ownerId: challenger.id,
+    opponentId: req.user.id,
+    status: 'full',
+    type: 'friend_challenge',
+    stakeType: 'REAL',
+    createdAt: nowIso()
+  };
+  db.data.lobbies.push(lobby);
+  const match = createMatch(lobby);
+  match.betSettings.selectedBetById[challenger.id] = finalBet;
+  match.round.baseBet = finalBet;
+  match.round.betConfirmedByPlayer[challenger.id] = true;
+  match.round.betConfirmedByPlayer[req.user.id] = true;
+  maybeBeginRoundAfterBetConfirm(match);
+  pushMatchState(match);
+  pushNotification(challenger.id, {
+    type: 'friend_challenge_accept',
+    message: `${req.user.username} accepted your challenge.`,
+    action: { label: 'Open match', kind: 'open_match', data: { matchId: match.id } }
+  });
+  await db.write();
+  emitToUser(challenger.id, 'friend:challengeStarted', { matchId: match.id });
+  emitToUser(req.user.id, 'friend:challengeStarted', { matchId: match.id });
+  return res.json({ ok: true, status: 'accepted', matchId: match.id });
+});
+
 app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
   const existing = db.data.lobbies.find(
     (l) => l.ownerId === req.user.id && l.status === 'waiting' && l.type !== 'bot'
@@ -1962,17 +2273,39 @@ app.post('/api/free-claim', authMiddleware, async (req, res) => {
       reward: 0,
       chips: req.user.chips,
       claimed: false,
-      claimedAt: req.user.lastFreeClaimAt,
+      claimedAt: req.user.lastStreakClaimAt || req.user.lastFreeClaimAt,
       nextAt: freeClaim.nextAt,
+      streakCount: freeClaim.streakCount,
+      nextReward: freeClaim.nextReward,
       error: 'Free claim on cooldown'
     });
   }
-  req.user.lastFreeClaimAt = nowIso();
-  req.user.chips += 100;
+  const now = nowIso();
+  const today = now.slice(0, 10);
+  const prevClaim = req.user.lastStreakClaimAt || req.user.lastFreeClaimAt;
+  const prevDay = prevClaim ? new Date(prevClaim).toISOString().slice(0, 10) : null;
+  const yesterday = previousUtcDayIso(now);
+  if (!prevDay) req.user.streakCount = 1;
+  else if (prevDay === today) req.user.streakCount = Math.max(1, req.user.streakCount || 1);
+  else if (prevDay === yesterday) req.user.streakCount = (req.user.streakCount || 0) + 1;
+  else req.user.streakCount = 1;
+
+  const reward = STREAK_REWARDS[(Math.max(1, req.user.streakCount) - 1) % STREAK_REWARDS.length];
+  req.user.lastStreakClaimAt = now;
+  req.user.lastFreeClaimAt = now;
+  req.user.chips += reward;
   await db.write();
   emitUserUpdate(req.user.id);
   const next = freeClaimMeta(req.user);
-  return res.json({ reward: 100, chips: req.user.chips, claimed: true, claimedAt: req.user.lastFreeClaimAt, nextAt: next.nextAt });
+  return res.json({
+    reward,
+    chips: req.user.chips,
+    claimed: true,
+    claimedAt: req.user.lastStreakClaimAt,
+    nextAt: next.nextAt,
+    streakCount: req.user.streakCount,
+    nextReward: next.nextReward
+  });
 });
 
 app.get('/api/notifications', authMiddleware, (req, res) => {
@@ -2006,11 +2339,13 @@ app.post('/api/daily-claim', authMiddleware, async (req, res) => {
 
 app.get('/api/challenges', authMiddleware, async (req, res) => {
   const refreshed = refreshChallengesForUser(req.user);
-  if (refreshed) await db.write();
+  const refreshedSkills = ensureSkillChallenges(req.user);
+  if (refreshed || refreshedSkills) await db.write();
   const payload = {
     hourly: req.user.challengeSets.hourly?.items || [],
     daily: req.user.challengeSets.daily?.items || [],
-    weekly: req.user.challengeSets.weekly?.items || []
+    weekly: req.user.challengeSets.weekly?.items || [],
+    skill: req.user.skillChallenges || []
   };
   return res.json({
     challenges: payload
@@ -2021,11 +2356,15 @@ app.post('/api/challenges/claim', authMiddleware, async (req, res) => {
   const { id, challengeId } = req.body || {};
   const targetId = id || challengeId;
   refreshChallengesForUser(req.user);
+  ensureSkillChallenges(req.user);
   const tiers = ['hourly', 'daily', 'weekly'];
   let target = null;
   for (const tier of tiers) {
     target = (req.user.challengeSets[tier]?.items || []).find((c) => c.id === targetId);
     if (target) break;
+  }
+  if (!target) {
+    target = (req.user.skillChallenges || []).find((c) => c.id === targetId);
   }
   if (!target) return res.status(404).json({ error: 'Challenge not found' });
   if (target.claimed) return res.status(409).json({ error: 'Already claimed' });
@@ -2040,6 +2379,11 @@ app.post('/api/challenges/claim', authMiddleware, async (req, res) => {
 app.get('/api/patch-notes', async (_req, res) => {
   const payload = await getPatchNotesPayload();
   return res.json(payload);
+});
+
+app.get('/api/version', (_req, res) => {
+  const commit = deployCommitId();
+  return res.json({ version: commit ? commit.slice(0, 7) : 'dev' });
 });
 
 io.use((socket, next) => {
@@ -2146,6 +2490,14 @@ io.on('connection', (socket) => {
     return null;
   });
 
+  socket.on('match:leave', (payload = {}) => {
+    const { matchId } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    if (!match.playerIds.includes(userId)) return socket.emit('match:error', { error: 'Unauthorized' });
+    leaveMatchByForfeit(match, userId);
+  });
+
   socket.on('game:emote', (payload = {}) => {
     const { matchId, type, value } = payload;
     const match = matches.get(matchId);
@@ -2202,17 +2554,7 @@ io.on('connection', (socket) => {
         io.to(activeSessions.get(opponentId)).emit('match:ended', {
           reason: 'Opponent disconnected for over 60 seconds'
         });
-        const botTimer = botTurnTimers.get(match.id);
-        if (botTimer) {
-          clearTimeout(botTimer);
-          botTurnTimers.delete(match.id);
-        }
-        const botBetTimer = botBetConfirmTimers.get(`${match.id}:bet`);
-        if (botBetTimer) {
-          clearTimeout(botBetTimer);
-          botBetConfirmTimers.delete(`${match.id}:bet`);
-        }
-        matches.delete(match.id);
+        cleanupMatch(match);
         disconnectTimers.delete(key);
       }, DISCONNECT_TIMEOUT_MS);
 

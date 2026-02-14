@@ -44,7 +44,11 @@
       "challengeSets": {},
       "pin": "4576",
       "pinHash": "$2a$10$rIMua7yQRFDQpZBhZiYBW.lykmJyzlgr9SDz1nQql8jJ.fISBOYty",
-      "usernameKey": "elicanig"
+      "usernameKey": "elicanig",
+      "lastStreakClaimAt": null,
+      "streakCount": 0,
+      "betHistory": [],
+      "skillChallenges": []
     }
   ],
   "lobbies": [
@@ -122,5 +126,6 @@
     }
   ],
   "friendInvites": [],
-  "friendRequests": []
+  "friendRequests": [],
+  "friendChallenges": []
 }

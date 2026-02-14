@@ -17,6 +17,7 @@ function initialViewFromPath() {
   if (pathname === '/lobbies' || pathname === '/lobby') return 'lobbies';
   if (pathname === '/challenges') return 'challenges';
   if (pathname === '/notifications') return 'notifications';
+  if (pathname === '/rules') return 'rules';
   if (pathname === '/match') return 'match';
   return 'home';
 }
@@ -132,6 +133,8 @@ const state = {
   friends: [],
   incomingRequests: [],
   outgoingRequests: [],
+  incomingFriendChallenges: [],
+  outgoingFriendChallenges: [],
   notifications: [],
   notificationsOpen: false,
   toasts: [],
@@ -142,6 +145,7 @@ const state = {
   error: '',
   patchNotes: [],
   patchNotesDeploy: null,
+  appVersion: 'dev',
   currentLobby: null,
   currentMatch: null,
   pendingFriendInviteCode: new URLSearchParams(window.location.search).get('friendInvite'),
@@ -161,7 +165,12 @@ const state = {
   selectedBotDifficulty: 'normal',
   botStakeType: 'FAKE',
   emotePickerOpen: false,
-  floatingEmote: null
+  floatingEmote: null,
+  challengeModalFriend: null,
+  challengeBet: 25,
+  challengeMessage: '',
+  showMatchDetails: false,
+  leaveMatchModal: false
 };
 
 let freeClaimTicker = null;
@@ -232,7 +241,7 @@ function syncFreeClaimUI() {
   const onCooldown = state.freeClaimRemainingMs > 0;
   label.textContent = onCooldown ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now';
   btn.disabled = onCooldown;
-  btn.textContent = onCooldown ? 'On cooldown' : 'Claim +100';
+  btn.textContent = onCooldown ? 'On cooldown' : `Claim +${state.me?.nextStreakReward || 50}`;
 }
 
 async function loadPatchNotes() {
@@ -243,6 +252,15 @@ async function loadPatchNotes() {
   } catch {
     state.patchNotes = FALLBACK_PATCH_NOTES;
     state.patchNotesDeploy = null;
+  }
+}
+
+async function loadVersion() {
+  try {
+    const data = await api('/api/version', { method: 'GET' });
+    state.appVersion = data?.version || 'dev';
+  } catch {
+    state.appVersion = 'dev';
   }
 }
 
@@ -324,6 +342,13 @@ function connectSocket() {
     state.notifications = [notification, ...state.notifications].slice(0, 60);
     pushToast(notification.message, notification.type);
   });
+  state.socket.on('friend:challengeStarted', ({ matchId }) => {
+    if (matchId) {
+      goToView('match');
+      pushToast('Friend challenge match started.');
+      render();
+    }
+  });
   state.socket.on('game:emote', (event) => {
     if (!event) return;
     state.floatingEmote = event;
@@ -341,6 +366,7 @@ function connectSocket() {
   });
   state.socket.on('match:state', (match) => {
     state.currentMatch = match;
+    state.leaveMatchModal = false;
     const myBankroll = match.players?.[state.me?.id]?.bankroll;
     if (state.me && Number.isFinite(myBankroll)) {
       state.me.chips = myBankroll;
@@ -379,6 +405,7 @@ function connectSocket() {
     setStatus(reason);
     state.currentMatch = null;
     state.currentLobby = null;
+    state.leaveMatchModal = false;
     goToView('home');
     loadMe();
   });
@@ -398,11 +425,17 @@ async function loadMe() {
     state.friends = data.friends || [];
     state.incomingRequests = data.friendRequests?.incoming || [];
     state.outgoingRequests = data.friendRequests?.outgoing || [];
+    state.incomingFriendChallenges = data.friendChallenges?.incoming || [];
+    state.outgoingFriendChallenges = data.friendChallenges?.outgoing || [];
     state.notifications = data.notifications || [];
     state.challenges = data.challenges || [];
     state.freeClaimed = !Boolean(data.freeClaimAvailable);
     state.freeClaimedAt = null;
     state.freeClaimNextAt = data.freeClaimNextAt || null;
+    if (state.me) {
+      state.me.streakCount = data.streakCount ?? state.me.streakCount ?? 0;
+      state.me.nextStreakReward = data.nextStreakReward ?? state.me.nextStreakReward ?? 50;
+    }
     updateFreeClaimCountdown();
     if (typeof data.user?.selectedBet === 'number') {
       const local = Number(localStorage.getItem(`bb_last_bet_${data.user.id}`));
@@ -424,6 +457,7 @@ async function loadMe() {
     }
 
     await loadPatchNotes();
+    await loadVersion();
     render();
   } catch (e) {
     localStorage.removeItem('bb_auth_token');
@@ -437,6 +471,8 @@ async function loadMe() {
     state.incomingRequests = [];
     state.outgoingRequests = [];
     state.notifications = [];
+    state.incomingFriendChallenges = [];
+    state.outgoingFriendChallenges = [];
     state.challenges = [];
     state.freeClaimed = false;
     state.freeClaimedAt = null;
@@ -444,6 +480,7 @@ async function loadMe() {
     state.freeClaimRemainingMs = 0;
     state.patchNotes = FALLBACK_PATCH_NOTES;
     state.patchNotesDeploy = null;
+    state.appVersion = 'dev';
     render();
   }
 }
@@ -462,6 +499,7 @@ function goToView(view) {
     lobbies: '/lobbies',
     challenges: '/challenges',
     notifications: '/notifications',
+    rules: '/rules',
     match: '/match'
   };
   const next = routes[view] || '/';
@@ -518,6 +556,11 @@ function emitSetBaseBet(amount) {
 function emitConfirmBet() {
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:confirmBet', { matchId: state.currentMatch.id });
+}
+
+function emitLeaveMatch() {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('match:leave', { matchId: state.currentMatch.id });
 }
 
 function emitEmote(type, value) {
@@ -678,7 +721,41 @@ async function loadFriendsData() {
     state.friends = data.friends || [];
     state.incomingRequests = data.incoming || [];
     state.outgoingRequests = data.outgoing || [];
+    state.incomingFriendChallenges = data.incomingChallenges || [];
+    state.outgoingFriendChallenges = data.outgoingChallenges || [];
     render();
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+async function sendFriendChallenge(toUsername, bet, message) {
+  try {
+    await api('/api/friends/challenge', {
+      method: 'POST',
+      body: JSON.stringify({ toUsername, bet, message })
+    });
+    state.challengeModalFriend = null;
+    pushToast(`Challenge sent to ${toUsername}.`);
+    await loadFriendsData();
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+async function respondFriendChallenge(challengeId, decision) {
+  try {
+    const data = await api('/api/friends/challenge/respond', {
+      method: 'POST',
+      body: JSON.stringify({ challengeId, decision })
+    });
+    if (data.matchId) {
+      pushToast('Challenge accepted. Match starting.');
+      goToView('match');
+    } else {
+      pushToast('Challenge declined.');
+    }
+    await loadFriendsData();
   } catch (e) {
     setError(e.message);
   }
@@ -750,6 +827,12 @@ function runNotificationAction(notification) {
   if (action.kind === 'join_lobby') {
     const code = action.data?.lobbyCode;
     if (code) joinLobby(code);
+  } else if (action.kind === 'friend_challenge') {
+    goToView('friends');
+    loadFriendsData();
+  } else if (action.kind === 'open_match') {
+    goToView('match');
+    render();
   }
 }
 
@@ -772,18 +855,22 @@ async function claimFree100() {
   try {
     const data = await api('/api/free-claim', { method: 'POST' });
     state.me.chips = data.chips;
+    state.me.streakCount = data.streakCount ?? state.me.streakCount;
+    state.me.nextStreakReward = data.nextReward ?? state.me.nextStreakReward;
     state.freeClaimed = !data.reward;
     state.freeClaimedAt = data.claimedAt || null;
     state.freeClaimNextAt = data.nextAt || null;
     updateFreeClaimCountdown();
-    setStatus(data.reward > 0 ? `Claimed free +${data.reward} chips` : 'Free chips on cooldown.');
+    setStatus(data.reward > 0 ? `Daily streak claim: +${data.reward} chips` : 'Daily streak on cooldown.');
+    syncFreeClaimUI();
   } catch (e) {
     try {
       const data = await api('/api/me');
       state.freeClaimNextAt = data.freeClaimNextAt || null;
       state.freeClaimed = !Boolean(data.freeClaimAvailable);
       updateFreeClaimCountdown();
-      setStatus('Free chips on cooldown.');
+      setStatus('Daily streak on cooldown.');
+      syncFreeClaimUI();
     } catch {
       setError(e.message);
     }
@@ -892,9 +979,14 @@ function syncNotificationOverlay() {
             <div class="notif-item">
               <div>${n.message}</div>
               ${
-                n.action
-                  ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>`
-                  : ''
+                n.type === 'friend_challenge'
+                  ? `<div class="row">
+                       <button class="primary" data-notif-ch-accept="${n.action?.data?.challengeId || ''}">Accept</button>
+                       <button class="warn" data-notif-ch-decline="${n.action?.data?.challengeId || ''}">Decline</button>
+                     </div>`
+                  : n.action
+                    ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>`
+                    : ''
               }
             </div>
           `
@@ -922,6 +1014,20 @@ function syncNotificationOverlay() {
     btn.onclick = () => {
       const notif = state.notifications.find((n) => n.id === btn.dataset.notifAction);
       runNotificationAction(notif);
+      state.notificationsOpen = false;
+      render();
+    };
+  });
+  mount.querySelectorAll('[data-notif-ch-accept]').forEach((btn) => {
+    btn.onclick = () => {
+      respondFriendChallenge(btn.dataset.notifChAccept, 'accept');
+      state.notificationsOpen = false;
+      render();
+    };
+  });
+  mount.querySelectorAll('[data-notif-ch-decline]').forEach((btn) => {
+    btn.onclick = () => {
+      respondFriendChallenge(btn.dataset.notifChDecline, 'decline');
       state.notificationsOpen = false;
       render();
     };
@@ -974,6 +1080,7 @@ function renderTopbar(title = 'Blackjack Battle') {
         <button data-go="friends" class="nav-pill ${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
         <button data-go="lobbies" class="nav-pill ${state.view === 'lobbies' ? 'nav-active' : ''}">Lobbies</button>
         <button data-go="challenges" class="nav-pill ${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
+        <button data-go="rules" class="nav-pill ${state.view === 'rules' ? 'nav-active' : ''}">Rules</button>
       </div>
       <div class="topbar-right nav">
         ${renderNotificationBell()}
@@ -1100,10 +1207,32 @@ function renderHome() {
         </div>
         <div class="free-claim-card">
           <div>
-            <strong>Free 100 Chips</strong>
+            <strong>Daily Streak</strong>
+            <div class="muted">Streak: ${me.streakCount || 0} day${(me.streakCount || 0) === 1 ? '' : 's'} • Next reward +${me.nextStreakReward || 50}</div>
             <div class="muted" id="freeClaimCountdown">${state.freeClaimRemainingMs > 0 ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now'}</div>
           </div>
           <button class="gold" id="claimFreeBtn" ${state.freeClaimRemainingMs > 0 ? 'disabled' : ''}>${state.freeClaimRemainingMs > 0 ? 'On cooldown' : 'Claim +100'}</button>
+        </div>
+        <div class="bet-history">
+          <h4>Bet History (Last 10)</h4>
+          ${
+            (me.betHistory || []).length
+              ? `<div class="history-list">
+                  ${(me.betHistory || [])
+                    .slice(0, 10)
+                    .map(
+                      (h) => `<div class="history-row">
+                        <span>${new Date(h.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                        <span>${h.mode}</span>
+                        <span>Bet ${h.bet}</span>
+                        <span>${h.result}</span>
+                        <span class="${h.net >= 0 ? 'gain' : 'loss'}">${h.net >= 0 ? '+' : ''}${h.net}</span>
+                      </div>`
+                    )
+                    .join('')}
+                 </div>`
+              : '<div class="muted">No real-chip hand history yet.</div>'
+          }
         </div>
         </section>
         <section class="card section patch-card">
@@ -1136,6 +1265,13 @@ function renderHome() {
           .join('')
       }
       <button id="togglePatchNotesBtn" class="ghost">${state.showMorePatchNotes ? 'View less' : 'View more'}</button>
+        </section>
+        <section class="card section rules-strip">
+          <div>
+            <strong>Rules:</strong> Blackjack 3:2 • 1 deck • reshuffle each round • surrender available
+          </div>
+          <div class="muted">Version: ${state.appVersion || 'dev'}</div>
+          <button id="openRulesBtn" class="ghost">Rules</button>
         </section>
       </div>
     </main>
@@ -1174,6 +1310,13 @@ function renderHome() {
 
   const claimBtn = document.getElementById('claimFreeBtn');
   if (claimBtn) claimBtn.onclick = claimFree100;
+  const openRulesBtn = document.getElementById('openRulesBtn');
+  if (openRulesBtn) {
+    openRulesBtn.onclick = () => {
+      goToView('rules');
+      render();
+    };
+  }
   syncFreeClaimUI();
 }
 
@@ -1282,6 +1425,26 @@ function renderFriends() {
               : ''
           }
         </div>
+        <h3 style="margin-top:1rem">Incoming Friend Challenges</h3>
+        ${
+          state.incomingFriendChallenges.length
+            ? state.incomingFriendChallenges
+                .map(
+                  (c) => `<div class="friend challenge-invite">
+                    <div>
+                      <strong>${c.fromUsername}</strong>
+                      <div class="muted">Bet ${c.bet} chips ${c.message ? `• "${c.message}"` : ''}</div>
+                      <div class="muted">Expires ${new Date(c.expiresAt).toLocaleTimeString()}</div>
+                    </div>
+                    <div class="row">
+                      <button class="primary" data-challenge-accept="${c.id}">Accept</button>
+                      <button class="warn" data-challenge-decline="${c.id}">Decline</button>
+                    </div>
+                  </div>`
+                )
+                .join('')
+            : '<p class="muted">No incoming challenges.</p>'
+        }
         <h3 style="margin-top:1rem">Incoming Requests</h3>
         ${
           state.incomingRequests.length
@@ -1315,11 +1478,15 @@ function renderFriends() {
                     ? `<img src="${f.avatarUrl || f.avatar}" alt="${f.username} avatar" style="width:26px;height:26px;border-radius:999px;border:1px solid rgba(255,255,255,0.16)" />`
                     : `<span style="width:26px;height:26px;border-radius:999px;display:inline-grid;place-items:center;background:rgba(255,255,255,0.12)">${(f.username || '?').slice(0, 1).toUpperCase()}</span>`
                 }
+                <span class="status-dot status-${f.presence || (f.online ? 'online' : 'offline')}"></span>
                 <strong>${f.username}</strong>
               </div>
-              <div class="muted">${f.online ? 'Online' : 'Offline'} • ${f.chips} chips</div>
+              <div class="muted">${f.presence === 'in_match' ? 'In match' : f.online ? 'Online' : 'Offline'} • ${f.chips} chips</div>
             </div>
-            <button data-invite="${f.username}">Invite</button>
+            <div class="row">
+              <button data-invite="${f.username}">Invite</button>
+              <button class="ghost" data-challenge-open="${f.username}">Challenge</button>
+            </div>
           </div>
         `
           )
@@ -1336,6 +1503,27 @@ function renderFriends() {
       </div>
 
     </main>
+    ${
+      state.challengeModalFriend
+        ? `<div class="modal">
+            <div class="modal-panel card">
+              <h3>Challenge ${state.challengeModalFriend}</h3>
+              <div class="grid">
+                <label>Bet
+                  <input id="challengeBetInput" type="number" min="5" max="${state.me?.chips || 0}" value="${state.challengeBet}" />
+                </label>
+                <label>Message
+                  <input id="challengeMsgInput" maxlength="120" value="${state.challengeMessage || ''}" placeholder="Good luck" />
+                </label>
+              </div>
+              <div class="row" style="margin-top:0.7rem">
+                <button id="sendChallengeBtn" class="primary">Send Challenge</button>
+                <button id="cancelChallengeBtn" class="ghost">Cancel</button>
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
   `;
   bindShellNav();
 
@@ -1368,6 +1556,35 @@ function renderFriends() {
   app.querySelectorAll('[data-invite]').forEach((btn) => {
     btn.onclick = () => inviteFriendToLobby(btn.dataset.invite);
   });
+  app.querySelectorAll('[data-challenge-open]').forEach((btn) => {
+    btn.onclick = () => {
+      state.challengeModalFriend = btn.dataset.challengeOpen;
+      state.challengeBet = Math.max(5, Math.min(50, state.me?.chips || 50));
+      state.challengeMessage = '';
+      render();
+    };
+  });
+  app.querySelectorAll('[data-challenge-accept]').forEach((btn) => {
+    btn.onclick = () => respondFriendChallenge(btn.dataset.challengeAccept, 'accept');
+  });
+  app.querySelectorAll('[data-challenge-decline]').forEach((btn) => {
+    btn.onclick = () => respondFriendChallenge(btn.dataset.challengeDecline, 'decline');
+  });
+  const sendChallengeBtn = document.getElementById('sendChallengeBtn');
+  if (sendChallengeBtn) {
+    sendChallengeBtn.onclick = () => {
+      const bet = Number(document.getElementById('challengeBetInput')?.value || state.challengeBet);
+      const msg = String(document.getElementById('challengeMsgInput')?.value || '');
+      sendFriendChallenge(state.challengeModalFriend, bet, msg);
+    };
+  }
+  const cancelChallengeBtn = document.getElementById('cancelChallengeBtn');
+  if (cancelChallengeBtn) {
+    cancelChallengeBtn.onclick = () => {
+      state.challengeModalFriend = null;
+      render();
+    };
+  }
 }
 
 function renderLobby() {
@@ -1436,7 +1653,7 @@ function renderLobby() {
 }
 
 function renderChallenges() {
-  const groups = state.challenges || { hourly: [], daily: [], weekly: [] };
+  const groups = state.challenges || { hourly: [], daily: [], weekly: [], skill: [] };
   const renderTier = (label, key) => `
     <div class="card section" style="margin-top:1rem">
       <h3>${label}</h3>
@@ -1464,6 +1681,7 @@ function renderChallenges() {
       ${renderTier('Hourly Challenges', 'hourly')}
       ${renderTier('Daily Challenges', 'daily')}
       ${renderTier('Weekly Challenges', 'weekly')}
+      ${renderTier('Skill Challenges', 'skill')}
     </main>
   `;
   bindShellNav();
@@ -1486,7 +1704,16 @@ function renderNotifications() {
             <div class="notif-item">
               <div>${n.message}</div>
               <div class="muted">${new Date(n.createdAt).toLocaleString()}</div>
-              ${n.action ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>` : ''}
+              ${
+                n.type === 'friend_challenge'
+                  ? `<div class="row">
+                       <button class="primary" data-notif-ch-accept="${n.action?.data?.challengeId || ''}">Accept</button>
+                       <button class="warn" data-notif-ch-decline="${n.action?.data?.challengeId || ''}">Decline</button>
+                     </div>`
+                  : n.action
+                    ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>`
+                    : ''
+              }
             </div>
           `
               )
@@ -1508,6 +1735,33 @@ function renderNotifications() {
       runNotificationAction(notif);
     };
   });
+  app.querySelectorAll('[data-notif-ch-accept]').forEach((btn) => {
+    btn.onclick = () => respondFriendChallenge(btn.dataset.notifChAccept, 'accept');
+  });
+  app.querySelectorAll('[data-notif-ch-decline]').forEach((btn) => {
+    btn.onclick = () => respondFriendChallenge(btn.dataset.notifChDecline, 'decline');
+  });
+}
+
+function renderRules() {
+  app.innerHTML = `
+    ${renderTopbar('Rules')}
+    <main class="view-stack">
+      <div class="card section">
+        <h3>Rules & Fairness</h3>
+        <ul class="patch-list">
+          <li class="muted">Blackjack pays 3:2 for natural blackjack.</li>
+          <li class="muted">Single 52-card deck, reshuffled every round.</li>
+          <li class="muted">Each player sees one opponent upcard; hidden cards reveal at resolution.</li>
+          <li class="muted">Surrender loses 75% of the hand bet.</li>
+          <li class="muted">Split/double pressure requires opponent to match or surrender.</li>
+          <li class="muted">Leaving a PvP match is treated as forfeit.</li>
+        </ul>
+        <div class="muted">Version: ${state.appVersion || 'dev'}</div>
+      </div>
+    </main>
+  `;
+  bindShellNav();
 }
 
 function renderHand(hand, index, active) {
@@ -1705,6 +1959,7 @@ function renderMatch() {
                       </div>`
                     : ''
                 }
+                <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>
               </div>`
             : ''
         }
@@ -1729,18 +1984,35 @@ function renderMatch() {
           : ''
       }
 
-      <div class="muted">
-        ${
-          isBotOpponent
-            ? `Opponent is ${playerName(oppId)} (${match.participants?.[oppId]?.difficulty} difficulty).`
-            : `Disconnect grace: up to 60 seconds reconnect is allowed. Connected states: You ${
-                match.disconnects[me.id]?.connected ? 'online' : 'offline'
-              } / Opponent ${opponentConnected ? 'online' : 'offline'}`
-        }
-      </div>
+      <details class="match-details">
+        <summary>Details</summary>
+        <div class="muted">
+          ${
+            isBotOpponent
+              ? `Opponent is ${playerName(oppId)} (${match.participants?.[oppId]?.difficulty} difficulty).`
+              : `Disconnect grace: up to 60 seconds reconnect is allowed. Connected states: You ${
+                  match.disconnects[me.id]?.connected ? 'online' : 'offline'
+                } / Opponent ${opponentConnected ? 'online' : 'offline'}`
+          }
+        </div>
+      </details>
 
       </div>
     </main>
+    ${
+      state.leaveMatchModal
+        ? `<div class="modal">
+            <div class="modal-panel card">
+              <h3>Leave Match?</h3>
+              <p class="muted">You will forfeit this round and end the match.</p>
+              <div class="row">
+                <button id="confirmLeaveMatchBtn" class="warn">Leave Match</button>
+                <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
   `;
   bindShellNav();
 
@@ -1776,6 +2048,27 @@ function renderMatch() {
       render();
     };
   });
+  const leaveMatchBtn = document.getElementById('leaveMatchBtn');
+  if (leaveMatchBtn) {
+    leaveMatchBtn.onclick = () => {
+      state.leaveMatchModal = true;
+      render();
+    };
+  }
+  const confirmLeaveMatchBtn = document.getElementById('confirmLeaveMatchBtn');
+  if (confirmLeaveMatchBtn) {
+    confirmLeaveMatchBtn.onclick = () => {
+      state.leaveMatchModal = false;
+      emitLeaveMatch();
+    };
+  }
+  const cancelLeaveMatchBtn = document.getElementById('cancelLeaveMatchBtn');
+  if (cancelLeaveMatchBtn) {
+    cancelLeaveMatchBtn.onclick = () => {
+      state.leaveMatchModal = false;
+      render();
+    };
+  }
 }
 
 function render() {
@@ -1795,6 +2088,8 @@ function render() {
       renderChallenges();
     } else if (state.view === 'notifications') {
       renderNotifications();
+    } else if (state.view === 'rules') {
+      renderRules();
     } else if (state.view === 'match') {
       renderMatch();
     } else {
