@@ -1863,7 +1863,7 @@ function renderMatch() {
             ? `<section class="betting-layout">
                 <div class="betting-header">
                   <h3>Round ${match.roundNumber} — Place your bet</h3>
-                  <div class="bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()} chips</strong></div>
+                  <div class="bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()}</strong></div>
                 </div>
                 <div class="match-zone betting-zone">
                   <div class="bet-control">
@@ -1886,41 +1886,38 @@ function renderMatch() {
                   </div>
                 </div>
               </section>`
-            : `<section class="match-main">
+            : `<section class="match-main play-layout">
                 <div class="status-strip">
                   <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
                   <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
                   <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
-                  <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()} chips</strong></div>
+                  <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()}</strong></div>
                 </div>
-                <div class="zones-grid">
-                  <div class="match-zone you-zone">
-                    <div class="zone-head">
-                      <h4>You: ${playerName(me.id)}</h4>
-                      <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
-                    </div>
-                    <div class="hands">
-                      ${myState.hands.map((h, idx) => renderHand(h, idx, idx === myState.activeHandIndex, pressureMine.has(idx))).join('')}
-                    </div>
+                <div class="match-zone opponent-zone">
+                  <div class="zone-head">
+                    <h4>Opponent: ${playerName(oppId)}
+                    ${
+                      state.floatingEmote && state.floatingEmote.fromUserId === oppId
+                        ? `<span class="emote-bubble ${state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip'}">${state.floatingEmote.value}</span>`
+                        : ''
+                    }
+                    </h4>
+                    <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
                   </div>
-                  <div class="match-zone opponent-zone">
-                    <div class="zone-head">
-                      <h4>Opponent: ${playerName(oppId)}
-                      ${
-                        state.floatingEmote && state.floatingEmote.fromUserId === oppId
-                          ? `<span class="emote-bubble ${state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip'}">${state.floatingEmote.value}</span>`
-                          : ''
-                      }
-                      </h4>
-                      <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
-                    </div>
-                    <div class="hands">
-                      ${oppState.hands.map((h, idx) => renderHand(h, idx, idx === oppState.activeHandIndex, pressureOpp.has(idx))).join('')}
-                    </div>
+                  <div class="hands">
+                    ${oppState.hands.map((h, idx) => renderHand(h, idx, idx === oppState.activeHandIndex, pressureOpp.has(idx))).join('')}
                   </div>
                 </div>
-              </section>
-              <aside class="match-side">
+                <div class="match-zone you-zone">
+                  <div class="zone-head">
+                    <h4>You: ${playerName(me.id)}</h4>
+                    <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
+                  </div>
+                  <div class="hands">
+                    ${myState.hands.map((h, idx) => renderHand(h, idx, idx === myState.activeHandIndex, pressureMine.has(idx))).join('')}
+                  </div>
+                </div>
+
                 <div class="actions-panel" ${roundResolved ? 'style="display:none"' : ''}>
                   <div class="actions actions-compact">
                     <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
@@ -1931,11 +1928,10 @@ function renderMatch() {
                     ${
                       isPvpMatch
                         ? `<button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
-                           <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>`
+                           <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave</button>`
                         : ''
                     }
                   </div>
-
                   ${
                     isPvpMatch && state.emotePickerOpen
                       ? `<div class="emote-row">
@@ -1956,11 +1952,9 @@ function renderMatch() {
                         </div>`
                       : ''
                   }
-                </div>
-
-                ${
-                  pressure
-                    ? `<div class="card section pressure-banner">
+                  ${
+                    pressure
+                      ? `<div class="pressure-banner">
                         <strong>Pressure Bet Response Required</strong>
                         <div class="muted">${playerName(pressure.initiatorId)} used <strong>${pressure.type}</strong>.</div>
                         ${
@@ -1973,12 +1967,11 @@ function renderMatch() {
                             : '<div class="muted">Waiting for opponent decision...</div>'
                         }
                       </div>`
-                    : ''
-                }
-
-                ${
-                  state.leaveMatchModal
-                    ? `<div class="card section leave-inline">
+                      : ''
+                  }
+                  ${
+                    state.leaveMatchModal
+                      ? `<div class="leave-inline">
                         <strong>Leave Match?</strong>
                         <p class="muted">You will forfeit this round and end the match.</p>
                         <div class="pressure-actions">
@@ -1986,8 +1979,9 @@ function renderMatch() {
                           <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
                         </div>
                       </div>`
-                    : ''
-                }
+                      : ''
+                  }
+                </div>
 
                 <details class="match-details">
                   <summary>Details</summary>
@@ -2002,7 +1996,7 @@ function renderMatch() {
                   </div>
                   <div class="muted">${actionHint}</div>
                 </details>
-              </aside>`
+              </section>`
         }
       </div>
     </main>
