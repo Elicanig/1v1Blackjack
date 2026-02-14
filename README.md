@@ -51,11 +51,9 @@ A playable 1v1 real-time web app that blends blackjack actions with head-to-head
 - Match state is authoritative and server-side in memory.
 - Persistent entities (users/friends/lobbies/challenges) are in `db.json` under `DATA_DIR`.
 - `DATA_DIR` defaults:
-  - production: `/var/data`
-  - local/dev: `./data`
-- Render persistence setup:
-  - Attach a Persistent Disk in Render and mount it at `/var/data`.
-  - Set `DATA_DIR=/var/data`.
+  - all environments: `./data` (unless overridden via `DATA_DIR`)
+- Render free-tier setup:
+  - Optional: set `DATA_DIR` to a writable path; otherwise `./data` is used.
   - Set `SESSION_SECRET=<long-random-string>` (or `JWT_SECRET`).
   - On boot, storage logs include:
     - `Using DATA_DIR=...`

@@ -7,7 +7,7 @@ import { Server } from 'socket.io';
 import { JSONFilePreset } from 'lowdb/node';
 import { nanoid } from 'nanoid';
 import path from 'path';
-import { mkdirSync, existsSync, statSync, writeFileSync } from 'fs';
+import { mkdirSync, existsSync, statSync, writeFileSync, accessSync, constants } from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,9 +21,14 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = "0.0.0.0";
+const authSecretSource = process.env.SESSION_SECRET ? 'SESSION_SECRET' : process.env.JWT_SECRET ? 'JWT_SECRET' : null;
 const configuredSecret = process.env.SESSION_SECRET || process.env.JWT_SECRET;
 if (process.env.NODE_ENV === 'production' && !configuredSecret) {
   throw new Error('Missing SESSION_SECRET (or JWT_SECRET) in production. Configure a stable secret for auth tokens.');
+}
+if (process.env.NODE_ENV !== 'test') {
+  // eslint-disable-next-line no-console
+  console.log(`Auth secret provided: ${authSecretSource || 'none (dev fallback)'}`);
 }
 const JWT_SECRET = configuredSecret || 'blackjack-battle-dev-secret';
 const STARTING_CHIPS = 1000;
@@ -45,9 +50,28 @@ const FRIEND_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const TURN_TIMEOUT_MS = 20_000;
 const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 
-const DATA_DIR = process.env.DATA_DIR || (process.env.NODE_ENV === 'production' ? '/var/data' : './data');
-mkdirSync(DATA_DIR, { recursive: true });
-const DB_PATH = path.join(DATA_DIR, 'db.json');
+const DATA_DIR = process.env.DATA_DIR || './data';
+const IN_PROJECT_DATA_DIR = './data';
+const ensureWritableDataDir = (dir) => {
+  mkdirSync(dir, { recursive: true });
+  accessSync(dir, constants.W_OK);
+};
+let activeDataDir = DATA_DIR;
+try {
+  ensureWritableDataDir(activeDataDir);
+} catch (error) {
+  if (activeDataDir !== IN_PROJECT_DATA_DIR) {
+    activeDataDir = IN_PROJECT_DATA_DIR;
+    ensureWritableDataDir(activeDataDir);
+    if (process.env.NODE_ENV !== 'test') {
+      // eslint-disable-next-line no-console
+      console.warn(`[storage] DATA_DIR=${DATA_DIR} is not writable (${error?.code || 'UNKNOWN'}); falling back to ${activeDataDir}`);
+    }
+  } else {
+    throw error;
+  }
+}
+const DB_PATH = path.join(activeDataDir, 'db.json');
 const EMPTY_DB = {
   users: [],
   lobbies: [],
@@ -64,7 +88,7 @@ const db = await JSONFilePreset(DB_PATH, EMPTY_DB);
 
 if (process.env.NODE_ENV !== 'test') {
   // eslint-disable-next-line no-console
-  console.log(`[storage] Using DATA_DIR=${DATA_DIR}`);
+  console.log(`[storage] Using DATA_DIR=${activeDataDir}`);
   if (hadExistingStorage) {
     // eslint-disable-next-line no-console
     console.log(`[storage] Loaded ${db.data.users.length} users from DB_PATH=${DB_PATH}`);
@@ -2601,7 +2625,7 @@ app.get('/api/debug/persistence', (_req, res) => {
     lastWriteTime = null;
   }
   return res.json({
-    dataDir: DATA_DIR,
+    dataDir: activeDataDir,
     dbPath: DB_PATH,
     userCount: db.data.users.length,
     lastWriteTime
