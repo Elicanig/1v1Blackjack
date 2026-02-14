@@ -7,7 +7,7 @@ import { Server } from 'socket.io';
 import { JSONFilePreset } from 'lowdb/node';
 import { nanoid } from 'nanoid';
 import path from 'path';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, statSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,8 +21,11 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = "0.0.0.0";
-// Keep auth secret stable across deploys via env (SESSION_SECRET preferred).
-const JWT_SECRET = process.env.SESSION_SECRET || process.env.JWT_SECRET || 'blackjack-battle-dev-secret';
+const configuredSecret = process.env.SESSION_SECRET || process.env.JWT_SECRET;
+if (process.env.NODE_ENV === 'production' && !configuredSecret) {
+  throw new Error('Missing SESSION_SECRET (or JWT_SECRET) in production. Configure a stable secret for auth tokens.');
+}
+const JWT_SECRET = configuredSecret || 'blackjack-battle-dev-secret';
 const STARTING_CHIPS = 1000;
 const BASE_BET = 5;
 const MIN_BET = 5;
@@ -42,38 +45,32 @@ const FRIEND_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const TURN_TIMEOUT_MS = 20_000;
 const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 
-const configuredDataDir = process.env.DATA_DIR || process.env.RENDER_DISK_PATH || '/var/data';
-let DATA_DIR = configuredDataDir;
-try {
-  mkdirSync(DATA_DIR, { recursive: true });
-} catch {
-  DATA_DIR = path.join(__dirname, '.data');
-  mkdirSync(DATA_DIR, { recursive: true });
-}
+const DATA_DIR = process.env.DATA_DIR || (process.env.NODE_ENV === 'production' ? '/var/data' : './data');
+mkdirSync(DATA_DIR, { recursive: true });
 const DB_PATH = path.join(DATA_DIR, 'db.json');
-const hadExistingStorage = existsSync(DB_PATH);
-
-const db = await JSONFilePreset(DB_PATH, {
+const EMPTY_DB = {
   users: [],
   lobbies: [],
   friendInvites: [],
   friendRequests: [],
   friendChallenges: []
-});
+};
+const hadExistingStorage = existsSync(DB_PATH);
+if (!hadExistingStorage) {
+  writeFileSync(DB_PATH, `${JSON.stringify(EMPTY_DB, null, 2)}\n`, 'utf8');
+}
+
+const db = await JSONFilePreset(DB_PATH, EMPTY_DB);
 
 if (process.env.NODE_ENV !== 'test') {
   // eslint-disable-next-line no-console
-  console.log(`[storage] using ${DB_PATH}`);
-  if (DATA_DIR !== configuredDataDir) {
-    // eslint-disable-next-line no-console
-    console.warn('[storage] configured data directory unavailable; fell back to local .data (not deploy-persistent)');
-  }
+  console.log(`[storage] Using DATA_DIR=${DATA_DIR}`);
   if (hadExistingStorage) {
     // eslint-disable-next-line no-console
-    console.log(`[storage] loaded ${db.data.users.length} users from storage`);
+    console.log(`[storage] Loaded ${db.data.users.length} users from DB_PATH=${DB_PATH}`);
   } else {
     // eslint-disable-next-line no-console
-    console.log('[storage] created new storage file');
+    console.log(`[storage] Initialized new DB at DB_PATH=${DB_PATH}`);
   }
 }
 
@@ -495,7 +492,6 @@ function getUserByUsername(username) {
 
   if (user && !user.usernameKey) {
     user.usernameKey = normalizeUsername(user.username || raw);
-    void db.write();
   }
   return user;
 }
@@ -2015,13 +2011,21 @@ app.post('/api/auth/login', async (req, res) => {
   const { username, pin } = req.body || {};
   const user = getUserByUsername(username || '');
   if (!user) return res.status(401).json({ ok: false, error: 'Invalid auth' });
+  let touched = false;
+  if (!user.usernameKey) {
+    user.usernameKey = normalizeUsername(user.username || username || '');
+    touched = true;
+  }
   if (!/^\d{4}$/.test(String(pin || ''))) return res.status(401).json({ ok: false, error: 'Invalid auth' });
   const ok = await bcrypt.compare(String(pin || ''), user.pinHash || '');
   if (!ok) {
     return res.status(401).json({ ok: false, error: 'Invalid auth' });
   }
-  if (!user.authToken) user.authToken = nanoid(36);
-  await db.write();
+  if (!user.authToken) {
+    user.authToken = nanoid(36);
+    touched = true;
+  }
+  if (touched) await db.write();
   return res.json({ ok: true, user: sanitizeSelfUser(user), authToken: user.authToken });
 });
 
@@ -2049,11 +2053,18 @@ app.post('/api/login', async (req, res) => {
   const { username, pin, authToken } = req.body || {};
   const user = getUserByUsername(username || '');
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  let touched = false;
+  if (!user.usernameKey) {
+    user.usernameKey = normalizeUsername(user.username || username || '');
+    touched = true;
+  }
   if (authToken && user.authToken === authToken) {
+    if (touched) await db.write();
     return res.json({ token: issueToken(user), user: sanitizeSelfUser(user), authToken: user.authToken });
   }
   const ok = await bcrypt.compare(String(pin || ''), user.pinHash || '');
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+  if (touched) await db.write();
   return res.json({ token: issueToken(user), user: sanitizeSelfUser(user), authToken: user.authToken });
 });
 
@@ -2577,6 +2588,24 @@ app.get('/api/patch-notes', async (_req, res) => {
 app.get('/api/version', (_req, res) => {
   const commit = deployCommitId();
   return res.json({ version: commit ? commit.slice(0, 7) : 'dev' });
+});
+
+app.get('/api/debug/persistence', (_req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  let lastWriteTime = null;
+  try {
+    lastWriteTime = statSync(DB_PATH).mtime.toISOString();
+  } catch {
+    lastWriteTime = null;
+  }
+  return res.json({
+    dataDir: DATA_DIR,
+    dbPath: DB_PATH,
+    userCount: db.data.users.length,
+    lastWriteTime
+  });
 });
 
 io.use((socket, next) => {
