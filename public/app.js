@@ -2075,6 +2075,8 @@ function renderHand(hand, index, active, pressureTagged = false) {
   if (!hand.locked && !hand.bust && !hand.surrendered && !hand.stood) metaParts.push('In play');
   const metaLine = metaParts.join(' • ');
   const statusLine = labels.join(' • ');
+  const handCards = Array.isArray(hand?.cards) ? hand.cards : [];
+  const renderedCards = handCards.length ? handCards : [{ hidden: true }, { hidden: true }];
 
   return `
     <div class="hand ${active ? 'active' : ''}">
@@ -2086,8 +2088,8 @@ function renderHand(hand, index, active, pressureTagged = false) {
         <span class="hand-chip">Bet: ${hand.bet}</span>
       </div>
       <div class="muted hand-status">${statusLine}</div>
-      <div class="cards cardsRow card-count-${Math.min(hand.cards.length, 7)}">
-        ${hand.cards.map((card, cardIndex) => renderPlayingCard(card, cardIndex)).join('')}
+      <div class="cards cardsRow card-count-${Math.min(renderedCards.length, 7)}">
+        ${renderedCards.map((card, cardIndex) => renderPlayingCard(card, cardIndex)).join('')}
       </div>
     </div>
   `;

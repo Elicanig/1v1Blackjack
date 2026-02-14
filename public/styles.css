@@ -169,6 +169,7 @@ body::after {
 }
 
 #app[data-view='match'] {
+  height: 100dvh;
   height: 100vh;
   max-height: 100vh;
   max-width: min(96vw, 1440px);
@@ -948,8 +949,41 @@ select:focus-visible {
 }
 
 .play-layout {
-  grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr) auto auto;
-  row-gap: 14px;
+  grid-template-areas:
+    "status"
+    "timer"
+    "opponent"
+    "player"
+    "actions"
+    "details";
+  grid-template-rows: auto auto minmax(160px, 1fr) minmax(160px, 1fr) auto auto;
+  row-gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.play-layout > .status-strip {
+  grid-area: status;
+}
+
+.play-layout > .turn-timer--strip {
+  grid-area: timer;
+}
+
+.play-layout > .opponent-zone {
+  grid-area: opponent;
+}
+
+.play-layout > .you-zone {
+  grid-area: player;
+}
+
+.play-layout > .actions-panel {
+  grid-area: actions;
+}
+
+.play-layout > .match-details {
+  grid-area: details;
 }
 
 .betting-layout {
@@ -1027,7 +1061,7 @@ select:focus-visible {
 
 .turn-timer--strip {
   width: min(340px, 100%);
-  margin-top: -2px;
+  margin-top: 0;
 }
 
 .turn-timer-head {
@@ -1114,12 +1148,18 @@ select:focus-visible {
   background: linear-gradient(180deg, rgba(11, 23, 19, 0.7), rgba(9, 19, 16, 0.6));
   padding: 12px 14px;
   min-height: 0;
-  overflow: visible;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   width: 100%;
   position: relative;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.opponent-zone,
+.you-zone {
+  min-height: clamp(170px, 23vh, 260px);
 }
 
 .match-zone.turn-active-zone {
@@ -1158,10 +1198,6 @@ select:focus-visible {
   gap: 6px;
 }
 
-.zone-head .turn-timer {
-  width: min(220px, 44vw);
-}
-
 .turn {
   padding: 5px 10px;
   border-radius: 999px;
@@ -1191,13 +1227,14 @@ select:focus-visible {
   display: flex;
   flex-wrap: nowrap;
   gap: 10px;
-  min-height: clamp(120px, 14vh, 180px);
-  height: auto;
+  min-height: clamp(96px, 12vh, 146px);
+  height: 100%;
+  flex: 1 1 auto;
   width: 100%;
   overflow-x: auto;
-  overflow-y: visible;
+  overflow-y: hidden;
   padding-bottom: 2px;
-  align-items: stretch;
+  align-items: flex-start;
   justify-content: flex-start;
 }
 
@@ -1285,7 +1322,7 @@ select:focus-visible {
   align-items: flex-start;
   min-height: clamp(96px, 12vh, 146px);
   overflow-x: auto;
-  overflow-y: visible;
+  overflow-y: hidden;
   padding-bottom: 2px;
 }
 
@@ -1911,7 +1948,15 @@ select:focus-visible {
   }
 
   .play-layout {
-    grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "status"
+      "timer"
+      "opponent"
+      "player"
+      "actions"
+      "details";
+    grid-template-rows: auto auto minmax(140px, 1fr) minmax(140px, 1fr) auto auto;
+    row-gap: 10px;
   }
 
   .rules-strip {
@@ -1920,7 +1965,7 @@ select:focus-visible {
   }
 
   .hands {
-    min-height: 88px;
+    min-height: 84px;
   }
 
   .actions-main {
@@ -1945,10 +1990,6 @@ select:focus-visible {
   .zone-head-meta {
     width: 100%;
     justify-items: stretch;
-  }
-
-  .zone-head .turn-timer {
-    width: 100%;
   }
 
   .bet-confirm-row {
@@ -1991,6 +2032,14 @@ select:focus-visible {
   }
 
   .play-layout {
+    grid-template-areas:
+      "status"
+      "timer"
+      "opponent"
+      "player"
+      "actions"
+      "details";
+    grid-template-rows: auto auto minmax(112px, 1fr) minmax(112px, 1fr) auto auto;
     row-gap: 8px;
   }
 
