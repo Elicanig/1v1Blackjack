@@ -1766,7 +1766,7 @@ function renderRules() {
   bindShellNav();
 }
 
-function renderHand(hand, index, active) {
+function renderHand(hand, index, active, pressureTagged = false) {
   const labels = [];
   if (hand.bust) labels.push('Bust');
   if (hand.surrendered) labels.push('Surrendered');
@@ -1780,7 +1780,7 @@ function renderHand(hand, index, active) {
   return `
     <div class="hand ${active ? 'active' : ''}">
       <div class="hand-head">
-        <strong>Hand ${index + 1}</strong>
+        <strong>Hand ${index + 1} ${pressureTagged ? '<span class="pressure-dot" title="Pressure decision applies">*</span>' : ''}</strong>
         <span class="hand-chip">Bet: ${hand.bet}</span>
       </div>
       <div class="muted">${formatHandTotalLine(hand)}</div>
@@ -1851,168 +1851,161 @@ function renderMatch() {
     : waitingPressure
       ? 'Respond to pressure: Match or Surrender.'
       : 'Waiting for next turn.';
+  const pressureMine = waitingPressure ? new Set(pressure?.affectedHandIndices || []) : new Set();
+  const pressureOpp = pressure && pressure.opponentId === oppId ? new Set(pressure?.affectedHandIndices || []) : new Set();
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
     <main class="view-stack match-view">
-      <div class="match table-layout card section reveal-panel">
-      <div class="status-strip">
-        <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
-        <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${isBettingPhase ? 'Betting' : myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
-        <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
-        <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()} chips</strong></div>
-      </div>
-
-      ${
-        isBettingPhase
-          ? `<div class="match-zone">
-              <div class="zone-head">
-                <h4>Choose your bet for Round ${match.roundNumber}</h4>
-                <span class="muted">${myConfirmed ? 'You confirmed' : 'Waiting for your confirmation'}</span>
-              </div>
-              <div class="bet-control">
-                <div class="bet-head">
-                  <strong>Base Bet</strong>
-                  <span class="muted">Min ${minBet} / Max ${maxBet}</span>
-                </div>
-                <div class="bet-row">
-                  <button id="betMinus" class="ghost" ${!canEditBet ? 'disabled' : ''}>-</button>
-                  <div class="bet-pill">${state.currentBet}</div>
-                  <button id="betPlus" class="ghost" ${!canEditBet ? 'disabled' : ''}>+</button>
-                  <button data-bet-quick="5" class="gold" ${!canEditBet ? 'disabled' : ''}>+5</button>
-                  <button data-bet-quick="10" class="gold" ${!canEditBet ? 'disabled' : ''}>+10</button>
-                  <button data-bet-quick="25" class="gold" ${!canEditBet ? 'disabled' : ''}>+25</button>
-                </div>
-                <div class="row">
-                  <button id="confirmBetBtn" class="primary" ${!canConfirmBet ? 'disabled' : ''}>Confirm Bet</button>
-                  <div class="muted">${oppConfirmed ? 'Opponent confirmed' : 'Waiting for opponent...'}</div>
-                </div>
-              </div>
-              <div class="muted">Cards are dealt only after both players confirm.</div>
-            </div>`
-          : ''
-      }
-
-      <div class="zones-stack" ${isBettingPhase ? 'style="display:none"' : ''}>
-        <div class="match-zone opponent-zone">
-          <div class="zone-head">
-            <h4>Opponent: ${playerName(oppId)}
-            ${
-              state.floatingEmote && state.floatingEmote.fromUserId === oppId
-                ? `<span class="emote-bubble ${state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip'}">${state.floatingEmote.value}</span>`
-                : ''
-            }
-            </h4>
-            <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
-          </div>
-          <div class="hands">
-            ${oppState.hands.map((h, idx) => renderHand(h, idx, idx === oppState.activeHandIndex)).join('')}
-          </div>
-        </div>
-
-        <div class="match-zone you-zone">
-          <div class="zone-head">
-            <h4>You: ${playerName(me.id)}</h4>
-            <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
-          </div>
-          <div class="hands">
-            ${myState.hands.map((h, idx) => renderHand(h, idx, idx === myState.activeHandIndex)).join('')}
-          </div>
-        </div>
-      </div>
-
-      <div class="actions-panel card section" ${isBettingPhase || roundResolved ? 'style="display:none"' : ''}>
-        <div class="bet-control">
-          <div class="bet-head">
-            <strong>Base Bet</strong>
-            <span class="muted">Locked for this round</span>
-          </div>
-          <div class="muted">Base bet posted: ${match.baseBet} ${match.allInPlayers?.[oppId] ? `• ${playerName(oppId)} is all-in` : ''}</div>
-        </div>
-
-        <div class="actions actions-compact">
-          <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
-          <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
-          <button data-action="double" title="${canAct ? 'Double bet, take one card, lock hand' : actionHint}" ${!canAct || activeHand.doubled ? 'disabled' : ''}>Double</button>
-          <button data-action="split" title="${handCanSplit(activeHand) ? 'Split pair into two hands' : 'Split requires pair'}" ${!canAct || !handCanSplit(activeHand) ? 'disabled' : ''}>Split</button>
-          <button class="warn" data-action="surrender" title="${canAct ? 'Lose 75% and lock hand' : actionHint}" ${!canAct ? 'disabled' : ''}>Surrender</button>
-          ${
-            isPvpMatch
-              ? `<button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
-                 <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>`
-              : ''
-          }
-        </div>
+      <div class="match match-shell card section reveal-panel">
         ${
-          isPvpMatch && state.emotePickerOpen
-            ? `<div class="emote-row">
-                <div class="emote-popover card">
-                  <div class="emote-grid">
-                    <button data-emote-type="emoji" data-emote-value="😂">😂</button>
-                    <button data-emote-type="emoji" data-emote-value="😭">😭</button>
-                    <button data-emote-type="emoji" data-emote-value="👍">👍</button>
-                    <button data-emote-type="emoji" data-emote-value="😡">😡</button>
-                  </div>
-                  <div class="emote-quips">
-                    <button data-emote-type="quip" data-emote-value="Bitchmade">Bitchmade</button>
-                    <button data-emote-type="quip" data-emote-value="Fuck you">Fuck you</button>
-                    <button data-emote-type="quip" data-emote-value="Skill issue">Skill issue</button>
-                    <button data-emote-type="quip" data-emote-value="L">L</button>
+          isBettingPhase
+            ? `<section class="betting-layout">
+                <div class="betting-header">
+                  <h3>Round ${match.roundNumber} — Place your bet</h3>
+                  <div class="bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()} chips</strong></div>
+                </div>
+                <div class="match-zone betting-zone">
+                  <div class="bet-control">
+                    <div class="bet-head">
+                      <strong>Base Bet</strong>
+                      <span class="muted">Min ${minBet} / Max ${maxBet}</span>
+                    </div>
+                    <div class="bet-row">
+                      <button id="betMinus" class="ghost" ${!canEditBet ? 'disabled' : ''}>-</button>
+                      <div class="bet-pill">${state.currentBet}</div>
+                      <button id="betPlus" class="ghost" ${!canEditBet ? 'disabled' : ''}>+</button>
+                      <button data-bet-quick="5" class="gold" ${!canEditBet ? 'disabled' : ''}>+5</button>
+                      <button data-bet-quick="10" class="gold" ${!canEditBet ? 'disabled' : ''}>+10</button>
+                      <button data-bet-quick="25" class="gold" ${!canEditBet ? 'disabled' : ''}>+25</button>
+                    </div>
+                    <div class="bet-confirm-row">
+                      <button id="confirmBetBtn" class="primary" ${!canConfirmBet ? 'disabled' : ''}>Confirm Bet</button>
+                      <div class="muted">${myConfirmed ? 'You confirmed.' : 'Waiting for your confirmation.'} ${oppConfirmed ? 'Opponent confirmed.' : 'Waiting for opponent...'}</div>
+                    </div>
                   </div>
                 </div>
-              </div>`
-            : ''
+              </section>`
+            : `<section class="match-main">
+                <div class="status-strip">
+                  <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
+                  <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
+                  <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
+                  <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()} chips</strong></div>
+                </div>
+                <div class="zones-grid">
+                  <div class="match-zone you-zone">
+                    <div class="zone-head">
+                      <h4>You: ${playerName(me.id)}</h4>
+                      <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
+                    </div>
+                    <div class="hands">
+                      ${myState.hands.map((h, idx) => renderHand(h, idx, idx === myState.activeHandIndex, pressureMine.has(idx))).join('')}
+                    </div>
+                  </div>
+                  <div class="match-zone opponent-zone">
+                    <div class="zone-head">
+                      <h4>Opponent: ${playerName(oppId)}
+                      ${
+                        state.floatingEmote && state.floatingEmote.fromUserId === oppId
+                          ? `<span class="emote-bubble ${state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip'}">${state.floatingEmote.value}</span>`
+                          : ''
+                      }
+                      </h4>
+                      <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
+                    </div>
+                    <div class="hands">
+                      ${oppState.hands.map((h, idx) => renderHand(h, idx, idx === oppState.activeHandIndex, pressureOpp.has(idx))).join('')}
+                    </div>
+                  </div>
+                </div>
+              </section>
+              <aside class="match-side">
+                <div class="actions-panel" ${roundResolved ? 'style="display:none"' : ''}>
+                  <div class="actions actions-compact">
+                    <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
+                    <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
+                    <button data-action="double" title="${canAct ? 'Double bet, take one card, lock hand' : actionHint}" ${!canAct || activeHand.doubled ? 'disabled' : ''}>Double</button>
+                    <button data-action="split" title="${handCanSplit(activeHand) ? 'Split pair into two hands' : 'Split requires pair'}" ${!canAct || !handCanSplit(activeHand) ? 'disabled' : ''}>Split</button>
+                    <button class="warn" data-action="surrender" title="${canAct ? 'Lose 75% and lock hand' : actionHint}" ${!canAct ? 'disabled' : ''}>Surrender</button>
+                    ${
+                      isPvpMatch
+                        ? `<button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
+                           <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>`
+                        : ''
+                    }
+                  </div>
+
+                  ${
+                    isPvpMatch && state.emotePickerOpen
+                      ? `<div class="emote-row">
+                          <div class="emote-popover card">
+                            <div class="emote-grid">
+                              <button data-emote-type="emoji" data-emote-value="😂">😂</button>
+                              <button data-emote-type="emoji" data-emote-value="😭">😭</button>
+                              <button data-emote-type="emoji" data-emote-value="👍">👍</button>
+                              <button data-emote-type="emoji" data-emote-value="😡">😡</button>
+                            </div>
+                            <div class="emote-quips">
+                              <button data-emote-type="quip" data-emote-value="Bitchmade">Bitchmade</button>
+                              <button data-emote-type="quip" data-emote-value="Fuck you">Fuck you</button>
+                              <button data-emote-type="quip" data-emote-value="Skill issue">Skill issue</button>
+                              <button data-emote-type="quip" data-emote-value="L">L</button>
+                            </div>
+                          </div>
+                        </div>`
+                      : ''
+                  }
+                </div>
+
+                ${
+                  pressure
+                    ? `<div class="card section pressure-banner">
+                        <strong>Pressure Bet Response Required</strong>
+                        <div class="muted">${playerName(pressure.initiatorId)} used <strong>${pressure.type}</strong>.</div>
+                        ${
+                          waitingPressure
+                            ? `<div class="muted">Match +${pressure.delta} chips or surrender this hand.</div>
+                               <div class="pressure-actions">
+                                 <button class="primary" id="pressureMatch">Match Bet</button>
+                                 <button class="warn" id="pressureSurrender">Surrender Hand</button>
+                               </div>`
+                            : '<div class="muted">Waiting for opponent decision...</div>'
+                        }
+                      </div>`
+                    : ''
+                }
+
+                ${
+                  state.leaveMatchModal
+                    ? `<div class="card section leave-inline">
+                        <strong>Leave Match?</strong>
+                        <p class="muted">You will forfeit this round and end the match.</p>
+                        <div class="pressure-actions">
+                          <button id="confirmLeaveMatchBtn" class="warn">Leave Match</button>
+                          <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
+                        </div>
+                      </div>`
+                    : ''
+                }
+
+                <details class="match-details">
+                  <summary>Details</summary>
+                  <div class="muted">
+                    ${
+                      isBotOpponent
+                        ? `Opponent is ${playerName(oppId)} (${match.participants?.[oppId]?.difficulty} difficulty).`
+                        : `Disconnect grace: up to 60 seconds reconnect is allowed. Connected states: You ${
+                            match.disconnects[me.id]?.connected ? 'online' : 'offline'
+                          } / Opponent ${opponentConnected ? 'online' : 'offline'}`
+                    }
+                  </div>
+                  <div class="muted">${actionHint}</div>
+                </details>
+              </aside>`
         }
       </div>
-
-      ${
-        pressure
-          ? `<div class="card section pressure-banner">
-            <strong>Pressure Bet Response Required:</strong>
-            ${playerName(pressure.initiatorId)} used <strong>${pressure.type}</strong>.
-            ${
-              waitingPressure
-                ? `Match +${pressure.delta} chips or surrender this hand.
-                   <div class="row" style="margin-top:0.5rem">
-                     <button class="primary" id="pressureMatch">Match Bet</button>
-                     <button class="warn" id="pressureSurrender">Surrender Hand</button>
-                   </div>`
-                : '<div class="muted">Waiting for opponent decision...</div>'
-            }
-          </div>`
-          : ''
-      }
-
-      <details class="match-details">
-        <summary>Details</summary>
-        <div class="muted">
-          ${
-            isBotOpponent
-              ? `Opponent is ${playerName(oppId)} (${match.participants?.[oppId]?.difficulty} difficulty).`
-              : `Disconnect grace: up to 60 seconds reconnect is allowed. Connected states: You ${
-                  match.disconnects[me.id]?.connected ? 'online' : 'offline'
-                } / Opponent ${opponentConnected ? 'online' : 'offline'}`
-          }
-        </div>
-        <div class="muted">${actionHint}</div>
-      </details>
-
-      </div>
     </main>
-    ${
-      state.leaveMatchModal
-        ? `<div class="modal">
-            <div class="modal-panel card">
-              <h3>Leave Match?</h3>
-              <p class="muted">You will forfeit this round and end the match.</p>
-              <div class="row">
-                <button id="confirmLeaveMatchBtn" class="warn">Leave Match</button>
-                <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
-              </div>
-            </div>
-          </div>`
-        : ''
-    }
   `;
   bindShellNav();
 

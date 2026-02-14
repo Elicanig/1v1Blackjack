@@ -168,8 +168,12 @@ body::after {
 }
 
 #app[data-view='match'] {
-  padding-top: var(--s-3);
-  padding-bottom: var(--s-3);
+  height: 100vh;
+  max-height: 100vh;
+  padding: var(--s-2) var(--s-3);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--s-2);
 }
 
 .card {
@@ -223,7 +227,7 @@ body::after {
   align-items: center;
   gap: var(--s-3);
   padding: 10px 14px;
-  margin-bottom: var(--s-4);
+  margin-bottom: var(--s-2);
   background: rgba(10, 20, 17, 0.82);
   box-shadow: var(--shadow-sm);
 }
@@ -866,12 +870,12 @@ select:focus-visible {
 
 .match {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .match-shell {
-  height: min(calc(100vh - 136px), 820px);
-  max-height: min(calc(100vh - 136px), 820px);
+  height: 100%;
+  max-height: 100%;
   overflow: hidden;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
@@ -882,8 +886,8 @@ select:focus-visible {
 }
 
 .match-view {
-  height: calc(100vh - 110px);
-  min-height: calc(100vh - 110px);
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -894,6 +898,35 @@ select:focus-visible {
   min-height: 0;
 }
 
+.betting-layout {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  min-height: 0;
+}
+
+.betting-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(11, 23, 19, 0.74);
+  padding: var(--space-2);
+}
+
+.betting-header h3 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.betting-zone {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+}
+
 .match-side {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -901,9 +934,9 @@ select:focus-visible {
   min-height: 0;
 }
 
-.zones-stack {
+.zones-grid {
   display: grid;
-  grid-template-rows: minmax(180px, 1fr) minmax(180px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--space-2);
   min-height: 0;
   overflow: hidden;
@@ -940,7 +973,7 @@ select:focus-visible {
   border-radius: var(--radius-sm);
   border: 1px solid rgba(236, 241, 233, 0.11);
   background: rgba(11, 23, 19, 0.56);
-  padding: 10px;
+  padding: 8px;
   min-height: 0;
   overflow: hidden;
 }
@@ -981,18 +1014,20 @@ select:focus-visible {
   display: flex;
   flex-wrap: nowrap;
   gap: 8px;
-  min-height: 100px;
+  min-height: 0;
+  height: calc(100% - 30px);
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 4px;
+  align-items: stretch;
 }
 
 .hand {
   border-radius: var(--radius-sm);
   border: 1px solid rgba(236, 241, 233, 0.12);
   padding: 8px;
-  min-width: min(250px, 44%);
-  flex: 0 0 min(250px, 44%);
+  min-width: min(230px, 58%);
+  flex: 0 0 min(230px, 58%);
   background: rgba(13, 26, 22, 0.7);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
@@ -1032,10 +1067,12 @@ select:focus-visible {
   gap: 6px;
   margin-top: 6px;
   align-items: flex-start;
+  align-content: flex-start;
+  min-height: 0;
 }
 
 .playing-card {
-  width: clamp(48px, 6.2vw, 72px);
+  width: clamp(52px, 6vw, 76px);
   aspect-ratio: 5 / 7;
   border-radius: 12px;
   border: 1px solid rgba(12, 22, 17, 0.45);
@@ -1115,12 +1152,13 @@ select:focus-visible {
 
 .actions-panel {
   background: rgba(10, 21, 18, 0.78);
-  margin-top: auto;
   position: relative;
   z-index: 3;
-  padding: 10px 12px;
+  padding: 10px;
   display: grid;
   gap: 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(236, 241, 233, 0.1);
 }
 
 .leave-btn {
@@ -1140,17 +1178,17 @@ select:focus-visible {
 }
 
 .actions-compact {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 8px;
 }
 
 .actions-compact button {
-  min-height: 34px;
-  padding: 7px 11px;
-  font-size: 0.88rem;
-  flex: 1 1 calc(25% - 8px);
-  min-width: 90px;
+  min-height: 33px;
+  padding: 6px 8px;
+  font-size: 0.82rem;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .pressure-chip {
@@ -1163,10 +1201,18 @@ select:focus-visible {
   padding: 10px;
 }
 
+.pressure-actions {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .bet-control {
-  margin-bottom: var(--space-2);
+  width: min(620px, 100%);
+  margin: 0;
   border-radius: var(--radius-sm);
-  padding: var(--space-2);
+  padding: var(--space-3);
   border: 1px solid rgba(205, 167, 100, 0.2);
   background: rgba(19, 19, 12, 0.34);
 }
@@ -1183,8 +1229,9 @@ select:focus-visible {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-1);
-  margin-bottom: 6px;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-bottom: 10px;
 }
 
 .bet-pill {
@@ -1202,6 +1249,13 @@ select:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+.bet-confirm-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
 }
 
 .actions-secondary {
@@ -1387,6 +1441,10 @@ select:focus-visible {
     padding: var(--space-2);
   }
 
+  #app[data-view='match'] {
+    padding: 10px;
+  }
+
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
@@ -1415,13 +1473,14 @@ select:focus-visible {
   }
 
   .match-shell {
-    height: calc(100vh - 120px);
-    max-height: calc(100vh - 120px);
+    height: 100%;
+    max-height: 100%;
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) auto;
   }
 
-  .zones-stack {
+  .zones-grid {
+    grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   }
 
@@ -1434,7 +1493,17 @@ select:focus-visible {
     min-height: 88px;
   }
 
-  .actions-compact button { flex: 1 1 calc(33% - 8px); }
+  .actions-compact {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .actions-compact button {
+    font-size: 0.8rem;
+  }
+
+  .bet-confirm-row {
+    grid-template-columns: 1fr;
+  }
 
   .free-claim-card {
     flex-direction: column;
@@ -1444,7 +1513,7 @@ select:focus-visible {
 
 @media (max-height: 800px) {
   .match-shell {
-    height: min(calc(100vh - 120px), 700px);
+    height: 100%;
     gap: 8px;
   }
 
@@ -1457,7 +1526,7 @@ select:focus-visible {
   }
 
   .playing-card {
-    width: clamp(42px, 5.6vh, 64px);
+    width: clamp(46px, 5.1vh, 66px);
   }
 
   .actions-panel {
@@ -1465,17 +1534,23 @@ select:focus-visible {
   }
 
   .actions-compact button {
-    min-height: 32px;
-    padding: 6px 9px;
-    font-size: 0.84rem;
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 0.78rem;
   }
 
-  .zones-stack {
-    grid-template-rows: minmax(150px, 1fr) minmax(150px, 1fr);
+  .zones-grid {
+    gap: 8px;
   }
 
   .match-zone {
-    padding: 8px;
+    padding: 6px;
+  }
+
+  .hand {
+    padding: 6px;
+    min-width: min(210px, 62%);
+    flex-basis: min(210px, 62%);
   }
 }
 
