@@ -1072,8 +1072,16 @@ select:focus-visible {
   opacity: 0.4;
 }
 
+.turn-timer.is-thinking {
+  opacity: 0.92;
+}
+
 .turn-timer.is-idle .turn-timer-fill {
   width: 0 !important;
+}
+
+.turn-timer.is-thinking .turn-timer-track {
+  opacity: 0.36;
 }
 
 .turn-timer.is-paused .turn-timer-fill {
@@ -1106,7 +1114,7 @@ select:focus-visible {
   background: linear-gradient(180deg, rgba(11, 23, 19, 0.7), rgba(9, 19, 16, 0.6));
   padding: 12px 14px;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
@@ -1183,11 +1191,11 @@ select:focus-visible {
   display: flex;
   flex-wrap: nowrap;
   gap: 10px;
-  min-height: 0;
-  height: 100%;
+  min-height: clamp(120px, 14vh, 180px);
+  height: auto;
   width: 100%;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
   padding-bottom: 2px;
   align-items: stretch;
   justify-content: flex-start;
@@ -1202,6 +1210,12 @@ select:focus-visible {
   background: linear-gradient(180deg, rgba(15, 30, 25, 0.72), rgba(10, 21, 18, 0.7));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 18px rgba(0, 0, 0, 0.2);
   overflow: visible;
+}
+
+.hand-placeholder {
+  border-style: dashed;
+  border-color: rgba(205, 167, 100, 0.34);
+  background: linear-gradient(180deg, rgba(17, 31, 26, 0.58), rgba(11, 22, 19, 0.52));
 }
 
 .hands .hand:only-child {
@@ -1269,7 +1283,7 @@ select:focus-visible {
   gap: 0;
   margin-top: 6px;
   align-items: flex-start;
-  min-height: clamp(108px, 14vh, 152px);
+  min-height: clamp(96px, 12vh, 146px);
   overflow-x: auto;
   overflow-y: visible;
   padding-bottom: 2px;

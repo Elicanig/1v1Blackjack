@@ -309,13 +309,17 @@ function formatTurnSeconds(ms) {
 
 function renderTurnTimer(ownerId, timerState, variant = 'zone') {
   const visible = Boolean(timerState.active && state.currentMatch?.currentTurn === ownerId);
+  const opponentThinking = Boolean(timerState.active && !visible);
   const percent = Math.round((visible ? timerState.progress : 0) * 100);
-  const toneClass = visible && timerState.urgent ? 'is-urgent' : visible && timerState.paused ? 'is-paused' : '';
-  const label = visible
-    ? ownerId === state.me?.id
-      ? 'Your Turn'
-      : `${playerName(ownerId)} Turn`
-    : 'Waiting';
+  const toneClass =
+    visible && timerState.urgent
+      ? 'is-urgent'
+      : visible && timerState.paused
+        ? 'is-paused'
+        : opponentThinking
+          ? 'is-thinking'
+          : '';
+  const label = visible ? 'Your Turn' : opponentThinking ? 'Opponent thinking' : 'Waiting';
   return `
     <div class="turn-timer turn-timer--${variant} ${toneClass} ${visible ? 'is-active' : 'is-idle'}"
       data-turn-timer
@@ -324,7 +328,7 @@ function renderTurnTimer(ownerId, timerState, variant = 'zone') {
       data-turn-visible="${visible ? '1' : '0'}">
       <div class="turn-timer-head">
         <span class="turn-timer-label">${label}</span>
-        <span class="turn-timer-seconds">${visible ? formatTurnSeconds(timerState.remainingMs) : '--'}</span>
+        <span class="turn-timer-seconds">${visible ? formatTurnSeconds(timerState.remainingMs) : opponentThinking ? '' : '--'}</span>
       </div>
       <div class="turn-timer-track"><span class="turn-timer-fill" style="width:${percent}%"></span></div>
     </div>
@@ -339,17 +343,19 @@ function syncTurnCountdownUI() {
   nodes.forEach((node) => {
     const ownerId = node.getAttribute('data-turn-owner') || '';
     const visible = Boolean(timerState.active && match?.currentTurn === ownerId);
+    const opponentThinking = Boolean(timerState.active && !visible);
     const pct = Math.round((visible ? timerState.progress : 0) * 100);
     node.setAttribute('data-turn-visible', visible ? '1' : '0');
     node.classList.toggle('is-active', visible);
     node.classList.toggle('is-idle', !visible);
     node.classList.toggle('is-urgent', visible && timerState.urgent);
     node.classList.toggle('is-paused', visible && timerState.paused);
+    node.classList.toggle('is-thinking', opponentThinking);
     const labelEl = node.querySelector('.turn-timer-label');
     const secEl = node.querySelector('.turn-timer-seconds');
     const fillEl = node.querySelector('.turn-timer-fill');
-    if (labelEl) labelEl.textContent = visible ? (ownerId === state.me?.id ? 'Your Turn' : `${playerName(ownerId)} Turn`) : 'Waiting';
-    if (secEl) secEl.textContent = visible ? formatTurnSeconds(timerState.remainingMs) : '--';
+    if (labelEl) labelEl.textContent = visible ? 'Your Turn' : opponentThinking ? 'Opponent thinking' : 'Waiting';
+    if (secEl) secEl.textContent = visible ? formatTurnSeconds(timerState.remainingMs) : opponentThinking ? '' : '--';
     if (fillEl) fillEl.style.width = `${pct}%`;
   });
 }
@@ -2087,6 +2093,23 @@ function renderHand(hand, index, active, pressureTagged = false) {
   `;
 }
 
+function renderHandPlaceholder(label = 'Waiting for cards') {
+  return `
+    <div class="hand hand-placeholder">
+      <div class="hand-head">
+        <div class="hand-head-left">
+          <strong>${label}</strong>
+          <span class="muted hand-meta">Cards not dealt yet</span>
+        </div>
+      </div>
+      <div class="cards cardsRow card-count-2">
+        ${renderPlayingCard({ hidden: true }, 0)}
+        ${renderPlayingCard({ hidden: true }, 1)}
+      </div>
+    </div>
+  `;
+}
+
 function renderEmoteBubble(playerId) {
   if (!state.floatingEmote || state.floatingEmote.fromUserId !== playerId) return '';
   const bubbleClass = state.floatingEmote.type === 'emoji' ? 'emoji' : 'quip';
@@ -2155,7 +2178,11 @@ function renderMatch() {
   const myState = match.players[me.id];
   const oppId = getOpponentId();
   const oppState = match.players[oppId];
-  const activeHand = myState.hands[myState.activeHandIndex] || null;
+  const myHands = Array.isArray(myState?.hands) ? myState.hands : [];
+  const oppHands = Array.isArray(oppState?.hands) ? oppState.hands : [];
+  const myActiveHandIndex = Number.isInteger(myState?.activeHandIndex) ? myState.activeHandIndex : 0;
+  const oppActiveHandIndex = Number.isInteger(oppState?.activeHandIndex) ? oppState.activeHandIndex : 0;
+  const activeHand = myHands[myActiveHandIndex] || null;
   const myTurn = isMyTurn();
   const pressure = match.pendingPressure;
   const waitingPressure = pressure && pressure.opponentId === me.id;
@@ -2242,7 +2269,7 @@ function renderMatch() {
                   <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
-                ${renderTurnTimer(match.currentTurn, turnTimerState, 'strip')}
+                ${renderTurnTimer(me.id, turnTimerState, 'strip')}
                 <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">
                   ${renderEmoteBubble(oppId)}
                   <div class="zone-head">
@@ -2251,10 +2278,11 @@ function renderMatch() {
                       <h4>${playerName(oppId)}</h4>
                       <span class="muted player-sub">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
                     </div>
-                    ${renderTurnTimer(oppId, turnTimerState)}
                   </div>
                   <div class="hands">
-                    ${oppState.hands.map((h, idx) => renderHand(h, idx, idx === oppState.activeHandIndex, pressureOpp.has(idx))).join('')}
+                    ${oppHands.length
+                      ? oppHands.map((h, idx) => renderHand(h, idx, idx === oppActiveHandIndex, pressureOpp.has(idx))).join('')
+                      : renderHandPlaceholder('Opponent Hand')}
                   </div>
                 </div>
                 <div class="match-zone you-zone ${myTurn ? 'turn-active-zone' : ''}">
@@ -2265,12 +2293,13 @@ function renderMatch() {
                       <h4>${playerName(me.id)}</h4>
                     </div>
                     <div class="zone-head-meta">
-                      ${renderTurnTimer(me.id, turnTimerState)}
                       <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
                     </div>
                   </div>
                   <div class="hands">
-                    ${myState.hands.map((h, idx) => renderHand(h, idx, idx === myState.activeHandIndex, pressureMine.has(idx))).join('')}
+                    ${myHands.length
+                      ? myHands.map((h, idx) => renderHand(h, idx, idx === myActiveHandIndex, pressureMine.has(idx))).join('')
+                      : renderHandPlaceholder('Your Hand')}
                   </div>
                 </div>
 
