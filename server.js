@@ -32,6 +32,8 @@ const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DISCONNECT_TIMEOUT_MS = 60_000;
 const BOT_BET_CONFIRM_MIN_MS = 200;
 const BOT_BET_CONFIRM_MAX_MS = 600;
+const ROUND_REVEAL_MS = 2200;
+const ROUND_RESULT_MS = 1700;
 const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
 const PATCH_REPO = 'Elicanig/1v1Blackjack';
 const FRIEND_INVITE_TTL_MS = 30 * 60 * 1000;
@@ -180,6 +182,7 @@ const lobbyToMatch = new Map();
 const disconnectTimers = new Map();
 const botTurnTimers = new Map();
 const botBetConfirmTimers = new Map();
+const roundPhaseTimers = new Map();
 const emoteCooldownByUser = new Map();
 let patchNotesCache = { at: 0, payload: null };
 
@@ -277,10 +280,13 @@ const BOT_ACCURACY = {
 const PHASES = {
   LOBBY: 'LOBBY',
   ROUND_INIT: 'ROUND_INIT',
+  DEAL: 'DEAL',
   ACTION_TURN: 'ACTION_TURN',
   PRESSURE_RESPONSE: 'PRESSURE_RESPONSE',
   HAND_ADVANCE: 'HAND_ADVANCE',
   ROUND_RESOLVE: 'ROUND_RESOLVE',
+  REVEAL: 'REVEAL',
+  RESULT: 'RESULT',
   NEXT_ROUND: 'NEXT_ROUND'
 };
 
@@ -772,11 +778,23 @@ function nextPlayerId(match, fromPlayerId) {
   return alt;
 }
 
+function clearRoundPhaseTimer(matchId) {
+  const timer = roundPhaseTimers.get(matchId);
+  if (timer) {
+    clearTimeout(timer);
+    roundPhaseTimers.delete(matchId);
+  }
+}
+
 // Build per-viewer sanitized state to avoid leaking opponent hole/hit cards.
 function buildClientState(match, viewerId) {
   const round = match.round;
   const players = {};
-  const revealAllTotals = match.phase === PHASES.ROUND_RESOLVE || match.phase === PHASES.NEXT_ROUND;
+  const revealAllTotals =
+    match.phase === PHASES.ROUND_RESOLVE ||
+    match.phase === PHASES.REVEAL ||
+    match.phase === PHASES.RESULT ||
+    match.phase === PHASES.NEXT_ROUND;
   for (const pid of match.playerIds) {
     const state = round.players[pid];
     const isViewer = pid === viewerId;
@@ -835,6 +853,7 @@ function buildClientState(match, viewerId) {
     postedBetByPlayer: round.postedBetByPlayer,
     allInPlayers: round.allInPlayers,
     firstActionPlayerId: round.firstActionPlayerId,
+    roundResult: round.resultByPlayer?.[viewerId] || null,
     players,
     disconnects: match.playerIds.reduce((acc, pid) => {
       acc[pid] = {
@@ -982,6 +1001,7 @@ function startRound(match) {
     pendingPressure: null,
     firstActionPlayerId: null,
     turnPlayerId: null,
+    resultByPlayer: null,
     players: {
       [p1]: {
         activeHandIndex: 0,
@@ -993,6 +1013,7 @@ function startRound(match) {
       }
     }
   };
+  clearRoundPhaseTimer(match.id);
   match.phase = PHASES.ROUND_INIT;
   match.roundNumber += 1;
 
@@ -1011,6 +1032,7 @@ function startRound(match) {
 
 function beginActionPhase(match) {
   const [p1, p2] = match.playerIds;
+  match.phase = PHASES.DEAL;
   const baseBet = Math.max(1, match.round.baseBet || BASE_BET);
   const postedP1 = Math.min(baseBet, Math.max(0, getParticipantChips(match, p1)));
   const postedP2 = Math.min(baseBet, Math.max(0, getParticipantChips(match, p2)));
@@ -1082,12 +1104,17 @@ function maybeBeginRoundAfterBetConfirm(match) {
 }
 
 function resolveRound(match) {
+  clearRoundPhaseTimer(match.id);
   match.phase = PHASES.ROUND_RESOLVE;
   const [aId, bId] = match.playerIds;
   const a = match.round.players[aId];
   const b = match.round.players[bId];
   const userA = getUserById(aId);
   const userB = getUserById(bId);
+  const bankrollBefore = {
+    [aId]: getParticipantChips(match, aId),
+    [bId]: getParticipantChips(match, bId)
+  };
   const chipsDelta = {
     [aId]: 0,
     [bId]: 0
@@ -1167,6 +1194,10 @@ function resolveRound(match) {
     setParticipantChips(match, aId, getParticipantChips(match, aId) + chipsDelta[aId]);
     setParticipantChips(match, bId, getParticipantChips(match, bId) + chipsDelta[bId]);
   }
+  const bankrollAfter = {
+    [aId]: getParticipantChips(match, aId),
+    [bId]: getParticipantChips(match, bId)
+  };
 
   function applyHandOutcomeStats(user, ownId, out) {
     if (!user) return;
@@ -1272,18 +1303,65 @@ function resolveRound(match) {
     if (userB) emitUserUpdate(bId);
   }
 
+  const aHasNatural = a.hands.some((h) => Boolean(h.naturalBlackjack));
+  const bHasNatural = b.hands.some((h) => Boolean(h.naturalBlackjack));
   const outcomeA = chipsDelta[aId] > 0 ? 'win' : chipsDelta[aId] < 0 ? 'lose' : 'push';
   const outcomeB = chipsDelta[bId] > 0 ? 'win' : chipsDelta[bId] < 0 ? 'lose' : 'push';
-  emitToUser(aId, 'round:result', { matchId: match.id, roundNumber: match.roundNumber, outcome: outcomeA, deltaChips: chipsDelta[aId] });
-  emitToUser(bId, 'round:result', { matchId: match.id, roundNumber: match.roundNumber, outcome: outcomeB, deltaChips: chipsDelta[bId] });
+  const titleFor = (viewerId) => {
+    const viewerNatural = viewerId === aId ? aHasNatural : bHasNatural;
+    const opponentNatural = viewerId === aId ? bHasNatural : aHasNatural;
+    const outcome = viewerId === aId ? outcomeA : outcomeB;
+    if (viewerNatural && !opponentNatural && outcome === 'win') return 'Blackjack!';
+    if (opponentNatural && !viewerNatural && outcome === 'lose') return 'Opponent Blackjack';
+    if (outcome === 'win') return 'You Win';
+    if (outcome === 'lose') return 'You Lose';
+    return 'Push';
+  };
 
-  match.phase = PHASES.NEXT_ROUND;
+  match.round.resultByPlayer = {
+    [aId]: {
+      matchId: match.id,
+      roundNumber: match.roundNumber,
+      outcome: outcomeA,
+      title: titleFor(aId),
+      deltaChips: chipsDelta[aId],
+      previousBankroll: bankrollBefore[aId],
+      newBankroll: bankrollAfter[aId],
+      isPractice: Boolean(match.isPractice)
+    },
+    [bId]: {
+      matchId: match.id,
+      roundNumber: match.roundNumber,
+      outcome: outcomeB,
+      title: titleFor(bId),
+      deltaChips: chipsDelta[bId],
+      previousBankroll: bankrollBefore[bId],
+      newBankroll: bankrollAfter[bId],
+      isPractice: Boolean(match.isPractice)
+    }
+  };
+
+  match.phase = PHASES.REVEAL;
   pushMatchState(match);
 
-  setTimeout(() => {
-    match.startingPlayerIndex = (match.startingPlayerIndex + 1) % 2;
-    startRound(match);
-  }, 3500);
+  const revealTimer = setTimeout(() => {
+    if (!matches.has(match.id)) return;
+    match.phase = PHASES.RESULT;
+    pushMatchState(match);
+    emitToUser(aId, 'round:result', match.round.resultByPlayer[aId]);
+    emitToUser(bId, 'round:result', match.round.resultByPlayer[bId]);
+
+    const resultTimer = setTimeout(() => {
+      if (!matches.has(match.id)) return;
+      match.phase = PHASES.NEXT_ROUND;
+      pushMatchState(match);
+      match.startingPlayerIndex = (match.startingPlayerIndex + 1) % 2;
+      startRound(match);
+      roundPhaseTimers.delete(match.id);
+    }, ROUND_RESULT_MS);
+    roundPhaseTimers.set(match.id, resultTimer);
+  }, ROUND_REVEAL_MS);
+  roundPhaseTimers.set(match.id, revealTimer);
 }
 
 function maybeEndRound(match) {
@@ -1743,6 +1821,7 @@ function emitLobbyUpdate(lobby) {
 }
 
 function cleanupMatch(match) {
+  clearRoundPhaseTimer(match.id);
   const timer = botTurnTimers.get(match.id);
   if (timer) {
     clearTimeout(timer);

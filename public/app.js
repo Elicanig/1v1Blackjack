@@ -160,7 +160,10 @@ const state = {
   friendInvite: null,
   friendInviteRemainingMs: 0,
   lastRoundResultKey: '',
-  roundResultModal: null,
+  roundResultBanner: null,
+  roundResultHideTimer: null,
+  bankrollDisplay: null,
+  bankrollTweenRaf: null,
   currentBet: 5,
   selectedBotDifficulty: 'normal',
   botStakeType: 'FAKE',
@@ -174,6 +177,36 @@ const state = {
 };
 
 let freeClaimTicker = null;
+
+function cancelBankrollTween() {
+  if (state.bankrollTweenRaf) {
+    cancelAnimationFrame(state.bankrollTweenRaf);
+    state.bankrollTweenRaf = null;
+  }
+}
+
+function tweenBankroll(from, to, duration = 800) {
+  cancelBankrollTween();
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) {
+    state.bankrollDisplay = to;
+    return;
+  }
+  const start = performance.now();
+  const delta = to - from;
+  const easeOut = (t) => 1 - (1 - t) * (1 - t);
+  const tick = (now) => {
+    const t = Math.min(1, (now - start) / duration);
+    state.bankrollDisplay = Math.round(from + delta * easeOut(t));
+    render();
+    if (t < 1) {
+      state.bankrollTweenRaf = requestAnimationFrame(tick);
+    } else {
+      state.bankrollTweenRaf = null;
+      state.bankrollDisplay = to;
+    }
+  };
+  state.bankrollTweenRaf = requestAnimationFrame(tick);
+}
 
 function updateFreeClaimCountdown() {
   const next = state.freeClaimNextAt ? new Date(state.freeClaimNextAt).getTime() : 0;
@@ -371,7 +404,9 @@ function connectSocket() {
     state.leaveMatchModal = false;
     const myBankroll = match.players?.[state.me?.id]?.bankroll;
     if (state.me && Number.isFinite(myBankroll)) {
+      const from = Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : Number(state.me.chips || myBankroll);
       state.me.chips = myBankroll;
+      tweenBankroll(from, myBankroll, match.phase === 'RESULT' ? 950 : 350);
     }
     if (typeof match.selectedBet === 'number') {
       const preferred = state.currentBet;
@@ -386,16 +421,27 @@ function connectSocket() {
     render();
   });
   state.socket.on('match:error', ({ error }) => setError(error));
-  state.socket.on('round:result', ({ matchId, roundNumber, outcome, deltaChips }) => {
-    // One-shot modal trigger keyed by match+round to prevent duplicate firing.
+  state.socket.on('round:result', ({ matchId, roundNumber, outcome, deltaChips, title, previousBankroll, newBankroll, isPractice }) => {
+    // One-shot inline result banner trigger keyed by match+round.
     const key = `${matchId}:${roundNumber}`;
     if (state.lastRoundResultKey === key) return;
     state.lastRoundResultKey = key;
-    state.roundResultModal = {
-      title: outcome === 'win' ? 'You Win' : outcome === 'lose' ? 'You Lose' : 'Push',
-      delta: deltaChips || 0,
-      detail: `Round ${roundNumber}`
+    state.roundResultBanner = {
+      matchId,
+      roundNumber,
+      outcome,
+      title: title || (outcome === 'win' ? 'You Win' : outcome === 'lose' ? 'You Lose' : 'Push'),
+      deltaChips: deltaChips || 0,
+      isPractice: Boolean(isPractice)
     };
+    if (Number.isFinite(previousBankroll) && Number.isFinite(newBankroll)) {
+      tweenBankroll(previousBankroll, newBankroll, 950);
+    }
+    if (state.roundResultHideTimer) clearTimeout(state.roundResultHideTimer);
+    state.roundResultHideTimer = setTimeout(() => {
+      state.roundResultBanner = null;
+      render();
+    }, 1900);
     render();
   });
   state.socket.on('user:update', ({ user }) => {
@@ -420,6 +466,7 @@ async function loadMe() {
     if (!auth?.ok) throw new Error('Invalid auth');
     const data = await api('/api/me');
     state.me = data.user;
+    state.bankrollDisplay = data.user?.chips ?? 0;
     state.authUsername = data.user.username;
     localStorage.setItem('bb_auth_token', state.token);
     localStorage.setItem('bb_auth_username', state.authUsername);
@@ -1036,40 +1083,11 @@ function syncNotificationOverlay() {
   });
 }
 
-function syncRoundResultModal() {
-  let mount = document.getElementById('roundResultMount');
-  if (!mount) {
-    mount = document.createElement('div');
-    mount.id = 'roundResultMount';
-    document.body.appendChild(mount);
-  }
-  if (!state.roundResultModal) {
-    mount.innerHTML = '';
-    return;
-  }
-  const delta = state.roundResultModal.delta || 0;
-  const sign = delta > 0 ? '+' : '';
-  mount.innerHTML = `
-    <div class="result-overlay">
-      <div class="result-modal card">
-        <h3>${state.roundResultModal.title}</h3>
-        <div class="muted">${state.roundResultModal.detail}</div>
-        <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${delta} chips</div>
-        <button id="roundResultContinue" class="primary">Continue</button>
-      </div>
-    </div>
-  `;
-  const continueBtn = document.getElementById('roundResultContinue');
-  if (continueBtn) {
-    continueBtn.onclick = () => {
-      state.roundResultModal = null;
-      render();
-    };
-  }
-}
+function syncRoundResultModal() {}
 
 function renderTopbar(title = 'Blackjack Battle') {
-  const chipText = state.me?.chips?.toLocaleString?.() || '0';
+  const bankroll = Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : state.me?.chips;
+  const chipText = Number.isFinite(bankroll) ? Number(bankroll).toLocaleString() : '0';
   return `
     <div class="card topbar">
       <div class="topbar-left">
@@ -1831,14 +1849,25 @@ function renderMatch() {
   const isPvpMatch = !isBotOpponent;
   const phaseLabelMap = {
     ROUND_INIT: 'Betting',
+    DEAL: 'Dealing',
     ACTION_TURN: 'Action',
     PRESSURE_RESPONSE: 'Pressure',
     HAND_ADVANCE: 'Advance',
     ROUND_RESOLVE: 'Resolve',
+    REVEAL: 'Reveal',
+    RESULT: 'Result',
     NEXT_ROUND: 'Next Round'
   };
   const phaseLabel = phaseLabelMap[match.phase] || match.phase;
-  const roundResolved = match.phase === 'ROUND_RESOLVE' || match.phase === 'NEXT_ROUND';
+  const roundResolved =
+    match.phase === 'ROUND_RESOLVE' ||
+    match.phase === 'REVEAL' ||
+    match.phase === 'RESULT' ||
+    match.phase === 'NEXT_ROUND';
+  const myRoundResult = match.roundResult || state.roundResultBanner;
+  const displayBankroll =
+    Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : (myState.bankroll ?? me.chips);
+  const resultSign = (myRoundResult?.deltaChips || 0) > 0 ? '+' : '';
   const canAct = myTurn && !waitingPressure && activeHand && !activeHand.locked;
   const canEditBet = Boolean(match.canEditBet);
   const canConfirmBet = Boolean(match.canConfirmBet);
@@ -1891,8 +1920,17 @@ function renderMatch() {
                   <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
                   <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
                   <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
-                  <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()}</strong></div>
+                  <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
+                ${
+                  myRoundResult && (match.phase === 'REVEAL' || match.phase === 'RESULT')
+                    ? `<div class="round-result-inline ${myRoundResult.outcome || ''}">
+                         <strong>${myRoundResult.title || (myRoundResult.outcome === 'win' ? 'You Win' : myRoundResult.outcome === 'lose' ? 'You Lose' : 'Push')}</strong>
+                         <span class="result-inline-delta">${resultSign}${myRoundResult.deltaChips || 0}</span>
+                         <span class="muted">${myRoundResult.isPractice ? 'Practice' : `Bankroll ${Math.round(displayBankroll).toLocaleString()}`}</span>
+                       </div>`
+                    : ''
+                }
                 <div class="match-zone opponent-zone">
                   <div class="zone-head">
                     <h4>Opponent: ${playerName(oppId)}
@@ -2087,7 +2125,6 @@ function render() {
   bindNotificationUI();
   syncToasts();
   syncNotificationOverlay();
-  syncRoundResultModal();
   if (enteringFriends && state.token) loadFriendsData();
 }
 

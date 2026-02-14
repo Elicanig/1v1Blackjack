@@ -949,6 +949,36 @@ select:focus-visible {
   background: rgba(11, 23, 19, 0.78);
 }
 
+.round-result-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(236, 241, 233, 0.16);
+  background: rgba(9, 19, 16, 0.76);
+  animation: resultInlineIn 200ms ease-out;
+}
+
+.round-result-inline.win {
+  border-color: rgba(95, 185, 144, 0.52);
+}
+
+.round-result-inline.lose {
+  border-color: rgba(185, 109, 109, 0.52);
+}
+
+.round-result-inline.push {
+  border-color: rgba(205, 167, 100, 0.5);
+}
+
+.result-inline-delta {
+  font-weight: 700;
+  color: var(--gold2);
+}
+
 .strip-item {
   display: flex;
   align-items: baseline;
@@ -1435,6 +1465,11 @@ select:focus-visible {
 @keyframes resultIn {
   from { opacity: 0; transform: translateY(8px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes resultInlineIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes overlayIn {
