@@ -949,36 +949,6 @@ select:focus-visible {
   background: rgba(11, 23, 19, 0.78);
 }
 
-.round-result-inline {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  width: fit-content;
-  max-width: 100%;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(236, 241, 233, 0.16);
-  background: rgba(9, 19, 16, 0.76);
-  animation: resultInlineIn 200ms ease-out;
-}
-
-.round-result-inline.win {
-  border-color: rgba(95, 185, 144, 0.52);
-}
-
-.round-result-inline.lose {
-  border-color: rgba(185, 109, 109, 0.52);
-}
-
-.round-result-inline.push {
-  border-color: rgba(205, 167, 100, 0.5);
-}
-
-.result-inline-delta {
-  font-weight: 700;
-  color: var(--gold2);
-}
-
 .strip-item {
   display: flex;
   align-items: baseline;
@@ -1059,6 +1029,7 @@ select:focus-visible {
   flex: 0 0 min(230px, 58%);
   background: rgba(13, 26, 22, 0.7);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  overflow: visible;
 }
 
 .hand.active {
@@ -1092,22 +1063,47 @@ select:focus-visible {
 
 .cards {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-wrap: nowrap;
+  gap: 0;
   margin-top: 6px;
   align-items: flex-start;
-  align-content: flex-start;
-  min-height: 0;
+  min-height: clamp(92px, 11vh, 122px);
+  overflow-x: auto;
+  overflow-y: visible;
+  padding-bottom: 2px;
 }
 
 .playing-card {
-  width: clamp(52px, 6vw, 76px);
+  width: var(--card-w, clamp(54px, 5.9vw, 78px));
   aspect-ratio: 5 / 7;
   border-radius: 12px;
   border: 1px solid rgba(12, 22, 17, 0.45);
   box-shadow: 0 8px 14px rgba(0, 0, 0, 0.3);
   position: relative;
   flex: 0 0 auto;
+}
+
+.cards .playing-card + .playing-card {
+  margin-left: var(--card-overlap, -8px);
+}
+
+.card-count-1,
+.card-count-2,
+.card-count-3 {
+  --card-w: clamp(56px, 6.1vw, 80px);
+  --card-overlap: -6px;
+}
+
+.card-count-4,
+.card-count-5 {
+  --card-w: clamp(52px, 5.6vw, 74px);
+  --card-overlap: -10px;
+}
+
+.card-count-6,
+.card-count-7 {
+  --card-w: clamp(48px, 5.1vw, 68px);
+  --card-overlap: -12px;
 }
 
 .playing-card.face {
@@ -1208,14 +1204,14 @@ select:focus-visible {
 
 .actions-compact {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px;
 }
 
 .actions-compact button {
-  min-height: 32px;
-  padding: 5px 8px;
-  font-size: 0.8rem;
+  min-height: 36px;
+  padding: 7px 10px;
+  font-size: 0.84rem;
   min-width: 0;
   white-space: nowrap;
 }
@@ -1295,13 +1291,23 @@ select:focus-visible {
   margin-bottom: var(--space-1);
 }
 
-.pressure-banner {
-  border-color: rgba(205, 167, 100, 0.35);
-  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.14) inset;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(205, 167, 100, 0.35);
-  background: rgba(23, 20, 12, 0.48);
+.pressure-overlay-wrap {
+  position: fixed;
+  right: 16px;
+  bottom: 18px;
+  z-index: 1250;
+  pointer-events: none;
+}
+
+.pressure-overlay {
+  width: min(360px, calc(100vw - 24px));
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(205, 167, 100, 0.42);
+  background: rgba(11, 21, 18, 0.94);
+  box-shadow: var(--shadow-md);
+  pointer-events: auto;
+  animation: overlayIn 180ms ease-out;
 }
 
 .modal {
@@ -1363,14 +1369,24 @@ select:focus-visible {
   }
 }
 
-.result-overlay {
+.round-result-wrap {
   position: fixed;
-  inset: 0;
-  z-index: 1200;
-  background: rgba(2, 8, 6, 0.56);
-  display: grid;
-  place-items: center;
-  backdrop-filter: blur(3px);
+  top: 88px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1300;
+  pointer-events: none;
+}
+
+.round-result-popup {
+  min-width: 230px;
+  text-align: center;
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(205, 167, 100, 0.4);
+  background: rgba(11, 21, 18, 0.95);
+  box-shadow: var(--shadow-md);
+  animation: resultIn 180ms ease-out;
 }
 
 .result-modal {
@@ -1467,11 +1483,6 @@ select:focus-visible {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-@keyframes resultInlineIn {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
 @keyframes overlayIn {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: translateY(0); }
@@ -1533,7 +1544,7 @@ select:focus-visible {
   }
 
   .actions-compact {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .actions-compact button {
@@ -1573,9 +1584,9 @@ select:focus-visible {
   }
 
   .actions-compact button {
-    min-height: 28px;
-    padding: 4px 7px;
-    font-size: 0.76rem;
+    min-height: 32px;
+    padding: 6px 8px;
+    font-size: 0.8rem;
   }
 
   .play-layout {

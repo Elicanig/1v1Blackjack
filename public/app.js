@@ -1083,7 +1083,33 @@ function syncNotificationOverlay() {
   });
 }
 
-function syncRoundResultModal() {}
+function syncRoundResultModal() {
+  let mount = document.getElementById('roundResultMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'roundResultMount';
+    document.body.appendChild(mount);
+  }
+  const match = state.currentMatch;
+  const phaseResult = match?.phase === 'RESULT' ? match?.roundResult : null;
+  const result = phaseResult || state.roundResultBanner;
+  if (!result || state.view !== 'match') {
+    mount.innerHTML = '';
+    return;
+  }
+  const delta = result.deltaChips || 0;
+  const sign = delta > 0 ? '+' : '';
+  const bankroll = Number.isFinite(state.bankrollDisplay) ? Math.round(state.bankrollDisplay) : state.me?.chips || 0;
+  mount.innerHTML = `
+    <div class="round-result-wrap">
+      <div class="round-result-popup card">
+        <h3>${result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push')}</h3>
+        <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${delta}</div>
+        <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
+      </div>
+    </div>
+  `;
+}
 
 function renderTopbar(title = 'Blackjack Battle') {
   const bankroll = Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : state.me?.chips;
@@ -1803,7 +1829,7 @@ function renderHand(hand, index, active, pressureTagged = false) {
       </div>
       <div class="muted">${formatHandTotalLine(hand)}</div>
       <div class="muted hand-status">${labels.join(' • ') || 'In play'}</div>
-      <div class="cards">
+      <div class="cards card-count-${Math.min(hand.cards.length, 7)}">
         ${hand.cards.map((card, cardIndex) => renderPlayingCard(card, cardIndex)).join('')}
       </div>
     </div>
@@ -1864,10 +1890,8 @@ function renderMatch() {
     match.phase === 'REVEAL' ||
     match.phase === 'RESULT' ||
     match.phase === 'NEXT_ROUND';
-  const myRoundResult = match.roundResult || state.roundResultBanner;
   const displayBankroll =
     Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : (myState.bankroll ?? me.chips);
-  const resultSign = (myRoundResult?.deltaChips || 0) > 0 ? '+' : '';
   const canAct = myTurn && !waitingPressure && activeHand && !activeHand.locked;
   const canEditBet = Boolean(match.canEditBet);
   const canConfirmBet = Boolean(match.canConfirmBet);
@@ -1922,15 +1946,6 @@ function renderMatch() {
                   <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
-                ${
-                  myRoundResult && (match.phase === 'REVEAL' || match.phase === 'RESULT')
-                    ? `<div class="round-result-inline ${myRoundResult.outcome || ''}">
-                         <strong>${myRoundResult.title || (myRoundResult.outcome === 'win' ? 'You Win' : myRoundResult.outcome === 'lose' ? 'You Lose' : 'Push')}</strong>
-                         <span class="result-inline-delta">${resultSign}${myRoundResult.deltaChips || 0}</span>
-                         <span class="muted">${myRoundResult.isPractice ? 'Practice' : `Bankroll ${Math.round(displayBankroll).toLocaleString()}`}</span>
-                       </div>`
-                    : ''
-                }
                 <div class="match-zone opponent-zone">
                   <div class="zone-head">
                     <h4>Opponent: ${playerName(oppId)}
@@ -1991,23 +2006,6 @@ function renderMatch() {
                       : ''
                   }
                   ${
-                    pressure
-                      ? `<div class="pressure-banner">
-                        <strong>Pressure Bet Response Required</strong>
-                        <div class="muted">${playerName(pressure.initiatorId)} used <strong>${pressure.type}</strong>.</div>
-                        ${
-                          waitingPressure
-                            ? `<div class="muted">Match +${pressure.delta} chips or surrender this hand.</div>
-                               <div class="pressure-actions">
-                                 <button class="primary" id="pressureMatch">Match Bet</button>
-                                 <button class="warn" id="pressureSurrender">Surrender Hand</button>
-                               </div>`
-                            : '<div class="muted">Waiting for opponent decision...</div>'
-                        }
-                      </div>`
-                      : ''
-                  }
-                  ${
                     state.leaveMatchModal
                       ? `<div class="leave-inline">
                         <strong>Leave Match?</strong>
@@ -2053,12 +2051,6 @@ function renderMatch() {
   });
   const confirmBetBtn = document.getElementById('confirmBetBtn');
   if (confirmBetBtn) confirmBetBtn.onclick = () => emitConfirmBet();
-
-  const matchBtn = document.getElementById('pressureMatch');
-  if (matchBtn) matchBtn.onclick = () => emitPressureDecision('match');
-
-  const surrenderBtn = document.getElementById('pressureSurrender');
-  if (surrenderBtn) surrenderBtn.onclick = () => emitPressureDecision('surrender');
   const emoteToggleBtn = document.getElementById('toggleEmoteBtn');
   if (emoteToggleBtn) {
     emoteToggleBtn.onclick = () => {
@@ -2096,6 +2088,49 @@ function renderMatch() {
   }
 }
 
+function syncPressureOverlay() {
+  let mount = document.getElementById('pressureOverlayMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'pressureOverlayMount';
+    document.body.appendChild(mount);
+  }
+
+  const match = state.currentMatch;
+  const me = state.me;
+  if (!match || !me || state.view !== 'match' || !match.pendingPressure) {
+    mount.innerHTML = '';
+    return;
+  }
+
+  const pressure = match.pendingPressure;
+  const waitingPressure = pressure?.opponentId === me.id;
+  const initiatorName = playerName(pressure.initiatorId);
+
+  mount.innerHTML = `
+    <div class="pressure-overlay-wrap">
+      <div class="pressure-overlay card">
+        <strong>Pressure Bet Response Required</strong>
+        <div class="muted">${initiatorName} used <strong>${pressure.type}</strong>.</div>
+        ${
+          waitingPressure
+            ? `<div class="muted">Match +${pressure.delta} or surrender this hand.</div>
+               <div class="pressure-actions">
+                 <button class="primary" id="pressureOverlayMatch">Match Bet</button>
+                 <button class="warn" id="pressureOverlaySurrender">Surrender Hand</button>
+               </div>`
+            : '<div class="muted">Waiting for opponent decision...</div>'
+        }
+      </div>
+    </div>
+  `;
+
+  const matchBtn = document.getElementById('pressureOverlayMatch');
+  if (matchBtn) matchBtn.onclick = () => emitPressureDecision('match');
+  const surrenderBtn = document.getElementById('pressureOverlaySurrender');
+  if (surrenderBtn) surrenderBtn.onclick = () => emitPressureDecision('surrender');
+}
+
 function render() {
   const enteringFriends = state.lastRenderedView !== 'friends' && state.view === 'friends';
   state.lastRenderedView = state.view;
@@ -2125,6 +2160,8 @@ function render() {
   bindNotificationUI();
   syncToasts();
   syncNotificationOverlay();
+  syncRoundResultModal();
+  syncPressureOverlay();
   if (enteringFriends && state.token) loadFriendsData();
 }
 
