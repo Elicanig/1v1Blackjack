@@ -3,6 +3,7 @@ const app = document.getElementById('app');
 let spotlightInitialized = false;
 let hoverGlowInitialized = false;
 let inviteCountdownTicker = null;
+let matchTurnTicker = null;
 const PERMISSION_ERROR_PATTERNS = [
   /not allowed by the user agent/i,
   /not allowed by the platform/i,
@@ -168,7 +169,6 @@ const state = {
   friendInviteRemainingMs: 0,
   lastRoundResultKey: '',
   roundResultBanner: null,
-  roundResultHideTimer: null,
   bankrollDisplay: null,
   bankrollTweenRaf: null,
   currentBet: 5,
@@ -183,7 +183,10 @@ const state = {
   leaveMatchModal: false,
   confirmActionModal: null,
   emoteCooldownUntil: 0,
-  pendingNavAfterLeave: null
+  pendingNavAfterLeave: null,
+  turnTimerFreezeKey: '',
+  turnTimerFreezeRemainingMs: null,
+  dismissedRoundResultKey: ''
 };
 
 let freeClaimTicker = null;
@@ -232,6 +235,123 @@ function formatCooldown(ms) {
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function turnTimerKey(match) {
+  if (!match) return '';
+  return `${match.id}:${match.roundNumber}:${match.phase}:${match.currentTurn || ''}:${match.turnExpiresAt || ''}`;
+}
+
+function shouldPauseTurnTimer(match) {
+  if (!match) return true;
+  if (state.view !== 'match') return true;
+  if (match.phase !== 'ACTION_TURN') return true;
+  if (match.pendingPressure) return true;
+  if (state.leaveMatchModal || Boolean(state.confirmActionModal)) return true;
+  if (state.notificationsOpen || Boolean(state.roundResultBanner)) return true;
+  return false;
+}
+
+function getTurnTimerState(match = state.currentMatch) {
+  const timeoutMs = Number(match?.turnTimeoutMs || 20_000);
+  const expiresAtMs = match?.turnExpiresAt ? new Date(match.turnExpiresAt).getTime() : 0;
+  const active =
+    Boolean(match) &&
+    match.phase === 'ACTION_TURN' &&
+    !match.pendingPressure &&
+    Boolean(match.currentTurn) &&
+    Number.isFinite(expiresAtMs) &&
+    expiresAtMs > 0;
+
+  if (!active) {
+    state.turnTimerFreezeKey = '';
+    state.turnTimerFreezeRemainingMs = null;
+    return {
+      active: false,
+      paused: false,
+      urgent: false,
+      remainingMs: 0,
+      timeoutMs,
+      progress: 0,
+      key: ''
+    };
+  }
+
+  const key = turnTimerKey(match);
+  const paused = shouldPauseTurnTimer(match);
+  let remainingMs = Math.max(0, expiresAtMs - Date.now());
+  if (paused) {
+    if (state.turnTimerFreezeKey !== key || !Number.isFinite(state.turnTimerFreezeRemainingMs)) {
+      state.turnTimerFreezeKey = key;
+      state.turnTimerFreezeRemainingMs = remainingMs;
+    }
+    remainingMs = Math.max(0, Number(state.turnTimerFreezeRemainingMs || 0));
+  } else if (state.turnTimerFreezeKey === key) {
+    state.turnTimerFreezeKey = '';
+    state.turnTimerFreezeRemainingMs = null;
+  }
+
+  const progress = timeoutMs > 0 ? Math.max(0, Math.min(1, remainingMs / timeoutMs)) : 0;
+  return {
+    active: true,
+    paused,
+    urgent: remainingMs <= 3000,
+    remainingMs,
+    timeoutMs,
+    progress,
+    key
+  };
+}
+
+function formatTurnSeconds(ms) {
+  return `${Math.max(0, Math.ceil(ms / 1000))}s`;
+}
+
+function renderTurnTimer(ownerId, timerState, variant = 'zone') {
+  const visible = Boolean(timerState.active && state.currentMatch?.currentTurn === ownerId);
+  const percent = Math.round((visible ? timerState.progress : 0) * 100);
+  const toneClass = visible && timerState.urgent ? 'is-urgent' : visible && timerState.paused ? 'is-paused' : '';
+  const label = visible
+    ? ownerId === state.me?.id
+      ? 'Your Turn'
+      : `${playerName(ownerId)} Turn`
+    : 'Waiting';
+  return `
+    <div class="turn-timer turn-timer--${variant} ${toneClass} ${visible ? 'is-active' : 'is-idle'}"
+      data-turn-timer
+      data-turn-owner="${ownerId}"
+      data-turn-variant="${variant}"
+      data-turn-visible="${visible ? '1' : '0'}">
+      <div class="turn-timer-head">
+        <span class="turn-timer-label">${label}</span>
+        <span class="turn-timer-seconds">${visible ? formatTurnSeconds(timerState.remainingMs) : '--'}</span>
+      </div>
+      <div class="turn-timer-track"><span class="turn-timer-fill" style="width:${percent}%"></span></div>
+    </div>
+  `;
+}
+
+function syncTurnCountdownUI() {
+  const nodes = document.querySelectorAll('[data-turn-timer]');
+  if (!nodes.length) return;
+  const match = state.currentMatch;
+  const timerState = getTurnTimerState(match);
+  nodes.forEach((node) => {
+    const ownerId = node.getAttribute('data-turn-owner') || '';
+    const visible = Boolean(timerState.active && match?.currentTurn === ownerId);
+    const pct = Math.round((visible ? timerState.progress : 0) * 100);
+    node.setAttribute('data-turn-visible', visible ? '1' : '0');
+    node.classList.toggle('is-active', visible);
+    node.classList.toggle('is-idle', !visible);
+    node.classList.toggle('is-urgent', visible && timerState.urgent);
+    node.classList.toggle('is-paused', visible && timerState.paused);
+    const labelEl = node.querySelector('.turn-timer-label');
+    const secEl = node.querySelector('.turn-timer-seconds');
+    const fillEl = node.querySelector('.turn-timer-fill');
+    if (labelEl) labelEl.textContent = visible ? (ownerId === state.me?.id ? 'Your Turn' : `${playerName(ownerId)} Turn`) : 'Waiting';
+    if (secEl) secEl.textContent = visible ? formatTurnSeconds(timerState.remainingMs) : '--';
+    if (fillEl) fillEl.style.width = `${pct}%`;
+  });
 }
 
 const FALLBACK_PATCH_NOTES = [
@@ -410,8 +530,13 @@ function connectSocket() {
     render();
   });
   state.socket.on('match:state', (match) => {
+    const previousRound = state.currentMatch?.roundNumber || 0;
     state.currentMatch = match;
     state.leaveMatchModal = false;
+    if (match.roundNumber > previousRound && match.phase !== 'RESULT') {
+      state.roundResultBanner = null;
+      state.dismissedRoundResultKey = '';
+    }
     const myBankroll = match.players?.[state.me?.id]?.bankroll;
     if (state.me && Number.isFinite(myBankroll)) {
       const from = Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : Number(state.me.chips || myBankroll);
@@ -436,6 +561,7 @@ function connectSocket() {
     const key = `${matchId}:${roundNumber}`;
     if (state.lastRoundResultKey === key) return;
     state.lastRoundResultKey = key;
+    state.dismissedRoundResultKey = '';
     state.roundResultBanner = {
       matchId,
       roundNumber,
@@ -447,11 +573,6 @@ function connectSocket() {
     if (Number.isFinite(previousBankroll) && Number.isFinite(newBankroll)) {
       tweenBankroll(previousBankroll, newBankroll, 950);
     }
-    if (state.roundResultHideTimer) clearTimeout(state.roundResultHideTimer);
-    state.roundResultHideTimer = setTimeout(() => {
-      state.roundResultBanner = null;
-      render();
-    }, 1900);
     render();
   });
   state.socket.on('user:update', ({ user }) => {
@@ -1193,18 +1314,48 @@ function syncRoundResultModal() {
     mount.innerHTML = '';
     return;
   }
+  const resultKey = `${result.matchId || match?.id || 'match'}:${result.roundNumber || match?.roundNumber || 0}`;
+  if (state.dismissedRoundResultKey === resultKey) {
+    mount.innerHTML = '';
+    return;
+  }
   const delta = result.deltaChips || 0;
-  const sign = delta > 0 ? '+' : '';
+  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
   const bankroll = Number.isFinite(state.bankrollDisplay) ? Math.round(state.bankrollDisplay) : state.me?.chips || 0;
+  const headline = result.outcome === 'win' ? 'WIN' : result.outcome === 'lose' ? 'LOSE' : 'PUSH';
+  const subtitle = result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push');
   mount.innerHTML = `
     <div class="round-result-wrap">
-      <div class="round-result-popup card">
-        <h3>${result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push')}</h3>
-        <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${delta}</div>
+      <div class="round-result-popup result-modal card">
+        <h3 class="result-title">${headline}</h3>
+        <div class="muted">${subtitle}</div>
+        <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${Math.abs(delta)}</div>
         <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
+        <div class="result-actions">
+          <button id="roundResultNextBtn" class="primary">Next Round</button>
+          <button id="roundResultLobbyBtn" class="ghost">Back to Lobby</button>
+        </div>
       </div>
     </div>
   `;
+  const nextBtn = document.getElementById('roundResultNextBtn');
+  if (nextBtn) {
+    nextBtn.onclick = () => {
+      state.dismissedRoundResultKey = resultKey;
+      state.roundResultBanner = null;
+      render();
+    };
+  }
+  const lobbyBtn = document.getElementById('roundResultLobbyBtn');
+  if (lobbyBtn) {
+    lobbyBtn.onclick = () => {
+      state.dismissedRoundResultKey = resultKey;
+      state.roundResultBanner = null;
+      state.pendingNavAfterLeave = 'lobbies';
+      emitLeaveMatch();
+      render();
+    };
+  }
 }
 
 function renderTopbar(title = 'Blackjack Battle') {
@@ -1942,21 +2093,54 @@ function renderEmoteBubble(playerId) {
   return `<div class="emote-overlay-bubble ${bubbleClass}">${state.floatingEmote.value}</div>`;
 }
 
+function suitLabel(suit) {
+  if (suit === 'S') return 'Spades';
+  if (suit === 'H') return 'Hearts';
+  if (suit === 'D') return 'Diamonds';
+  if (suit === 'C') return 'Clubs';
+  return 'Suit';
+}
+
+function renderSuitIcon(suit, className = '') {
+  const iconClass = className ? `suit-icon ${className}` : 'suit-icon';
+  if (suit === 'H') {
+    return `<svg class="${iconClass}" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7-4.35-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 11c0 5.65-7 10-7 10z"/></svg>`;
+  }
+  if (suit === 'D') {
+    return `<svg class="${iconClass}" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l6 10-6 10-6-10z"/></svg>`;
+  }
+  if (suit === 'C') {
+    return `<svg class="${iconClass}" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7.4" r="3.2"></circle><circle cx="8.1" cy="12" r="3.2"></circle><circle cx="15.9" cy="12" r="3.2"></circle><path d="M11 14.5h2V20h2v2H9v-2h2z"></path></svg>`;
+  }
+  return `<svg class="${iconClass}" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C9 5 5 8.2 5 12a4.6 4.6 0 0 0 8 3v5h2v-5a4.6 4.6 0 0 0 8-3c0-3.8-4-7-7-10z"></path></svg>`;
+}
+
 function renderPlayingCard(card, cardIndex = 0) {
   if (card.hidden) {
-    return `<div class="playing-card hidden deal-in" style="animation-delay:${cardIndex * 40}ms" aria-label="Face-down card"></div>`;
+    return `
+      <div class="playing-card hidden deal-in" style="animation-delay:${cardIndex * 40}ms" aria-label="Face-down card">
+        <div class="card-back-inner">
+          <span class="card-back-mark">BB</span>
+        </div>
+      </div>
+    `;
   }
 
-  const suitMap = { S: '♠', H: '♥', D: '♦', C: '♣' };
-  const symbol = suitMap[card.suit] || '?';
   const isRed = card.suit === 'H' || card.suit === 'D';
   const colorClass = isRed ? 'red' : 'black';
   return `
-    <div class="playing-card face ${colorClass} deal-in" style="animation-delay:${cardIndex * 40}ms" aria-label="${card.rank}${symbol}">
-      <div class="corner top"><span class="rank">${card.rank}</span><span class="suit">${symbol}</span></div>
-      <div class="center-suit">${symbol}</div>
-      <div class="corner bottom"><span class="rank">${card.rank}</span><span class="suit">${symbol}</span></div>
-    </div>
+    <article class="playing-card face ${colorClass} deal-in flip-in" style="animation-delay:${cardIndex * 40}ms" aria-label="${card.rank} of ${suitLabel(card.suit)}">
+      <div class="card-face-sheen"></div>
+      <div class="corner top">
+        <span class="rank">${card.rank}</span>
+        ${renderSuitIcon(card.suit, 'corner-suit')}
+      </div>
+      <div class="center-suit">${renderSuitIcon(card.suit, 'center-suit-icon')}</div>
+      <div class="corner bottom">
+        <span class="rank">${card.rank}</span>
+        ${renderSuitIcon(card.suit, 'corner-suit')}
+      </div>
+    </article>
   `;
 }
 
@@ -2014,6 +2198,7 @@ function renderMatch() {
       : 'Waiting for next turn.';
   const pressureMine = waitingPressure ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const pressureOpp = pressure && pressure.opponentId === oppId ? new Set(pressure?.affectedHandIndices || []) : new Set();
+  const turnTimerState = getTurnTimerState(match);
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -2057,21 +2242,32 @@ function renderMatch() {
                   <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
-                <div class="match-zone opponent-zone">
+                ${renderTurnTimer(match.currentTurn, turnTimerState, 'strip')}
+                <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">
                   ${renderEmoteBubble(oppId)}
                   <div class="zone-head">
-                    <h4>Opponent: ${playerName(oppId)}</h4>
-                    <span class="muted">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
+                    <div class="zone-player">
+                      <span class="player-tag">Opponent</span>
+                      <h4>${playerName(oppId)}</h4>
+                      <span class="muted player-sub">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
+                    </div>
+                    ${renderTurnTimer(oppId, turnTimerState)}
                   </div>
                   <div class="hands">
                     ${oppState.hands.map((h, idx) => renderHand(h, idx, idx === oppState.activeHandIndex, pressureOpp.has(idx))).join('')}
                   </div>
                 </div>
-                <div class="match-zone you-zone">
+                <div class="match-zone you-zone ${myTurn ? 'turn-active-zone' : ''}">
                   ${renderEmoteBubble(me.id)}
                   <div class="zone-head">
-                    <h4>You: ${playerName(me.id)}</h4>
-                    <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
+                    <div class="zone-player">
+                      <span class="player-tag">You</span>
+                      <h4>${playerName(me.id)}</h4>
+                    </div>
+                    <div class="zone-head-meta">
+                      ${renderTurnTimer(me.id, turnTimerState)}
+                      <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
+                    </div>
                   </div>
                   <div class="hands">
                     ${myState.hands.map((h, idx) => renderHand(h, idx, idx === myState.activeHandIndex, pressureMine.has(idx))).join('')}
@@ -2139,7 +2335,7 @@ function renderMatch() {
                           } / Opponent ${opponentConnected ? 'online' : 'offline'}`
                     }
                   </div>
-                  <div class="muted">AFK protection enabled: inactive turns auto-stand after 20s.</div>
+                  <div class="muted">AFK protection enabled: inactive turns auto-stand after ${Math.round((match.turnTimeoutMs || 20000) / 1000)}s.</div>
                   <div class="muted">${actionHint}</div>
                 </details>
               </section>`
@@ -2241,6 +2437,7 @@ function renderMatch() {
       render();
     };
   }
+  syncTurnCountdownUI();
 }
 
 function syncPressureOverlay() {
@@ -2317,6 +2514,7 @@ function render() {
   syncNotificationOverlay();
   syncRoundResultModal();
   syncPressureOverlay();
+  syncTurnCountdownUI();
   if (enteringFriends && state.token) loadFriendsData();
 }
 
@@ -2389,6 +2587,12 @@ function render() {
       if (state.view === 'friends') syncInviteCountdownUI();
       else state.friendInviteRemainingMs = inviteRemainingMs();
     }, 1000);
+  }
+  if (!matchTurnTicker) {
+    matchTurnTicker = setInterval(() => {
+      if (state.view !== 'match') return;
+      syncTurnCountdownUI();
+    }, 120);
   }
   render();
   if (state.token) {

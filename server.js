@@ -864,6 +864,8 @@ function buildClientState(match, viewerId) {
     phase: match.phase,
     playerIds: match.playerIds,
     currentTurn: round.turnPlayerId,
+    turnExpiresAt: round.turnExpiresAt || null,
+    turnTimeoutMs: TURN_TIMEOUT_MS,
     pendingPressure: round.pendingPressure,
     baseBet: round.baseBet,
     betLocked: Boolean(round.firstActionTaken),
@@ -916,13 +918,25 @@ function clearAfkTurnTimer(matchId) {
 
 function syncAfkTurnTimer(match) {
   clearAfkTurnTimer(match.id);
-  if (!match || match.phase !== PHASES.ACTION_TURN || match.round?.pendingPressure) return;
+  if (!match || !match.round) return;
+  if (match.phase !== PHASES.ACTION_TURN || match.round?.pendingPressure) {
+    match.round.turnExpiresAt = null;
+    return;
+  }
   const turnPlayerId = match.round.turnPlayerId;
-  if (!turnPlayerId) return;
+  if (!turnPlayerId) {
+    match.round.turnExpiresAt = null;
+    return;
+  }
   const turnState = match.round.players?.[turnPlayerId];
   const activeIndex = turnState?.activeHandIndex ?? 0;
   const activeHand = turnState?.hands?.[activeIndex];
-  if (!activeHand || activeHand.locked || activeHand.bust || activeHand.surrendered || activeHand.stood) return;
+  if (!activeHand || activeHand.locked || activeHand.bust || activeHand.surrendered || activeHand.stood) {
+    match.round.turnExpiresAt = null;
+    return;
+  }
+
+  match.round.turnExpiresAt = new Date(Date.now() + TURN_TIMEOUT_MS).toISOString();
 
   const timer = setTimeout(() => {
     if (!matches.has(match.id)) return;
