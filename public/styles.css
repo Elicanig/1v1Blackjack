@@ -869,12 +869,13 @@ select:focus-visible {
   gap: var(--space-3);
 }
 
-.table-layout {
+.match-shell {
   height: min(calc(100vh - 136px), 820px);
   max-height: min(calc(100vh - 136px), 820px);
   overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
   gap: var(--space-2);
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
   background:
     radial-gradient(circle at 50% 40%, rgba(62, 112, 88, 0.22), transparent 70%),
     rgba(8, 19, 16, 0.72);
@@ -884,6 +885,20 @@ select:focus-visible {
   height: calc(100vh - 110px);
   min-height: calc(100vh - 110px);
   overflow: hidden;
+}
+
+.match-main {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  min-height: 0;
+}
+
+.match-side {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 8px;
+  min-height: 0;
 }
 
 .zones-stack {
@@ -927,7 +942,7 @@ select:focus-visible {
   background: rgba(11, 23, 19, 0.56);
   padding: 10px;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .zone-head {
@@ -963,17 +978,21 @@ select:focus-visible {
 }
 
 .hands {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  display: flex;
+  flex-wrap: nowrap;
   gap: 8px;
-  min-height: 0;
-  overflow: auto;
+  min-height: 100px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
 }
 
 .hand {
   border-radius: var(--radius-sm);
   border: 1px solid rgba(236, 241, 233, 0.12);
   padding: 8px;
+  min-width: min(250px, 44%);
+  flex: 0 0 min(250px, 44%);
   background: rgba(13, 26, 22, 0.7);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
@@ -1121,8 +1140,8 @@ select:focus-visible {
 }
 
 .actions-compact {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1130,6 +1149,18 @@ select:focus-visible {
   min-height: 34px;
   padding: 7px 11px;
   font-size: 0.88rem;
+  flex: 1 1 calc(25% - 8px);
+  min-width: 90px;
+}
+
+.pressure-chip {
+  border-color: rgba(212, 175, 55, 0.6);
+  background: rgba(212, 175, 55, 0.2);
+  color: #f4dfb6;
+}
+
+.leave-inline {
+  padding: 10px;
 }
 
 .bet-control {
@@ -1383,13 +1414,15 @@ select:focus-visible {
     grid-template-columns: 1fr 1fr;
   }
 
-  .table-layout {
-    height: auto;
-    max-height: none;
+  .match-shell {
+    height: calc(100vh - 120px);
+    max-height: calc(100vh - 120px);
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
   .zones-stack {
-    grid-template-rows: 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .rules-strip {
@@ -1398,16 +1431,10 @@ select:focus-visible {
   }
 
   .hands {
-    grid-template-columns: 1fr;
+    min-height: 88px;
   }
 
-  .actions button {
-    flex: 1 1 calc(50% - var(--space-2));
-  }
-
-  .actions-compact {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
+  .actions-compact button { flex: 1 1 calc(33% - 8px); }
 
   .free-claim-card {
     flex-direction: column;
@@ -1416,7 +1443,7 @@ select:focus-visible {
 }
 
 @media (max-height: 800px) {
-  .table-layout {
+  .match-shell {
     height: min(calc(100vh - 120px), 700px);
     gap: 8px;
   }
