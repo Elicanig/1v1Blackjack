@@ -118,6 +118,13 @@ function useHoverGlow() {
 }
 
 function applyGlowFollowClasses() {
+  app.querySelectorAll('.glow-follow').forEach((el) => el.classList.remove('glow-follow', 'glow-follow--panel'));
+  if (state.view === 'match' && state.currentMatch?.phase === 'ROUND_INIT') {
+    app
+      .querySelectorAll('.betting-header, .bet-control, .bet-confirm-actions button')
+      .forEach((el) => el.classList.add('glow-follow'));
+    return;
+  }
   app
     .querySelectorAll('button.primary, button.gold, button.ghost, .bot-segmented button, .tabs .nav-pill, .nav button:not(.warn), .card.section')
     .forEach((el) => el.classList.add('glow-follow'));
@@ -173,7 +180,10 @@ const state = {
   challengeBet: 25,
   challengeMessage: '',
   showMatchDetails: false,
-  leaveMatchModal: false
+  leaveMatchModal: false,
+  confirmActionModal: null,
+  emoteCooldownUntil: 0,
+  pendingNavAfterLeave: null
 };
 
 let freeClaimTicker = null;
@@ -454,7 +464,9 @@ function connectSocket() {
     state.currentMatch = null;
     state.currentLobby = null;
     state.leaveMatchModal = false;
-    goToView('home');
+    const target = state.pendingNavAfterLeave || 'home';
+    state.pendingNavAfterLeave = null;
+    goToView(target);
     loadMe();
   });
 }
@@ -555,6 +567,90 @@ function goToView(view) {
   if (window.location.pathname !== next) {
     history.replaceState({}, '', next);
   }
+}
+
+function isBotMatchActive() {
+  if (!state.currentMatch || !state.me) return false;
+  const oppId = state.currentMatch.playerIds?.find((id) => id !== state.me.id);
+  return Boolean(oppId && state.currentMatch.participants?.[oppId]?.isBot);
+}
+
+function navigateWithMatchSafety(view) {
+  if (!state.currentMatch || !state.me || view === 'match') {
+    goToView(view);
+    if (view === 'friends') loadFriendsData();
+    render();
+    return;
+  }
+  if (!isBotMatchActive()) {
+    goToView(view);
+    if (view === 'friends') loadFriendsData();
+    render();
+    return;
+  }
+  state.pendingNavAfterLeave = view;
+  emitLeaveMatch();
+  setTimeout(() => {
+    if (!state.pendingNavAfterLeave) return;
+    const target = state.pendingNavAfterLeave;
+    state.pendingNavAfterLeave = null;
+    state.currentMatch = null;
+    state.currentLobby = null;
+    state.leaveMatchModal = false;
+    goToView(target);
+    if (target === 'friends') loadFriendsData();
+    render();
+  }, 800);
+}
+
+function openActionConfirm(action, hand) {
+  if (action === 'double') {
+    state.confirmActionModal = {
+      action,
+      title: 'Confirm Double?',
+      body: `Bet ${hand.bet} -> ${hand.bet * 2}. This adds pressure to the opponent.`
+    };
+  } else if (action === 'split') {
+    state.confirmActionModal = {
+      action,
+      title: 'Confirm Split?',
+      body: `This creates a second hand and adds +${hand.bet} pressure to the opponent.`
+    };
+  }
+  render();
+}
+
+function canTriggerAction(action) {
+  const match = state.currentMatch;
+  const me = state.me;
+  if (!match || !me || state.view !== 'match') return false;
+  if (match.phase !== 'ACTION_TURN') return false;
+  if (match.currentTurn !== me.id) return false;
+  if (match.pendingPressure) return false;
+  const myState = match.players?.[me.id];
+  const hand = myState?.hands?.[myState.activeHandIndex || 0];
+  if (!hand || hand.locked || hand.bust || hand.surrendered || hand.stood) return false;
+  if (action === 'split' && !handCanSplit(hand)) return false;
+  if (action === 'double' && (hand.doubleCount || 0) >= (match.maxDoublesPerHand || 2)) return false;
+  if (action === 'surrender' && (hand.actionCount || 0) > 0) return false;
+  return true;
+}
+
+function triggerAction(action) {
+  if (!canTriggerAction(action)) return;
+  const myState = state.currentMatch.players[state.me.id];
+  const hand = myState.hands[myState.activeHandIndex || 0];
+  if (action === 'double' || action === 'split') {
+    openActionConfirm(action, hand);
+    return;
+  }
+  emitAction(action);
+}
+
+function isTypingTarget(target) {
+  if (!target) return false;
+  const tag = String(target.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || target.isContentEditable;
 }
 
 function handCanSplit(hand) {
@@ -1139,9 +1235,7 @@ function renderTopbar(title = 'Blackjack Battle') {
 function bindShellNav() {
   app.querySelectorAll('[data-go]').forEach((btn) => {
     btn.onclick = () => {
-      goToView(btn.dataset.go);
-      if (state.view === 'friends') loadFriendsData();
-      render();
+      navigateWithMatchSafety(btn.dataset.go);
     };
   });
   const logoutBtn = document.getElementById('logoutBtn');
@@ -1905,6 +1999,8 @@ function renderMatch() {
   const displayBankroll =
     Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : (myState.bankroll ?? me.chips);
   const canAct = myTurn && !waitingPressure && activeHand && !activeHand.locked;
+  const canSurrender = Boolean(canAct && (activeHand?.actionCount || 0) === 0);
+  const emoteCoolingDown = Date.now() < state.emoteCooldownUntil;
   const canEditBet = Boolean(match.canEditBet);
   const canConfirmBet = Boolean(match.canConfirmBet);
   const myConfirmed = Boolean(match.betConfirmedByPlayer?.[me.id]);
@@ -1922,7 +2018,7 @@ function renderMatch() {
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
     <main class="view-stack match-view">
-      <div class="match match-shell card section reveal-panel">
+      <div class="match match-shell card section reveal-panel ${isBettingPhase ? 'betting-flat' : ''}">
         ${
           isBettingPhase
             ? `<section class="betting-layout">
@@ -1988,12 +2084,12 @@ function renderMatch() {
                     <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
                     <button data-action="double" title="${canAct ? 'Increase current bet and draw one card' : actionHint}" ${!canAct || (activeHand.doubleCount || 0) >= (match.maxDoublesPerHand || 2) ? 'disabled' : ''}>Double</button>
                     <button data-action="split" title="${handCanSplit(activeHand) ? 'Split pair into two hands' : 'Split requires pair'}" ${!canAct || !handCanSplit(activeHand) ? 'disabled' : ''}>Split</button>
-                    <button class="warn" data-action="surrender" title="${canAct ? 'Lose 75% and lock hand' : actionHint}" ${!canAct ? 'disabled' : ''}>Surrender</button>
+                    <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender ? 'disabled' : ''}>Surrender</button>
                   </div>
                   ${
                     isPvpMatch
                       ? `<div class="actions actions-extra">
-                           <button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
+                           <button id="toggleEmoteBtn" class="ghost" type="button" ${emoteCoolingDown ? 'disabled' : ''}>🙂 Emote</button>
                            <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave</button>
                          </div>`
                       : ''
@@ -2003,16 +2099,16 @@ function renderMatch() {
                       ? `<div class="emote-row">
                           <div class="emote-popover card">
                             <div class="emote-grid">
-                              <button data-emote-type="emoji" data-emote-value="😂">😂</button>
-                              <button data-emote-type="emoji" data-emote-value="😭">😭</button>
-                              <button data-emote-type="emoji" data-emote-value="👍">👍</button>
-                              <button data-emote-type="emoji" data-emote-value="😡">😡</button>
+                              <button data-emote-type="emoji" data-emote-value="😂" ${emoteCoolingDown ? 'disabled' : ''}>😂</button>
+                              <button data-emote-type="emoji" data-emote-value="😭" ${emoteCoolingDown ? 'disabled' : ''}>😭</button>
+                              <button data-emote-type="emoji" data-emote-value="👍" ${emoteCoolingDown ? 'disabled' : ''}>👍</button>
+                              <button data-emote-type="emoji" data-emote-value="😡" ${emoteCoolingDown ? 'disabled' : ''}>😡</button>
                             </div>
                             <div class="emote-quips">
-                              <button data-emote-type="quip" data-emote-value="Bitchmade">Bitchmade</button>
-                              <button data-emote-type="quip" data-emote-value="Fuck you">Fuck you</button>
-                              <button data-emote-type="quip" data-emote-value="Skill issue">Skill issue</button>
-                              <button data-emote-type="quip" data-emote-value="L">L</button>
+                              <button data-emote-type="quip" data-emote-value="Bitchmade" ${emoteCoolingDown ? 'disabled' : ''}>Bitchmade</button>
+                              <button data-emote-type="quip" data-emote-value="Fuck you" ${emoteCoolingDown ? 'disabled' : ''}>Fuck you</button>
+                              <button data-emote-type="quip" data-emote-value="Skill issue" ${emoteCoolingDown ? 'disabled' : ''}>Skill issue</button>
+                              <button data-emote-type="quip" data-emote-value="L" ${emoteCoolingDown ? 'disabled' : ''}>L</button>
                             </div>
                           </div>
                         </div>`
@@ -2043,6 +2139,7 @@ function renderMatch() {
                           } / Opponent ${opponentConnected ? 'online' : 'offline'}`
                     }
                   </div>
+                  <div class="muted">AFK protection enabled: inactive turns auto-stand after 20s.</div>
                   <div class="muted">${actionHint}</div>
                 </details>
               </section>`
@@ -2059,13 +2156,27 @@ function renderMatch() {
                </div>`
             : ''
         }
+        ${
+          state.confirmActionModal
+            ? `<div class="modal">
+                 <div class="card section modal-panel">
+                   <h3>${state.confirmActionModal.title}</h3>
+                   <p class="muted">${state.confirmActionModal.body}</p>
+                   <div class="row">
+                     <button id="confirmActionYes" class="primary">Confirm</button>
+                     <button id="confirmActionNo" class="ghost">Cancel</button>
+                   </div>
+                 </div>
+               </div>`
+            : ''
+        }
       </div>
     </main>
   `;
   bindShellNav();
 
   app.querySelectorAll('[data-action]').forEach((btn) => {
-    btn.onclick = () => emitAction(btn.dataset.action);
+    btn.onclick = () => triggerAction(btn.dataset.action);
   });
   const betMinus = document.getElementById('betMinus');
   if (betMinus) betMinus.onclick = () => adjustBet(-5);
@@ -2079,13 +2190,16 @@ function renderMatch() {
   const emoteToggleBtn = document.getElementById('toggleEmoteBtn');
   if (emoteToggleBtn) {
     emoteToggleBtn.onclick = () => {
+      if (Date.now() < state.emoteCooldownUntil) return;
       state.emotePickerOpen = !state.emotePickerOpen;
       render();
     };
   }
   app.querySelectorAll('[data-emote-type]').forEach((btn) => {
     btn.onclick = () => {
+      if (Date.now() < state.emoteCooldownUntil) return;
       emitEmote(btn.dataset.emoteType, btn.dataset.emoteValue);
+      state.emoteCooldownUntil = Date.now() + 5000;
       state.emotePickerOpen = false;
       render();
     };
@@ -2108,6 +2222,22 @@ function renderMatch() {
   if (cancelLeaveMatchBtn) {
     cancelLeaveMatchBtn.onclick = () => {
       state.leaveMatchModal = false;
+      render();
+    };
+  }
+  const confirmActionYes = document.getElementById('confirmActionYes');
+  if (confirmActionYes) {
+    confirmActionYes.onclick = () => {
+      const action = state.confirmActionModal?.action;
+      state.confirmActionModal = null;
+      if (action) emitAction(action);
+      render();
+    };
+  }
+  const confirmActionNo = document.getElementById('confirmActionNo');
+  if (confirmActionNo) {
+    confirmActionNo.onclick = () => {
+      state.confirmActionModal = null;
       render();
     };
   }
@@ -2195,6 +2325,49 @@ function render() {
     if (e.key === 'Escape' && state.notificationsOpen) {
       state.notificationsOpen = false;
       render();
+      return;
+    }
+    if (state.view !== 'match') return;
+    if (state.leaveMatchModal) {
+      if (e.key === 'Escape') {
+        state.leaveMatchModal = false;
+        render();
+      }
+      return;
+    }
+
+    if (state.confirmActionModal) {
+      if (e.key === 'Enter') {
+        const action = state.confirmActionModal.action;
+        state.confirmActionModal = null;
+        if (action) emitAction(action);
+        render();
+      } else if (e.key === 'Escape') {
+        state.confirmActionModal = null;
+        render();
+      }
+      return;
+    }
+
+    if (isTypingTarget(e.target)) return;
+
+    const key = String(e.key || '').toLowerCase();
+    if (key === 'h') {
+      triggerAction('hit');
+    } else if (key === 's') {
+      triggerAction('stand');
+    } else if (key === 'd') {
+      triggerAction('double');
+    } else if (key === 'p') {
+      triggerAction('split');
+    } else if (key === 'r') {
+      triggerAction('surrender');
+    } else if (key === 'e') {
+      if (Date.now() < state.emoteCooldownUntil) return;
+      if (!isBotMatchActive() && state.currentMatch?.phase === 'ACTION_TURN') {
+        state.emotePickerOpen = !state.emotePickerOpen;
+        render();
+      }
     }
   });
   window.addEventListener('popstate', () => {

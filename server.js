@@ -37,8 +37,9 @@ const ROUND_RESULT_MS = 1700;
 const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
 const PATCH_REPO = 'Elicanig/1v1Blackjack';
 const FRIEND_INVITE_TTL_MS = 30 * 60 * 1000;
-const EMOTE_COOLDOWN_MS = 2000;
+const EMOTE_COOLDOWN_MS = 5000;
 const FRIEND_CHALLENGE_TTL_MS = 10 * 60 * 1000;
+const TURN_TIMEOUT_MS = 20_000;
 const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 
 const configuredDataDir = process.env.DATA_DIR || process.env.RENDER_DISK_PATH || '/var/data';
@@ -183,6 +184,7 @@ const disconnectTimers = new Map();
 const botTurnTimers = new Map();
 const botBetConfirmTimers = new Map();
 const roundPhaseTimers = new Map();
+const afkTurnTimers = new Map();
 const emoteCooldownByUser = new Map();
 let patchNotesCache = { at: 0, payload: null };
 
@@ -745,6 +747,7 @@ function newHand(cards, hidden, bet = BASE_BET, splitDepth = 0) {
     stood: false,
     locked: false,
     surrendered: false,
+    actionCount: 0,
     bust: false,
     doubled: false,
     doubleCount: 0,
@@ -813,6 +816,7 @@ function buildClientState(match, viewerId) {
           stood: hand.stood,
           locked: hand.locked,
           surrendered: hand.surrendered,
+          actionCount: hand.actionCount || 0,
           bust: hand.bust,
           doubled: hand.doubled,
           doubleCount: hand.doubleCount || 0,
@@ -874,11 +878,47 @@ function serializeMatchFor(match, viewerId) {
 }
 
 function pushMatchState(match) {
+  syncAfkTurnTimer(match);
   for (const pid of match.playerIds) {
     const socketId = activeSessions.get(pid);
     if (!socketId) continue;
     io.to(socketId).emit('match:state', buildClientState(match, pid));
   }
+}
+
+function clearAfkTurnTimer(matchId) {
+  const timer = afkTurnTimers.get(matchId);
+  if (timer) {
+    clearTimeout(timer);
+    afkTurnTimers.delete(matchId);
+  }
+}
+
+function syncAfkTurnTimer(match) {
+  clearAfkTurnTimer(match.id);
+  if (!match || match.phase !== PHASES.ACTION_TURN || match.round?.pendingPressure) return;
+  const turnPlayerId = match.round.turnPlayerId;
+  if (!turnPlayerId) return;
+  const turnState = match.round.players?.[turnPlayerId];
+  const activeIndex = turnState?.activeHandIndex ?? 0;
+  const activeHand = turnState?.hands?.[activeIndex];
+  if (!activeHand || activeHand.locked || activeHand.bust || activeHand.surrendered || activeHand.stood) return;
+
+  const timer = setTimeout(() => {
+    if (!matches.has(match.id)) return;
+    if (match.phase !== PHASES.ACTION_TURN || match.round?.pendingPressure) return;
+    if (match.round.turnPlayerId !== turnPlayerId) return;
+    const latestState = match.round.players?.[turnPlayerId];
+    const latestHand = latestState?.hands?.[latestState.activeHandIndex];
+    if (!latestHand || latestHand.locked || latestHand.bust || latestHand.surrendered || latestHand.stood) return;
+    const result = applyAction(match, turnPlayerId, 'stand');
+    if (result?.error) return;
+    pushMatchState(match);
+    db.write();
+    scheduleBotTurn(match);
+  }, TURN_TIMEOUT_MS);
+
+  afkTurnTimers.set(match.id, timer);
 }
 
 function challengeExpiresAt(tier, from = new Date()) {
@@ -1409,7 +1449,8 @@ function visibleTotal(cards, hiddenFlags) {
 
 function legalActionsForHand(hand) {
   if (!hand || hand.locked || hand.stood || hand.bust || hand.surrendered) return [];
-  const actions = ['hit', 'stand', 'surrender'];
+  const actions = ['hit', 'stand'];
+  if ((hand.actionCount || 0) === 0) actions.push('surrender');
   if ((hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
   if (canSplit(hand)) actions.push('split');
   return actions;
@@ -1586,6 +1627,7 @@ function applyAction(match, playerId, action) {
 
   if (action === 'hit') {
     match.round.firstActionTaken = true;
+    hand.actionCount = (hand.actionCount || 0) + 1;
     hand.cards.push(drawCard(match.round));
     hand.hidden.push(false);
     const total = handTotal(hand.cards);
@@ -1609,6 +1651,7 @@ function applyAction(match, playerId, action) {
 
   if (action === 'stand') {
     match.round.firstActionTaken = true;
+    hand.actionCount = (hand.actionCount || 0) + 1;
     const total = handTotal(hand.cards);
     if (!isBotPlayer(playerId) && total >= 16) {
       const user = getUserById(playerId);
@@ -1621,7 +1664,9 @@ function applyAction(match, playerId, action) {
   }
 
   if (action === 'surrender') {
+    if ((hand.actionCount || 0) > 0) return { error: 'Surrender is only available before you act on this hand' };
     match.round.firstActionTaken = true;
+    hand.actionCount = (hand.actionCount || 0) + 1;
     hand.surrendered = true;
     hand.locked = true;
     progressTurn(match, playerId);
@@ -1631,6 +1676,7 @@ function applyAction(match, playerId, action) {
   if (action === 'double') {
     if (hand.locked || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
     match.round.firstActionTaken = true;
+    hand.actionCount = (hand.actionCount || 0) + 1;
     const delta = hand.bet;
     if (!canAffordIncrement(match, playerId, delta)) return { error: 'Insufficient chips to double' };
     hand.bet *= 2;
@@ -1669,6 +1715,7 @@ function applyAction(match, playerId, action) {
     if (!canSplit(hand)) return { error: 'Split unavailable' };
     if (!canAffordIncrement(match, playerId, hand.bet)) return { error: 'Insufficient chips to split' };
     match.round.firstActionTaken = true;
+    hand.actionCount = (hand.actionCount || 0) + 1;
     const [c1, c2] = hand.cards;
     const nextDepth = hand.splitDepth + 1;
     const newOne = newHand([c1, drawCard(match.round)], [false, true], hand.bet, nextDepth);
@@ -1723,10 +1770,12 @@ function applyPressureDecision(match, playerId, decision) {
     for (const idx of targetIndices) {
       const hand = opponentState.hands[idx] || opponentState.hands[0];
       hand.bet += pressure.delta;
+      hand.actionCount = (hand.actionCount || 0) + 1;
     }
   } else if (decision === 'surrender') {
     for (const idx of targetIndices) {
       const hand = opponentState.hands[idx] || opponentState.hands[0];
+      hand.actionCount = (hand.actionCount || 0) + 1;
       hand.surrendered = true;
       hand.locked = true;
     }
@@ -1855,6 +1904,7 @@ function emitLobbyUpdate(lobby) {
 
 function cleanupMatch(match) {
   clearRoundPhaseTimer(match.id);
+  clearAfkTurnTimer(match.id);
   const timer = botTurnTimers.get(match.id);
   if (timer) {
     clearTimeout(timer);
