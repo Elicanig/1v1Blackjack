@@ -902,6 +902,7 @@ select:focus-visible {
 
 .play-layout {
   grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr) auto auto;
+  row-gap: 14px;
 }
 
 .betting-layout {
@@ -1053,7 +1054,24 @@ select:focus-visible {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 4px;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.hand-head-left {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hand-meta {
+  min-width: 0;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .hand-chip {
@@ -1068,7 +1086,8 @@ select:focus-visible {
 }
 
 .hand-status {
-  min-height: 18px;
+  min-height: 16px;
+  font-size: 0.76rem;
 }
 
 .cards {
@@ -1212,18 +1231,35 @@ select:focus-visible {
   color: var(--muted);
 }
 
-.actions-compact {
+.actions-main {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+  max-width: 980px;
+  margin: 0 auto;
+  align-items: stretch;
 }
 
-.actions-compact button {
-  min-height: 36px;
-  padding: 7px 10px;
-  font-size: 0.84rem;
+.actions-main button {
+  min-height: 40px;
+  padding: 8px 14px;
+  font-size: 0.9rem;
   min-width: 0;
   white-space: nowrap;
+  border-radius: 12px;
+}
+
+.actions-extra {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.actions-extra button {
+  min-height: 36px;
+  padding: 7px 12px;
 }
 
 .pressure-chip {
@@ -1553,12 +1589,14 @@ select:focus-visible {
     min-height: 88px;
   }
 
-  .actions-compact {
+  .actions-main {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
   }
 
-  .actions-compact button {
-    font-size: 0.8rem;
+  .actions-main button {
+    font-size: 0.84rem;
+    min-height: 36px;
   }
 
   .bet-confirm-row {
@@ -1593,14 +1631,14 @@ select:focus-visible {
     padding: 8px;
   }
 
-  .actions-compact button {
-    min-height: 32px;
-    padding: 6px 8px;
-    font-size: 0.8rem;
+  .actions-main button {
+    min-height: 34px;
+    padding: 6px 10px;
+    font-size: 0.82rem;
   }
 
   .play-layout {
-    gap: 6px;
+    row-gap: 8px;
   }
 
   .match-zone {

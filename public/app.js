@@ -1820,15 +1820,20 @@ function renderHand(hand, index, active, pressureTagged = false) {
   if (hand.isSoft) labels.push('Soft');
   if (hand.outcome) labels.push(hand.outcome.toUpperCase());
   if (active && !hand.locked) labels.unshift('Active');
+  const isActive = active && !hand.locked;
+  const metaLine = `${formatHandTotalLine(hand)}${isActive ? ' · Active' : ''}`;
+  const statusLine = labels.filter((label) => label !== 'Active').join(' • ') || 'In play';
 
   return `
     <div class="hand ${active ? 'active' : ''}">
       <div class="hand-head">
-        <strong>Hand ${index + 1} ${pressureTagged ? '<span class="pressure-dot" title="Pressure decision applies">*</span>' : ''}</strong>
+        <div class="hand-head-left">
+          <strong>Hand ${index + 1} ${pressureTagged ? '<span class="pressure-dot" title="Pressure decision applies">*</span>' : ''}</strong>
+          <span class="muted hand-meta">${metaLine}</span>
+        </div>
         <span class="hand-chip">Bet: ${hand.bet}</span>
       </div>
-      <div class="muted">${formatHandTotalLine(hand)}</div>
-      <div class="muted hand-status">${labels.join(' • ') || 'In play'}</div>
+      <div class="muted hand-status">${statusLine}</div>
       <div class="cards card-count-${Math.min(hand.cards.length, 7)}">
         ${hand.cards.map((card, cardIndex) => renderPlayingCard(card, cardIndex)).join('')}
       </div>
@@ -1972,19 +1977,21 @@ function renderMatch() {
                 </div>
 
                 <div class="actions-panel" ${roundResolved ? 'style="display:none"' : ''}>
-                  <div class="actions actions-compact">
+                  <div class="actions actions-main">
                     <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
                     <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
                     <button data-action="double" title="${canAct ? 'Double bet, take one card, lock hand' : actionHint}" ${!canAct || activeHand.doubled ? 'disabled' : ''}>Double</button>
                     <button data-action="split" title="${handCanSplit(activeHand) ? 'Split pair into two hands' : 'Split requires pair'}" ${!canAct || !handCanSplit(activeHand) ? 'disabled' : ''}>Split</button>
                     <button class="warn" data-action="surrender" title="${canAct ? 'Lose 75% and lock hand' : actionHint}" ${!canAct ? 'disabled' : ''}>Surrender</button>
-                    ${
-                      isPvpMatch
-                        ? `<button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
-                           <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave</button>`
-                        : ''
-                    }
                   </div>
+                  ${
+                    isPvpMatch
+                      ? `<div class="actions actions-extra">
+                           <button id="toggleEmoteBtn" class="ghost" type="button">🙂 Emote</button>
+                           <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave</button>
+                         </div>`
+                      : ''
+                  }
                   ${
                     isPvpMatch && state.emotePickerOpen
                       ? `<div class="emote-row">
