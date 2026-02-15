@@ -1,4 +1,5 @@
 import { formatHandTotalLine } from './match-view-model.js';
+import { renderSuitIconSvg } from './suit-icons.js';
 const app = document.getElementById('app');
 let spotlightInitialized = false;
 let hoverGlowInitialized = false;
@@ -191,7 +192,7 @@ const state = {
   pendingNavAfterLeave: null,
   turnTimerFreezeKey: '',
   turnTimerFreezeRemainingMs: null,
-  roundResultChoicePending: false
+  dismissedRoundResultKey: ''
 };
 
 let freeClaimTicker = null;
@@ -544,12 +545,9 @@ function connectSocket() {
     const previousRound = state.currentMatch?.roundNumber || 0;
     state.currentMatch = match;
     state.leaveMatchModal = false;
-    if (match.phase !== 'RESULT') {
-      state.roundResultChoicePending = false;
-    }
     if (match.roundNumber > previousRound && match.phase !== 'RESULT') {
       state.roundResultBanner = null;
-      state.roundResultChoicePending = false;
+      state.dismissedRoundResultKey = '';
     }
     const myBankroll = match.players?.[state.me?.id]?.bankroll;
     if (state.me && Number.isFinite(myBankroll)) {
@@ -575,7 +573,7 @@ function connectSocket() {
     const key = `${matchId}:${roundNumber}`;
     if (state.lastRoundResultKey === key) return;
     state.lastRoundResultKey = key;
-    state.roundResultChoicePending = false;
+    state.dismissedRoundResultKey = '';
     state.roundResultBanner = {
       matchId,
       roundNumber,
@@ -837,15 +835,6 @@ function emitSetBaseBet(amount) {
 function emitConfirmBet() {
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:confirmBet', { matchId: state.currentMatch.id });
-}
-
-function emitRoundResultChoice(choice) {
-  if (!state.currentMatch || !state.socket) return;
-  if (choice === 'next') {
-    state.socket.emit('match:nextRound', { matchId: state.currentMatch.id });
-    return;
-  }
-  state.socket.emit('match:backToBetting', { matchId: state.currentMatch.id });
 }
 
 function emitLeaveMatch() {
@@ -1338,13 +1327,16 @@ function syncRoundResultModal() {
     mount.innerHTML = '';
     return;
   }
+  const resultKey = `${result.matchId || match?.id || 'match'}:${result.roundNumber || match?.roundNumber || 0}`;
+  if (state.dismissedRoundResultKey === resultKey) {
+    mount.innerHTML = '';
+    return;
+  }
   const delta = result.deltaChips || 0;
   const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
   const bankroll = Number.isFinite(state.bankrollDisplay) ? Math.round(state.bankrollDisplay) : state.me?.chips || 0;
   const headline = result.outcome === 'win' ? 'WIN' : result.outcome === 'lose' ? 'LOSE' : 'PUSH';
   const subtitle = result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push');
-  const myChoice = state.me?.id ? match?.resultChoiceByPlayer?.[state.me.id] : null;
-  const waitingOnOpponent = Boolean(match?.phase === 'RESULT' && myChoice);
   mount.innerHTML = `
     <div class="round-result-wrap">
       <div class="round-result-popup result-modal card">
@@ -1353,26 +1345,27 @@ function syncRoundResultModal() {
         <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${Math.abs(delta)}</div>
         <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
         <div class="result-actions">
-          <button id="roundResultNextBtn" class="primary" ${state.roundResultChoicePending ? 'disabled' : ''}>Next</button>
-          <button id="roundResultBettingBtn" class="ghost" ${state.roundResultChoicePending ? 'disabled' : ''}>Back to Betting</button>
+          <button id="roundResultNextBtn" class="primary">Next Round</button>
+          <button id="roundResultLobbyBtn" class="ghost">Back to Lobby</button>
         </div>
-        ${waitingOnOpponent ? '<div class="muted" style="margin-top:8px">Waiting for opponent choice…</div>' : ''}
       </div>
     </div>
   `;
   const nextBtn = document.getElementById('roundResultNextBtn');
   if (nextBtn) {
     nextBtn.onclick = () => {
-      state.roundResultChoicePending = true;
-      emitRoundResultChoice('next');
+      state.dismissedRoundResultKey = resultKey;
+      state.roundResultBanner = null;
       render();
     };
   }
-  const bettingBtn = document.getElementById('roundResultBettingBtn');
-  if (bettingBtn) {
-    bettingBtn.onclick = () => {
-      state.roundResultChoicePending = true;
-      emitRoundResultChoice('betting');
+  const lobbyBtn = document.getElementById('roundResultLobbyBtn');
+  if (lobbyBtn) {
+    lobbyBtn.onclick = () => {
+      state.dismissedRoundResultKey = resultKey;
+      state.roundResultBanner = null;
+      state.pendingNavAfterLeave = 'lobbies';
+      emitLeaveMatch();
       render();
     };
   }
@@ -2110,8 +2103,10 @@ function renderHand(hand, index, active, pressureTagged = false) {
         <span class="hand-chip">Bet: ${hand.bet}</span>
       </div>
       <div class="muted hand-status">${statusLine}</div>
-      <div class="cards cardsRow card-count-${Math.min(renderedCards.length, 7)}">
-        ${renderedCards.map((card, cardIndex) => renderPlayingCard(card, cardIndex)).join('')}
+      <div class="card-viewport">
+        <div class="cards cardsRow card-count-${Math.min(renderedCards.length, 7)}">
+          ${renderedCards.map((card, cardIndex) => renderPlayingCard(card, cardIndex)).join('')}
+        </div>
       </div>
     </div>
   `;
@@ -2126,9 +2121,11 @@ function renderHandPlaceholder(label = 'Waiting for cards') {
           <span class="muted hand-meta">Cards not dealt yet</span>
         </div>
       </div>
-      <div class="cards cardsRow card-count-2">
-        ${renderPlayingCard({ hidden: true }, 0)}
-        ${renderPlayingCard({ hidden: true }, 1)}
+      <div class="card-viewport">
+        <div class="cards cardsRow card-count-2">
+          ${renderPlayingCard({ hidden: true }, 0)}
+          ${renderPlayingCard({ hidden: true }, 1)}
+        </div>
       </div>
     </div>
   `;
@@ -2149,17 +2146,7 @@ function suitLabel(suit) {
 }
 
 function renderSuitIcon(suit, className = '') {
-  const iconClass = className ? `suit-icon ${className}` : 'suit-icon';
-  if (suit === 'H') {
-    return `<svg class="${iconClass}" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7-4.35-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 11c0 5.65-7 10-7 10z"/></svg>`;
-  }
-  if (suit === 'D') {
-    return `<svg class="${iconClass}" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l6 10-6 10-6-10z"/></svg>`;
-  }
-  if (suit === 'C') {
-    return `<svg class="${iconClass}" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7.4" r="3.2"></circle><circle cx="8.1" cy="12" r="3.2"></circle><circle cx="15.9" cy="12" r="3.2"></circle><path d="M11 14.5h2V20h2v2H9v-2h2z"></path></svg>`;
-  }
-  return `<svg class="${iconClass}" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C9 5 5 8.2 5 12a4.6 4.6 0 0 0 8 3v5h2v-5a4.6 4.6 0 0 0 8-3c0-3.8-4-7-7-10z"></path></svg>`;
+  return renderSuitIconSvg(suit, className);
 }
 
 function renderPlayingCard(card, cardIndex = 0) {
