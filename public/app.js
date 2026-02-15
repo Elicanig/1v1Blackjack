@@ -2011,37 +2011,54 @@ function renderHome() {
     <main class="view-stack dashboard">
       <p class="muted view-subtitle">${me.username}</p>
       <div class="dashboard-grid">
-        <section class="col card section reveal-panel glow-follow glow-follow--panel">
-        <h2>Play</h2>
-        <p class="muted">Open Lobbies for private matches, or use Quick Play for instant PvP matchmaking.</p>
-        <div class="row">
-          <button class="primary" id="openLobbiesBtn">Lobbies</button>
-          <button class="ghost" id="quickPlayBtn" ${quickPlaySearching || quickPlayConnected ? 'disabled' : ''}>${quickPlayLabel}</button>
-        </div>
-        <div class="grid" style="margin-top:0.7rem">
-          <div class="muted">Play Against Bot</div>
-          <div class="bot-difficulty-grid" id="botDifficultyGrid" role="radiogroup" aria-label="Bot difficulty">
-            <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'easy'}" data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">
-              <span class="bot-diff-label">Easy</span>
-              <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.easy.min}-${BOT_BET_RANGES.easy.max}</span>
+        <section class="col card section reveal-panel glow-follow glow-follow--panel play-panel">
+          <h2>Play</h2>
+          <p class="muted play-intro">Jump into PvP instantly, or host a private table with friends.</p>
+          <div class="pvp-hero-grid" role="group" aria-label="PvP actions">
+            <button
+              class="pvp-cta pvp-cta-primary"
+              id="quickPlayBtn"
+              ${quickPlaySearching || quickPlayConnected ? 'disabled' : ''}
+              ${!quickPlaySearching && !quickPlayConnected ? 'autofocus' : ''}
+            >
+              <span class="pvp-cta-label">${quickPlayLabel}</span>
+              <span class="pvp-cta-sub">${quickPlaySearching || quickPlayConnected ? 'Matchmaking in progress...' : 'Instant matchmaking vs real players'}</span>
             </button>
-            <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'medium'}" data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">
-              <span class="bot-diff-label">Medium</span>
-              <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.medium.min}-${BOT_BET_RANGES.medium.max}</span>
-            </button>
-            <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'normal'}" data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">
-              <span class="bot-diff-label">Normal</span>
-              <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.normal.min}-${BOT_BET_RANGES.normal.max}</span>
+            <button class="pvp-cta pvp-cta-secondary" id="openLobbiesBtn">
+              <span class="pvp-cta-label">Lobbies</span>
+              <span class="pvp-cta-sub">Create or join private matches</span>
             </button>
           </div>
-          <div class="bot-segmented bot-slider stake-slider" id="botStakeSlider" data-stake-slider>
-            <div class="bot-slider-indicator" style="transform:translateX(${state.botStakeType === 'REAL' ? 0 : 100}%);"></div>
-            <button type="button" data-stake="REAL" class="${state.botStakeType === 'REAL' ? 'is-selected' : ''}">Real Chips</button>
-            <button type="button" data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
-          </div>
-          <div class="muted">Practice uses fake chips and won&apos;t affect your account.</div>
-          <button class="gold" id="playBotBtn">Play Bot</button>
-        </div>
+
+          <section class="practice-panel" aria-label="Practice vs bot">
+            <div class="practice-head">
+              <h3>Practice vs Bot</h3>
+              <p class="muted">Train with difficulty presets and controlled bet ranges.</p>
+            </div>
+            <div class="practice-controls">
+              <div class="bot-difficulty-grid" id="botDifficultyGrid" role="radiogroup" aria-label="Bot difficulty">
+                <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'easy'}" data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">
+                  <span class="bot-diff-label">Easy</span>
+                  <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.easy.min}-${BOT_BET_RANGES.easy.max}</span>
+                </button>
+                <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'medium'}" data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">
+                  <span class="bot-diff-label">Medium</span>
+                  <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.medium.min}-${BOT_BET_RANGES.medium.max}</span>
+                </button>
+                <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'normal'}" data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">
+                  <span class="bot-diff-label">Normal</span>
+                  <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.normal.min}-${BOT_BET_RANGES.normal.max}</span>
+                </button>
+              </div>
+              <div class="bot-segmented bot-slider stake-slider" id="botStakeSlider" data-stake-slider>
+                <div class="bot-slider-indicator" style="transform:translateX(${state.botStakeType === 'REAL' ? 0 : 100}%);"></div>
+                <button type="button" data-stake="REAL" class="${state.botStakeType === 'REAL' ? 'is-selected' : ''}">Real Chips</button>
+                <button type="button" data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
+              </div>
+              <div class="muted practice-note">Practice uses fake chips and won&apos;t affect your account.</div>
+              <button class="ghost bot-play-btn" id="playBotBtn">Play Bot</button>
+            </div>
+          </section>
         </section>
         <section class="col card section reveal-panel glow-follow glow-follow--panel">
         <h2>Stats</h2>
@@ -2137,9 +2154,13 @@ function renderHome() {
     goToView('lobbies');
     render();
   };
-  document.getElementById('quickPlayBtn').onclick = () => {
+  const quickPlayBtn = document.getElementById('quickPlayBtn');
+  quickPlayBtn.onclick = () => {
     joinQuickPlayQueue();
   };
+  if (!quickPlaySearching && !quickPlayConnected && document.activeElement === document.body) {
+    quickPlayBtn.focus({ preventScroll: true });
+  }
   const botGrid = document.getElementById('botDifficultyGrid');
   if (botGrid) {
     const selectBot = (difficulty) => {

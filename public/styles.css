@@ -668,6 +668,156 @@ select:focus-visible {
   gap: var(--space-2);
 }
 
+.play-panel {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.play-intro {
+  margin: -2px 0 0;
+}
+
+.pvp-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.pvp-cta {
+  min-height: 112px;
+  border-radius: 16px;
+  padding: 14px 14px 12px;
+  display: grid;
+  align-content: space-between;
+  justify-items: start;
+  text-align: left;
+  gap: 6px;
+  position: relative;
+  overflow: hidden;
+}
+
+.pvp-cta-label {
+  font-size: clamp(1.06rem, 1.9vw, 1.26rem);
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.pvp-cta-sub {
+  font-size: 0.82rem;
+  line-height: 1.3;
+  opacity: 0.9;
+}
+
+.pvp-cta-primary {
+  min-height: 124px;
+  color: #1a140a;
+  border-color: rgba(0, 0, 0, 0.15);
+  background:
+    radial-gradient(160px 100px at 82% 10%, rgba(255, 245, 219, 0.54), transparent 64%),
+    linear-gradient(180deg, var(--gold2), var(--gold));
+  box-shadow: 0 14px 28px rgba(2, 7, 5, 0.3), 0 0 0 1px rgba(255, 227, 161, 0.18) inset;
+}
+
+.pvp-cta-primary::before {
+  content: '';
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(circle at 70% 10%, rgba(255, 245, 221, 0.7), rgba(255, 245, 221, 0) 62%);
+  transition: opacity 220ms ease;
+}
+
+.pvp-cta-primary:hover,
+.pvp-cta-primary:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 30px rgba(2, 7, 5, 0.34), 0 0 0 1px rgba(255, 235, 181, 0.36) inset, 0 0 22px rgba(224, 189, 123, 0.24);
+}
+
+.pvp-cta-primary:hover::before,
+.pvp-cta-primary:focus-visible::before {
+  opacity: 1;
+  animation: pvpHeroGlow 1.8s ease-in-out infinite;
+}
+
+.pvp-cta-primary:disabled {
+  opacity: 0.74;
+}
+
+.pvp-cta-secondary {
+  border-color: rgba(236, 241, 233, 0.16);
+  background: linear-gradient(180deg, rgba(15, 30, 25, 0.88), rgba(10, 21, 18, 0.8));
+  color: #f2f3ed;
+}
+
+.pvp-cta-secondary:hover,
+.pvp-cta-secondary:focus-visible {
+  border-color: rgba(205, 167, 100, 0.38);
+  box-shadow: 0 10px 20px rgba(2, 9, 7, 0.25), 0 0 0 1px rgba(205, 167, 100, 0.16) inset;
+}
+
+@keyframes pvpHeroGlow {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translate3d(1.5%, 0.5%, 0) scale(1.02);
+    opacity: 0.78;
+  }
+}
+
+.practice-panel {
+  border: 1px solid rgba(236, 241, 233, 0.1);
+  border-radius: 14px;
+  padding: 10px;
+  background: rgba(11, 22, 18, 0.62);
+  display: grid;
+  gap: 8px;
+}
+
+.practice-head h3 {
+  margin: 0;
+  font-size: 0.96rem;
+}
+
+.practice-head p {
+  margin: 2px 0 0;
+  font-size: 0.75rem;
+}
+
+.practice-controls {
+  display: grid;
+  gap: 7px;
+}
+
+.practice-panel .bot-diff-btn {
+  min-height: 54px;
+  padding: 7px 9px;
+  background: rgba(11, 22, 18, 0.74);
+}
+
+.practice-panel .bot-diff-btn.is-selected {
+  border-color: rgba(205, 167, 100, 0.5);
+  background: linear-gradient(180deg, rgba(205, 167, 100, 0.18), rgba(129, 96, 42, 0.2));
+  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.14) inset;
+}
+
+.practice-panel .stake-slider {
+  width: min(300px, 100%);
+}
+
+.practice-note {
+  font-size: 0.74rem;
+}
+
+.bot-play-btn {
+  width: fit-content;
+  min-height: 34px;
+  padding: 7px 14px;
+}
+
 .bot-segmented {
   position: relative;
   display: flex;
@@ -2194,6 +2344,22 @@ select:focus-visible {
 
   .dashboard-grid {
     grid-template-columns: 1fr;
+  }
+
+  .pvp-hero-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pvp-cta {
+    min-height: 98px;
+  }
+
+  .pvp-cta-primary {
+    min-height: 106px;
+  }
+
+  .bot-play-btn {
+    width: 100%;
   }
 
   .row {
