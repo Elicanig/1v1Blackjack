@@ -1904,6 +1904,84 @@ select:focus-visible {
   }
 }
 
+.quickplay-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1260;
+  pointer-events: auto;
+  background: rgba(2, 10, 8, 0.54);
+  backdrop-filter: blur(3px);
+}
+
+.quickplay-overlay-panel {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(460px, calc(100vw - 24px));
+  z-index: 1261;
+  pointer-events: auto;
+  padding: 18px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(205, 167, 100, 0.3);
+  background: linear-gradient(180deg, rgba(11, 22, 18, 0.95), rgba(8, 18, 15, 0.94));
+  box-shadow: var(--shadow-lg);
+  animation: overlayIn 160ms ease-out;
+}
+
+.quickplay-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.quickplay-status-pill.is-searching {
+  color: #f2dfb7;
+  border: 1px solid rgba(205, 167, 100, 0.36);
+  background: rgba(205, 167, 100, 0.12);
+}
+
+.quickplay-status-pill.is-connected {
+  color: #d8fff1;
+  border: 1px solid rgba(111, 204, 172, 0.54);
+  background: rgba(66, 168, 135, 0.16);
+}
+
+.quickplay-loader-row {
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.quickplay-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid rgba(205, 167, 100, 0.22);
+  border-top-color: rgba(205, 167, 100, 0.86);
+  display: inline-block;
+  animation: quickPlaySpin 900ms linear infinite;
+}
+
+.quickplay-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+@keyframes quickPlaySpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .modal {
   position: fixed;
   inset: 0;
@@ -2274,6 +2352,7 @@ select:focus-visible {
   .card-reveal,
   .card-shift,
   .attention-pulse,
+  .quickplay-spinner,
   .match-shell::before,
   .match-shell::after,
   .turn-timer.is-urgent .turn-timer-seconds,

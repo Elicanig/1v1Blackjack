@@ -57,6 +57,9 @@ const EMOTE_COOLDOWN_MS = 5000;
 const FRIEND_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const TURN_TIMEOUT_MS = 30_000;
 const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
+const HOURLY_RESET_MS = 60 * 60 * 1000;
+const DAILY_RESET_MS = 24 * 60 * 60 * 1000;
+const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000;
 
 const DATA_DIR = process.env.DATA_DIR || './data';
 const EMPTY_DB = {
@@ -209,6 +212,8 @@ const botBetConfirmTimers = new Map();
 const roundPhaseTimers = new Map();
 const afkTurnTimers = new Map();
 const emoteCooldownByUser = new Map();
+const quickPlayQueue = [];
+const quickPlayQueuedUsers = new Set();
 let patchNotesCache = { at: 0, payload: null };
 
 const LOCAL_PATCH_NOTES = [
@@ -643,6 +648,93 @@ function isUserInActiveMatch(userId) {
   return false;
 }
 
+function quickPlayQueuePosition(userId) {
+  const index = quickPlayQueue.findIndex((entry) => entry.userId === userId);
+  return index === -1 ? null : index + 1;
+}
+
+function removeFromQuickPlayQueue(userId) {
+  if (!quickPlayQueuedUsers.has(userId)) return false;
+  quickPlayQueuedUsers.delete(userId);
+  const idx = quickPlayQueue.findIndex((entry) => entry.userId === userId);
+  if (idx !== -1) quickPlayQueue.splice(idx, 1);
+  return idx !== -1;
+}
+
+function popNextQuickPlayEntry(excludeUserId = null) {
+  while (quickPlayQueue.length > 0) {
+    const entry = quickPlayQueue.shift();
+    quickPlayQueuedUsers.delete(entry.userId);
+    if (excludeUserId && entry.userId === excludeUserId) continue;
+    if (!getUserById(entry.userId)) continue;
+    if (isUserInActiveMatch(entry.userId)) continue;
+    return entry;
+  }
+  return null;
+}
+
+function buildQuickPlayFoundPayload(match, userId) {
+  const opponentId = match.playerIds.find((id) => id !== userId);
+  const opponent = getUserById(opponentId);
+  return {
+    status: 'found',
+    matchId: match.id,
+    opponentId,
+    opponentName: opponent?.username || 'Opponent',
+    connectedAt: nowIso(),
+    match: serializeMatchFor(match, userId)
+  };
+}
+
+async function processQuickPlayQueue() {
+  const matched = [];
+  let touched = false;
+  while (quickPlayQueue.length >= 2) {
+    const first = popNextQuickPlayEntry();
+    if (!first) break;
+    const second = popNextQuickPlayEntry(first.userId);
+    if (!second) {
+      if (!quickPlayQueuedUsers.has(first.userId) && !isUserInActiveMatch(first.userId)) {
+        quickPlayQueue.push(first);
+        quickPlayQueuedUsers.add(first.userId);
+      }
+      break;
+    }
+    const userA = getUserById(first.userId);
+    const userB = getUserById(second.userId);
+    if (!userA || !userB || userA.id === userB.id) continue;
+
+    const lobby = {
+      id: normalizeLobbyCode(nanoid(8)),
+      ownerId: userA.id,
+      opponentId: userB.id,
+      status: 'full',
+      type: 'quickplay',
+      stakeType: 'REAL',
+      createdAt: nowIso()
+    };
+    db.data.lobbies.push(lobby);
+    const match = createMatch(lobby);
+    pushMatchState(match);
+    touched = true;
+
+    matched.push({
+      userId: userA.id,
+      payload: buildQuickPlayFoundPayload(match, userA.id)
+    });
+    matched.push({
+      userId: userB.id,
+      payload: buildQuickPlayFoundPayload(match, userB.id)
+    });
+  }
+
+  if (touched) await db.write();
+  for (const result of matched) {
+    emitToUser(result.userId, 'matchmaking:found', result.payload);
+  }
+  return matched;
+}
+
 function buildFriendsPayload(user) {
   const incoming = db.data.friendRequests
     .filter((r) => r.toUserId === user.id && r.status === 'pending')
@@ -1041,22 +1133,15 @@ function syncAfkTurnTimer(match) {
 }
 
 function challengeExpiresAt(tier, from = new Date()) {
-  const ts = new Date(from);
+  const startMs = new Date(from).getTime();
+  if (!Number.isFinite(startMs)) return new Date(Date.now() + DAILY_RESET_MS).toISOString();
   if (tier === 'hourly') {
-    ts.setUTCMinutes(0, 0, 0);
-    ts.setUTCHours(ts.getUTCHours() + 1);
-    return ts.toISOString();
+    return new Date(startMs + HOURLY_RESET_MS).toISOString();
   }
   if (tier === 'daily') {
-    ts.setUTCDate(ts.getUTCDate() + 1);
-    ts.setUTCHours(0, 0, 0, 0);
-    return ts.toISOString();
+    return new Date(startMs + DAILY_RESET_MS).toISOString();
   }
-  const day = ts.getUTCDay();
-  const daysUntilMonday = ((8 - day) % 7) || 7;
-  ts.setUTCDate(ts.getUTCDate() + daysUntilMonday);
-  ts.setUTCHours(0, 0, 0, 0);
-  return ts.toISOString();
+  return new Date(startMs + WEEKLY_RESET_MS).toISOString();
 }
 
 function pickChallengeItems(tier, count) {
@@ -1287,9 +1372,14 @@ function buildChallengePayload(user) {
     })),
     skill: (user.skillChallenges || []).map((item) => ({ ...item }))
   };
+  const challengeList = [...challenges.hourly, ...challenges.daily, ...challenges.weekly];
   return {
     challenges,
+    challengeList,
     challengeResets: resets,
+    hourlyResetAt: resets.hourly,
+    dailyResetAt: resets.daily,
+    weeklyResetAt: resets.weekly,
     nextDailyResetAt: resets.daily,
     nextWeeklyResetAt: resets.weekly
   };
@@ -2175,6 +2265,9 @@ function confirmBaseBet(match, playerId) {
 
 function createMatch(lobby, options = {}) {
   const playerIds = [lobby.ownerId, lobby.opponentId];
+  for (const pid of playerIds) {
+    removeFromQuickPlayQueue(pid);
+  }
   const stakeType = resolveStakeType(lobby.stakeType);
   const mode = resolveMatchMode(stakeType);
   const isPractice = mode === 'practice';
@@ -2436,7 +2529,11 @@ app.get('/api/me', authMiddleware, async (req, res) => {
     streakCount: freeClaim.streakCount,
     nextStreakReward: freeClaim.nextReward,
     challenges: challengeData.challenges,
+    challengeList: challengeData.challengeList,
     challengeResets: challengeData.challengeResets,
+    hourlyResetAt: challengeData.hourlyResetAt,
+    dailyResetAt: challengeData.dailyResetAt,
+    weeklyResetAt: challengeData.weeklyResetAt,
     nextDailyResetAt: challengeData.nextDailyResetAt,
     nextWeeklyResetAt: challengeData.nextWeeklyResetAt
   });
@@ -2824,6 +2921,37 @@ async function createBotPracticeLobby(req, res) {
 app.post('/api/lobbies/bot', authMiddleware, createBotPracticeLobby);
 app.post('/api/matches/bot', authMiddleware, createBotPracticeLobby);
 
+app.post('/api/matchmaking/join', authMiddleware, async (req, res) => {
+  if (isUserInActiveMatch(req.user.id)) {
+    return res.status(409).json({ error: 'Already in an active match' });
+  }
+  if (!quickPlayQueuedUsers.has(req.user.id)) {
+    quickPlayQueue.push({ userId: req.user.id, queuedAt: nowIso() });
+    quickPlayQueuedUsers.add(req.user.id);
+  }
+  const matched = await processQuickPlayQueue();
+  const found = matched.find((entry) => entry.userId === req.user.id);
+  if (found) return res.json(found.payload);
+  const queued = quickPlayQueue.find((entry) => entry.userId === req.user.id) || null;
+  return res.json({
+    status: 'searching',
+    queuePosition: quickPlayQueuePosition(req.user.id),
+    queuedAt: queued?.queuedAt || nowIso()
+  });
+});
+
+app.post('/api/matchmaking/cancel', authMiddleware, async (req, res) => {
+  const removed = removeFromQuickPlayQueue(req.user.id);
+  return res.json({ status: 'cancelled', removed });
+});
+
+app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
+  return res.json({
+    status: quickPlayQueuedUsers.has(req.user.id) ? 'searching' : 'idle',
+    queuePosition: quickPlayQueuePosition(req.user.id)
+  });
+});
+
 app.post('/api/free-claim', authMiddleware, async (req, res) => {
   const freeClaim = freeClaimMeta(req.user);
   if (!freeClaim.available) {
@@ -2902,7 +3030,11 @@ app.get('/api/challenges', authMiddleware, async (req, res) => {
   const payload = buildChallengePayload(req.user);
   return res.json({
     challenges: payload.challenges,
+    challengeList: payload.challengeList,
     challengeResets: payload.challengeResets,
+    hourlyResetAt: payload.hourlyResetAt,
+    dailyResetAt: payload.dailyResetAt,
+    weeklyResetAt: payload.weeklyResetAt,
     nextDailyResetAt: payload.nextDailyResetAt,
     nextWeeklyResetAt: payload.nextWeeklyResetAt
   });
@@ -3006,6 +3138,29 @@ io.on('connection', (socket) => {
       const match = matches.get(matchId);
       if (match) socket.emit('match:state', serializeMatchFor(match, userId));
     }
+  });
+
+  socket.on('matchmaking:join', async () => {
+    if (isUserInActiveMatch(userId)) {
+      socket.emit('matchmaking:error', { error: 'Already in an active match' });
+      return;
+    }
+    if (!quickPlayQueuedUsers.has(userId)) {
+      quickPlayQueue.push({ userId, queuedAt: nowIso() });
+      quickPlayQueuedUsers.add(userId);
+    }
+    const matched = await processQuickPlayQueue();
+    const found = matched.find((entry) => entry.userId === userId);
+    if (found) return;
+    socket.emit('matchmaking:searching', {
+      status: 'searching',
+      queuePosition: quickPlayQueuePosition(userId)
+    });
+  });
+
+  socket.on('matchmaking:cancel', () => {
+    const removed = removeFromQuickPlayQueue(userId);
+    socket.emit('matchmaking:cancelled', { status: 'cancelled', removed });
   });
 
   socket.on('match:action', (payload = {}) => {
@@ -3128,6 +3283,7 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     if (activeSessions.get(userId) === socket.id) activeSessions.delete(userId);
+    removeFromQuickPlayQueue(userId);
 
     for (const match of matches.values()) {
       if (!match.playerIds.includes(userId)) continue;

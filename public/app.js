@@ -6,6 +6,7 @@ let hoverGlowInitialized = false;
 let inviteCountdownTicker = null;
 let matchTurnTicker = null;
 let challengeCountdownTicker = null;
+let quickPlayConnectTimer = null;
 const PERMISSION_ERROR_PATTERNS = [
   /not allowed by the user agent/i,
   /not allowed by the platform/i,
@@ -206,6 +207,14 @@ const state = {
     expiresAt: 0,
     seen: true
   },
+  quickPlay: {
+    status: 'idle',
+    queuePosition: null,
+    queuedAt: null,
+    opponentName: '',
+    matchId: null,
+    pendingMatch: null
+  },
   turnTimerFreezeKey: '',
   turnTimerFreezeRemainingMs: null,
   roundResultChoicePending: false
@@ -257,6 +266,89 @@ function formatCooldown(ms) {
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function formatMinutesSeconds(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function formatWeeklyCountdown(ms) {
+  const remaining = Math.max(0, Math.floor(ms));
+  const totalHours = Math.floor(remaining / 3_600_000);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  if (remaining >= 48 * 3_600_000) {
+    return `${days}d ${hours}h`;
+  }
+  if (remaining >= 24 * 3_600_000) {
+    return `${days}d ${hours}h`;
+  }
+  return formatCooldown(remaining);
+}
+
+function clearQuickPlayConnectTimer() {
+  if (quickPlayConnectTimer) {
+    clearTimeout(quickPlayConnectTimer);
+    quickPlayConnectTimer = null;
+  }
+}
+
+function quickPlayIsActive() {
+  return state.quickPlay.status === 'searching' || state.quickPlay.status === 'connected';
+}
+
+function resetQuickPlayState({ clearTimer = true } = {}) {
+  if (clearTimer) clearQuickPlayConnectTimer();
+  state.quickPlay = {
+    status: 'idle',
+    queuePosition: null,
+    queuedAt: null,
+    opponentName: '',
+    matchId: null,
+    pendingMatch: null
+  };
+}
+
+function quickPlayOpponentNameFromMatch(match) {
+  if (!match || !state.me) return '';
+  const opponentId = Array.isArray(match.playerIds) ? match.playerIds.find((id) => id !== state.me.id) : null;
+  if (!opponentId) return '';
+  return match.participants?.[opponentId]?.username || '';
+}
+
+function finalizeQuickPlayConnectedState() {
+  const pendingMatch = state.quickPlay.pendingMatch;
+  clearQuickPlayConnectTimer();
+  resetQuickPlayState({ clearTimer: false });
+  if (!pendingMatch) return;
+  state.currentMatch = pendingMatch;
+  state.leaveMatchModal = false;
+  state.emotePickerOpen = false;
+  goToView('match');
+  render();
+}
+
+function beginQuickPlayConnectedState(payload = {}) {
+  const incomingMatch = payload.match || null;
+  const incomingMatchId = payload.matchId || incomingMatch?.id || state.quickPlay.matchId || null;
+  const nextOpponentName =
+    payload.opponentName ||
+    quickPlayOpponentNameFromMatch(incomingMatch) ||
+    state.quickPlay.opponentName ||
+    'Opponent';
+
+  state.quickPlay.status = 'connected';
+  state.quickPlay.matchId = incomingMatchId;
+  state.quickPlay.opponentName = nextOpponentName;
+  state.quickPlay.queuePosition = null;
+  if (incomingMatch) state.quickPlay.pendingMatch = incomingMatch;
+  if (quickPlayConnectTimer) return;
+  quickPlayConnectTimer = setTimeout(() => {
+    finalizeQuickPlayConnectedState();
+  }, 850);
 }
 
 function prefersReducedMotion() {
@@ -371,7 +463,11 @@ function challengeResetText(tier) {
   const resetAt = state.challengeResets?.[tier];
   if (!resetAt) return '';
   const remaining = state.challengeResetRemainingMs?.[tier] || 0;
-  return remaining > 0 ? `Resets in ${formatCooldown(remaining)}` : 'Resetting...';
+  if (remaining <= 0) return 'Resetting...';
+  if (tier === 'hourly') return `Resets in ${formatMinutesSeconds(remaining)}`;
+  if (tier === 'daily') return `Resets in ${formatCooldown(remaining)}`;
+  if (tier === 'weekly') return `Resets in ${formatWeeklyCountdown(remaining)}`;
+  return `Resets in ${formatCooldown(remaining)}`;
 }
 
 function updateChallengeResetCountdowns() {
@@ -395,20 +491,25 @@ function syncChallengeCountdownUI() {
   });
 }
 
-function applyChallengesPayload(challenges, resets, fallbackDailyResetAt = null, fallbackWeeklyResetAt = null) {
+function applyChallengesPayload(challenges, resets, resetHints = {}) {
   const groups = challenges && typeof challenges === 'object'
     ? challenges
     : { hourly: [], daily: [], weekly: [], skill: [] };
   state.challenges = groups;
   state.challengeResets = {
-    hourly: toValidIso(resets?.hourly) || deriveTierResetAtFromChallenges(groups, 'hourly'),
+    hourly:
+      toValidIso(resets?.hourly) ||
+      toValidIso(resetHints?.hourlyResetAt) ||
+      deriveTierResetAtFromChallenges(groups, 'hourly'),
     daily:
       toValidIso(resets?.daily) ||
-      toValidIso(fallbackDailyResetAt) ||
+      toValidIso(resetHints?.dailyResetAt) ||
+      toValidIso(resetHints?.nextDailyResetAt) ||
       deriveTierResetAtFromChallenges(groups, 'daily'),
     weekly:
       toValidIso(resets?.weekly) ||
-      toValidIso(fallbackWeeklyResetAt) ||
+      toValidIso(resetHints?.weeklyResetAt) ||
+      toValidIso(resetHints?.nextWeeklyResetAt) ||
       deriveTierResetAtFromChallenges(groups, 'weekly')
   };
   updateChallengeResetCountdowns();
@@ -681,7 +782,54 @@ function connectSocket() {
 
   state.socket = io({ auth: { token: state.token } });
 
+  state.socket.on('connect', () => {
+    if (state.quickPlay.status === 'searching') {
+      api('/api/matchmaking/join', { method: 'POST' })
+        .then((data) => {
+          if (data?.status === 'found') {
+            beginQuickPlayConnectedState(data);
+          } else {
+            state.quickPlay.queuePosition = Number.isFinite(Number(data?.queuePosition)) ? Number(data.queuePosition) : null;
+            if (data?.queuedAt) state.quickPlay.queuedAt = data.queuedAt;
+          }
+          render();
+        })
+        .catch(() => {
+          resetQuickPlayState();
+          pushToast('Quick Play stopped after reconnect issue.');
+          render();
+        });
+    }
+  });
+
   state.socket.on('connect_error', (e) => setError(e?.message || 'Connection error'));
+  state.socket.on('disconnect', () => {
+    if (state.quickPlay.status === 'searching') {
+      resetQuickPlayState();
+      pushToast('Quick Play cancelled: connection lost.');
+      render();
+    }
+  });
+  state.socket.on('matchmaking:searching', (payload = {}) => {
+    if (!quickPlayIsActive()) return;
+    state.quickPlay.status = 'searching';
+    state.quickPlay.queuePosition = Number.isFinite(Number(payload.queuePosition)) ? Number(payload.queuePosition) : state.quickPlay.queuePosition;
+    render();
+  });
+  state.socket.on('matchmaking:found', (payload = {}) => {
+    beginQuickPlayConnectedState(payload);
+    render();
+  });
+  state.socket.on('matchmaking:cancelled', () => {
+    if (!quickPlayIsActive()) return;
+    resetQuickPlayState();
+    render();
+  });
+  state.socket.on('matchmaking:error', ({ error }) => {
+    if (!quickPlayIsActive()) return;
+    resetQuickPlayState();
+    if (error) setError(error);
+  });
   state.socket.on('notify:list', ({ notifications }) => {
     state.notifications = notifications || [];
     render();
@@ -743,6 +891,15 @@ function connectSocket() {
         persistBetValue(clamped);
       }
     }
+    if (quickPlayIsActive()) {
+      beginQuickPlayConnectedState({
+        matchId: match.id,
+        opponentName: quickPlayOpponentNameFromMatch(match),
+        match
+      });
+      render();
+      return;
+    }
     goToView('match');
     state.emotePickerOpen = false;
     render();
@@ -774,6 +931,7 @@ function connectSocket() {
   });
   state.socket.on('match:ended', ({ reason }) => {
     setStatus(reason);
+    resetQuickPlayState();
     state.currentMatch = null;
     state.currentLobby = null;
     state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -804,7 +962,13 @@ async function loadMe() {
     state.incomingFriendChallenges = data.friendChallenges?.incoming || [];
     state.outgoingFriendChallenges = data.friendChallenges?.outgoing || [];
     state.notifications = data.notifications || [];
-    applyChallengesPayload(data.challenges, data.challengeResets, data.nextDailyResetAt, data.nextWeeklyResetAt);
+    applyChallengesPayload(data.challenges, data.challengeResets, {
+      hourlyResetAt: data.hourlyResetAt,
+      dailyResetAt: data.dailyResetAt,
+      weeklyResetAt: data.weeklyResetAt,
+      nextDailyResetAt: data.nextDailyResetAt,
+      nextWeeklyResetAt: data.nextWeeklyResetAt
+    });
     state.freeClaimed = !Boolean(data.freeClaimAvailable);
     state.freeClaimedAt = null;
     state.freeClaimNextAt = data.freeClaimNextAt || null;
@@ -840,6 +1004,7 @@ async function loadMe() {
     await loadVersion();
     render();
   } catch (e) {
+    resetQuickPlayState();
     localStorage.removeItem('bb_auth_token');
     localStorage.removeItem('bb_auth_username');
     localStorage.removeItem('bb_token');
@@ -1420,6 +1585,58 @@ function runNotificationAction(notification) {
   }
 }
 
+async function joinQuickPlayQueue({ silent = false } = {}) {
+  if (!state.token || !state.me) return;
+  if (state.currentMatch) {
+    setError('Leave your current match before joining Quick Play.');
+    return;
+  }
+  if (quickPlayIsActive()) return;
+  clearQuickPlayConnectTimer();
+  state.quickPlay = {
+    status: 'searching',
+    queuePosition: null,
+    queuedAt: new Date().toISOString(),
+    opponentName: '',
+    matchId: null,
+    pendingMatch: null
+  };
+  goToView('home');
+  render();
+  try {
+    const data = await api('/api/matchmaking/join', { method: 'POST' });
+    if (data?.status === 'found') {
+      beginQuickPlayConnectedState(data);
+      render();
+      return;
+    }
+    state.quickPlay.status = 'searching';
+    state.quickPlay.queuePosition = Number.isFinite(Number(data?.queuePosition)) ? Number(data.queuePosition) : null;
+    state.quickPlay.queuedAt = data?.queuedAt || state.quickPlay.queuedAt;
+    if (!silent) setStatus('Searching for a Quick Play opponent...');
+    render();
+  } catch (e) {
+    resetQuickPlayState();
+    setError(e.message);
+  }
+}
+
+async function cancelQuickPlayQueue({ silent = false } = {}) {
+  if (!quickPlayIsActive()) return;
+  const wasConnected = state.quickPlay.status === 'connected';
+  try {
+    await api('/api/matchmaking/cancel', { method: 'POST' });
+  } catch {
+    // queue is best-effort for client cancellation
+  }
+  resetQuickPlayState();
+  if (!silent) {
+    setStatus(wasConnected ? 'Matchmaking cancelled.' : 'Stopped searching.');
+  } else {
+    render();
+  }
+}
+
 async function startBotMatch() {
   try {
     const data = await api('/api/lobbies/bot', {
@@ -1464,7 +1681,13 @@ async function claimFree100() {
 async function loadChallenges() {
   try {
     const data = await api('/api/challenges');
-    applyChallengesPayload(data.challenges, data.challengeResets, data.nextDailyResetAt, data.nextWeeklyResetAt);
+    applyChallengesPayload(data.challenges, data.challengeResets, {
+      hourlyResetAt: data.hourlyResetAt,
+      dailyResetAt: data.dailyResetAt,
+      weeklyResetAt: data.weeklyResetAt,
+      nextDailyResetAt: data.nextDailyResetAt,
+      nextWeeklyResetAt: data.nextWeeklyResetAt
+    });
     render();
   } catch (e) {
     setError(e.message);
@@ -1487,6 +1710,7 @@ async function claimChallenge(id) {
 }
 
 function logout() {
+  resetQuickPlayState();
   if (state.socket) state.socket.disconnect();
   state.socket = null;
   state.token = null;
@@ -1778,6 +2002,9 @@ function renderHome() {
   const me = state.me;
   const notes = state.patchNotes?.length ? state.patchNotes : FALLBACK_PATCH_NOTES;
   const latest = notes[0];
+  const quickPlaySearching = state.quickPlay.status === 'searching';
+  const quickPlayConnected = state.quickPlay.status === 'connected';
+  const quickPlayLabel = quickPlayConnected ? 'Connecting...' : quickPlaySearching ? 'Searching...' : 'Quick Play';
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -1786,10 +2013,10 @@ function renderHome() {
       <div class="dashboard-grid">
         <section class="col card section reveal-panel glow-follow glow-follow--panel">
         <h2>Play</h2>
-        <p class="muted">Open Lobbies to create or join private 1v1 games.</p>
+        <p class="muted">Open Lobbies for private matches, or use Quick Play for instant PvP matchmaking.</p>
         <div class="row">
           <button class="primary" id="openLobbiesBtn">Lobbies</button>
-          <button class="ghost" id="quickPlayBtn">Quick Play</button>
+          <button class="ghost" id="quickPlayBtn" ${quickPlaySearching || quickPlayConnected ? 'disabled' : ''}>${quickPlayLabel}</button>
         </div>
         <div class="grid" style="margin-top:0.7rem">
           <div class="muted">Play Against Bot</div>
@@ -1911,8 +2138,7 @@ function renderHome() {
     render();
   };
   document.getElementById('quickPlayBtn').onclick = () => {
-    goToView('friends');
-    render();
+    joinQuickPlayQueue();
   };
   const botGrid = document.getElementById('botDifficultyGrid');
   if (botGrid) {
@@ -2967,6 +3193,60 @@ function syncPressureOverlay() {
   }
 }
 
+function syncQuickPlayOverlay() {
+  let mount = document.getElementById('quickPlayOverlayMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'quickPlayOverlayMount';
+    document.body.appendChild(mount);
+  }
+
+  if (!quickPlayIsActive()) {
+    mount.innerHTML = '';
+    return;
+  }
+
+  const isConnected = state.quickPlay.status === 'connected';
+  const queuePosition =
+    Number.isFinite(Number(state.quickPlay.queuePosition)) && Number(state.quickPlay.queuePosition) > 0
+      ? Number(state.quickPlay.queuePosition)
+      : null;
+  const opponentName = state.quickPlay.opponentName || 'Opponent';
+  mount.innerHTML = `
+    <div class="quickplay-overlay-backdrop"></div>
+    <div class="quickplay-overlay-panel card">
+      <div class="quickplay-status-pill ${isConnected ? 'is-connected' : 'is-searching'}">
+        ${isConnected ? 'Connected' : 'Searching'}
+      </div>
+      <h3>${isConnected ? 'Opponent found' : 'Finding match...'}</h3>
+      <p class="muted">
+        ${isConnected ? `Connected with ${opponentName}. Loading bet confirmation...` : 'Looking for another player in the Quick Play queue.'}
+      </p>
+      ${
+        !isConnected
+          ? `<div class="quickplay-loader-row">
+              <span class="quickplay-spinner" aria-hidden="true"></span>
+              <span class="muted">${queuePosition ? `Queue position: ${queuePosition}` : 'Searching for a compatible opponent...'}</span>
+            </div>`
+          : ''
+      }
+      ${
+        !isConnected
+          ? `<div class="quickplay-actions">
+               <button id="quickPlayCancelBtn" class="ghost">Cancel</button>
+             </div>`
+          : ''
+      }
+    </div>
+  `;
+  const cancelBtn = document.getElementById('quickPlayCancelBtn');
+  if (cancelBtn) {
+    cancelBtn.onclick = () => {
+      cancelQuickPlayQueue();
+    };
+  }
+}
+
 function render() {
   const enteringFriends = state.lastRenderedView !== 'friends' && state.view === 'friends';
   state.lastRenderedView = state.view;
@@ -2998,6 +3278,7 @@ function render() {
   syncNotificationOverlay();
   syncRoundResultModal();
   syncPressureOverlay();
+  syncQuickPlayOverlay();
   syncTurnCountdownUI();
   if (enteringFriends && state.token) loadFriendsData();
 }
