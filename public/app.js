@@ -5,6 +5,7 @@ let spotlightInitialized = false;
 let hoverGlowInitialized = false;
 let inviteCountdownTicker = null;
 let matchTurnTicker = null;
+let challengeCountdownTicker = null;
 const PERMISSION_ERROR_PATTERNS = [
   /not allowed by the user agent/i,
   /not allowed by the platform/i,
@@ -152,7 +153,10 @@ const state = {
   notifications: [],
   notificationsOpen: false,
   toasts: [],
-  challenges: [],
+  challenges: { hourly: [], daily: [], weekly: [], skill: [] },
+  challengeResets: { hourly: null, daily: null, weekly: null },
+  challengeResetRemainingMs: { hourly: 0, daily: 0, weekly: 0 },
+  challengeResetRefreshInFlight: false,
   view: initialViewFromPath(),
   socket: null,
   status: '',
@@ -242,6 +246,66 @@ function formatCooldown(ms) {
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function toValidIso(value) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  return new Date(ms).toISOString();
+}
+
+function deriveTierResetAtFromChallenges(challenges, tier) {
+  const list = Array.isArray(challenges?.[tier]) ? challenges[tier] : [];
+  const withReset = list.find((item) => item?.resetAt || item?.expiresAt);
+  return toValidIso(withReset?.resetAt || withReset?.expiresAt);
+}
+
+function challengeResetText(tier) {
+  const resetAt = state.challengeResets?.[tier];
+  if (!resetAt) return '';
+  const remaining = state.challengeResetRemainingMs?.[tier] || 0;
+  return remaining > 0 ? `Resets in ${formatCooldown(remaining)}` : 'Resetting...';
+}
+
+function updateChallengeResetCountdowns() {
+  const prev = { ...state.challengeResetRemainingMs };
+  const next = { hourly: 0, daily: 0, weekly: 0 };
+  for (const tier of ['hourly', 'daily', 'weekly']) {
+    const resetAt = state.challengeResets?.[tier];
+    const targetMs = resetAt ? new Date(resetAt).getTime() : 0;
+    next[tier] = Number.isFinite(targetMs) && targetMs > 0 ? Math.max(0, targetMs - Date.now()) : 0;
+  }
+  state.challengeResetRemainingMs = next;
+  return ['hourly', 'daily', 'weekly'].some((tier) => prev[tier] > 0 && next[tier] <= 0);
+}
+
+function syncChallengeCountdownUI() {
+  const nodes = document.querySelectorAll('[data-challenge-reset-tier]');
+  if (!nodes.length) return;
+  nodes.forEach((node) => {
+    const tier = node.getAttribute('data-challenge-reset-tier');
+    node.textContent = challengeResetText(tier);
+  });
+}
+
+function applyChallengesPayload(challenges, resets, fallbackDailyResetAt = null, fallbackWeeklyResetAt = null) {
+  const groups = challenges && typeof challenges === 'object'
+    ? challenges
+    : { hourly: [], daily: [], weekly: [], skill: [] };
+  state.challenges = groups;
+  state.challengeResets = {
+    hourly: toValidIso(resets?.hourly) || deriveTierResetAtFromChallenges(groups, 'hourly'),
+    daily:
+      toValidIso(resets?.daily) ||
+      toValidIso(fallbackDailyResetAt) ||
+      deriveTierResetAtFromChallenges(groups, 'daily'),
+    weekly:
+      toValidIso(resets?.weekly) ||
+      toValidIso(fallbackWeeklyResetAt) ||
+      deriveTierResetAtFromChallenges(groups, 'weekly')
+  };
+  updateChallengeResetCountdowns();
 }
 
 function turnTimerKey(match) {
@@ -630,7 +694,7 @@ async function loadMe() {
     state.incomingFriendChallenges = data.friendChallenges?.incoming || [];
     state.outgoingFriendChallenges = data.friendChallenges?.outgoing || [];
     state.notifications = data.notifications || [];
-    state.challenges = data.challenges || [];
+    applyChallengesPayload(data.challenges, data.challengeResets, data.nextDailyResetAt, data.nextWeeklyResetAt);
     state.freeClaimed = !Boolean(data.freeClaimAvailable);
     state.freeClaimedAt = null;
     state.freeClaimNextAt = data.freeClaimNextAt || null;
@@ -679,7 +743,10 @@ async function loadMe() {
     state.notifications = [];
     state.incomingFriendChallenges = [];
     state.outgoingFriendChallenges = [];
-    state.challenges = [];
+    state.challenges = { hourly: [], daily: [], weekly: [], skill: [] };
+    state.challengeResets = { hourly: null, daily: null, weekly: null };
+    state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
+    state.challengeResetRefreshInFlight = false;
     state.freeClaimed = false;
     state.freeClaimedAt = null;
     state.freeClaimNextAt = null;
@@ -1287,7 +1354,7 @@ async function claimFree100() {
 async function loadChallenges() {
   try {
     const data = await api('/api/challenges');
-    state.challenges = data.challenges;
+    applyChallengesPayload(data.challenges, data.challengeResets, data.nextDailyResetAt, data.nextWeeklyResetAt);
     render();
   } catch (e) {
     setError(e.message);
@@ -1302,6 +1369,7 @@ async function claimChallenge(id) {
     });
     setStatus(`Challenge claimed: +${data.reward} chips`);
     state.me.chips = data.chips;
+    state.bankrollDisplay = data.bankroll ?? data.chips;
     await loadChallenges();
   } catch (e) {
     setError(e.message);
@@ -1315,6 +1383,10 @@ function logout() {
   state.me = null;
   state.currentMatch = null;
   state.currentLobby = null;
+  state.challenges = { hourly: [], daily: [], weekly: [], skill: [] };
+  state.challengeResets = { hourly: null, daily: null, weekly: null };
+  state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
+  state.challengeResetRefreshInFlight = false;
   state.revealPin = false;
   state.newPin = '';
   localStorage.removeItem('bb_token');
@@ -2113,20 +2185,26 @@ function renderLobby() {
 
 function renderChallenges() {
   const groups = state.challenges || { hourly: [], daily: [], weekly: [], skill: [] };
+  const resetTiers = new Set(['hourly', 'daily', 'weekly']);
   const renderTier = (label, key) => `
     <div class="card section" style="margin-top:1rem">
       <h3>${label}</h3>
       ${
+        resetTiers.has(key)
+          ? `<div class="muted challenge-reset-note" data-challenge-reset-tier="${key}">${challengeResetText(key)}</div>`
+          : ''
+      }
+      ${
         (groups[key] || [])
           .map(
             (c) => `
-          <div class="challenge ${c.progress >= c.goal && !c.claimed ? 'challenge-ready' : ''}">
+          <div class="challenge ${c.progress >= c.goal && !c.claimed && !c.claimedAt ? 'challenge-ready' : ''}">
             <div>
               <div><strong>${c.title}</strong></div>
               <div class="muted">${c.description}</div>
               <div class="muted">${c.progress}/${c.goal} • Reward ${c.rewardChips} chips</div>
             </div>
-            <button class="${c.progress >= c.goal && !c.claimed ? 'claim-wiggle' : ''}" data-claim="${c.id}" ${c.claimed || c.progress < c.goal ? 'disabled' : ''}>${c.claimed ? 'Claimed' : 'Claim'}</button>
+            <button class="${c.progress >= c.goal && !c.claimed && !c.claimedAt ? 'claim-wiggle' : ''}" data-claim="${c.id}" ${c.claimed || c.claimedAt || c.progress < c.goal ? 'disabled' : ''}>${c.claimed || c.claimedAt ? 'Claimed' : 'Claim'}</button>
           </div>
         `
           )
@@ -2137,6 +2215,7 @@ function renderChallenges() {
   app.innerHTML = `
     ${renderTopbar('Challenges')}
     <main class="view-stack">
+      <p class="muted">Only real-chip matches count toward challenge progress.</p>
       ${renderTier('Hourly Challenges', 'hourly')}
       ${renderTier('Daily Challenges', 'daily')}
       ${renderTier('Weekly Challenges', 'weekly')}
@@ -2144,6 +2223,7 @@ function renderChallenges() {
     </main>
   `;
   bindShellNav();
+  syncChallengeCountdownUI();
 
   app.querySelectorAll('[data-claim]').forEach((btn) => {
     btn.onclick = () => claimChallenge(btn.dataset.claim);
@@ -2843,6 +2923,18 @@ function render() {
       if (state.view !== 'match') return;
       syncTurnCountdownUI();
     }, 120);
+  }
+  if (!challengeCountdownTicker) {
+    challengeCountdownTicker = setInterval(() => {
+      const crossedResetBoundary = updateChallengeResetCountdowns();
+      if (state.view === 'challenges') syncChallengeCountdownUI();
+      if (crossedResetBoundary && state.token && !state.challengeResetRefreshInFlight) {
+        state.challengeResetRefreshInFlight = true;
+        loadChallenges().finally(() => {
+          state.challengeResetRefreshInFlight = false;
+        });
+      }
+    }, 1000);
   }
   render();
   if (state.token) {

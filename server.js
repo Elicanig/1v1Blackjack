@@ -289,7 +289,7 @@ const SKILL_CHALLENGE_DEFS = [
   { key: 'skill_win_no_bust', title: 'Clean Win', description: 'Win 2 hands without busting', goal: 2, rewardChips: 40, event: 'win_no_bust' },
   { key: 'skill_stand_16', title: 'Disciplined Stand', description: 'Stand on 16+ three times', goal: 3, rewardChips: 35, event: 'stand_16_plus' },
   { key: 'skill_blackjack', title: 'Natural Talent', description: 'Get a blackjack', goal: 1, rewardChips: 50, event: 'blackjack' },
-  { key: 'skill_practice_hands', title: 'Practice Reps', description: 'Play 5 hands in practice', goal: 5, rewardChips: 30, event: 'practice_hand_played' }
+  { key: 'skill_practice_hands', title: 'Table Reps', description: 'Play 5 real-bet hands', goal: 5, rewardChips: 30, event: 'hand_played' }
 ];
 
 const BOT_ACCURACY = {
@@ -310,6 +310,27 @@ const PHASES = {
   RESULT: 'RESULT',
   NEXT_ROUND: 'NEXT_ROUND'
 };
+
+function resolveStakeType(rawStakeType) {
+  return String(rawStakeType || '').toUpperCase() === 'REAL' ? 'REAL' : 'FAKE';
+}
+
+function resolveMatchMode(stakeType) {
+  return resolveStakeType(stakeType) === 'REAL' ? 'real' : 'practice';
+}
+
+function isPracticeMatch(match) {
+  if (!match) return false;
+  if (match.mode === 'practice') return true;
+  if (match.mode === 'real') return false;
+  if (typeof match.isPractice === 'boolean') return match.isPractice;
+  if (match.stakeType) return resolveMatchMode(match.stakeType) === 'practice';
+  return false;
+}
+
+function isRealMatch(match) {
+  return !isPracticeMatch(match);
+}
 
 const RULES = {
   DEALER_ENABLED: false,
@@ -494,6 +515,7 @@ function sanitizeUser(user) {
     avatarSeed: user.avatarSeed || user.username,
     bio: user.bio,
     chips: user.chips,
+    bankroll: user.chips,
     stats: user.stats,
     betHistory: (user.betHistory || []).slice(0, 10),
     selectedBet: user.selectedBet || BASE_BET,
@@ -648,7 +670,7 @@ function getParticipantChips(match, playerId) {
   if (isBotPlayer(playerId)) {
     return BOT_UNLIMITED_BANKROLL;
   }
-  if (match?.isPractice && match.practiceBankrollById) {
+  if (isPracticeMatch(match) && match.practiceBankrollById) {
     return match.practiceBankrollById[playerId] ?? STARTING_CHIPS;
   }
   return getUserById(playerId)?.chips ?? STARTING_CHIPS;
@@ -659,7 +681,7 @@ function setParticipantChips(match, playerId, chips) {
     return;
   }
   const safe = Math.max(0, Math.floor(chips));
-  if (match?.isPractice) {
+  if (isPracticeMatch(match)) {
     if (!match.practiceBankrollById) match.practiceBankrollById = {};
     match.practiceBankrollById[playerId] = safe;
     return;
@@ -682,6 +704,13 @@ function appendBetHistory(user, entry) {
     ...entry
   });
   user.betHistory = user.betHistory.slice(0, 10);
+}
+
+function creditUserBankroll(user, rewardChips) {
+  if (!user) return 0;
+  const delta = Math.max(0, Math.floor(Number(rewardChips) || 0));
+  user.chips = Math.max(0, Math.floor(Number(user.chips) || 0) + delta);
+  return user.chips;
 }
 
 function authMiddleware(req, res, next) {
@@ -871,6 +900,8 @@ function buildClientState(match, viewerId) {
     id: match.id,
     lobbyId: match.lobbyId,
     participants: match.participants,
+    mode: match.mode || (isPracticeMatch(match) ? 'practice' : 'real'),
+    isPractice: isPracticeMatch(match),
     roundNumber: match.roundNumber,
     phase: match.phase,
     playerIds: match.playerIds,
@@ -971,18 +1002,19 @@ function syncAfkTurnTimer(match) {
 function challengeExpiresAt(tier, from = new Date()) {
   const ts = new Date(from);
   if (tier === 'hourly') {
-    ts.setMinutes(0, 0, 0);
-    ts.setHours(ts.getHours() + 1);
+    ts.setUTCMinutes(0, 0, 0);
+    ts.setUTCHours(ts.getUTCHours() + 1);
     return ts.toISOString();
   }
   if (tier === 'daily') {
-    ts.setHours(24, 0, 0, 0);
+    ts.setUTCDate(ts.getUTCDate() + 1);
+    ts.setUTCHours(0, 0, 0, 0);
     return ts.toISOString();
   }
-  const day = ts.getDay();
+  const day = ts.getUTCDay();
   const daysUntilMonday = ((8 - day) % 7) || 7;
-  ts.setDate(ts.getDate() + daysUntilMonday);
-  ts.setHours(0, 0, 0, 0);
+  ts.setUTCDate(ts.getUTCDate() + daysUntilMonday);
+  ts.setUTCHours(0, 0, 0, 0);
   return ts.toISOString();
 }
 
@@ -1015,10 +1047,51 @@ function refreshChallengesForUser(user, force = false) {
         rewardChips: def.rewardChips,
         event: def.event,
         expiresAt,
-        claimed: false
+        resetAt: expiresAt,
+        completedAt: null,
+        claimed: false,
+        claimedAt: null
       }));
       user.challengeSets[tier] = { tier, expiresAt, items };
       changed = true;
+    } else {
+      const resetAt = current.expiresAt || challengeExpiresAt(tier, now);
+      if (!current.expiresAt) {
+        current.expiresAt = resetAt;
+        changed = true;
+      }
+      for (const item of current.items) {
+        const goal = Math.max(1, Math.floor(Number(item.goal) || 1));
+        const progress = Math.max(0, Math.min(goal, Math.floor(Number(item.progress) || 0)));
+        if (item.goal !== goal) {
+          item.goal = goal;
+          changed = true;
+        }
+        if (item.progress !== progress) {
+          item.progress = progress;
+          changed = true;
+        }
+        if (!item.expiresAt) {
+          item.expiresAt = resetAt;
+          changed = true;
+        }
+        if (!item.resetAt) {
+          item.resetAt = item.expiresAt;
+          changed = true;
+        }
+        if (item.claimed === undefined) {
+          item.claimed = Boolean(item.claimedAt);
+          changed = true;
+        }
+        if (item.claimed && !item.claimedAt) {
+          item.claimedAt = nowIso();
+          changed = true;
+        }
+        if (progress >= goal && !item.completedAt) {
+          item.completedAt = nowIso();
+          changed = true;
+        }
+      }
     }
   }
   return changed;
@@ -1030,15 +1103,27 @@ function recordChallengeEvent(user, event, amount = 1) {
   for (const tier of ['hourly', 'daily', 'weekly']) {
     const list = user.challengeSets?.[tier]?.items || [];
     for (const item of list) {
-      if (item.claimed) continue;
+      if (item.claimed || item.claimedAt) continue;
       if (item.event !== event) continue;
-      item.progress = Math.min(item.goal, item.progress + amount);
+      item.progress = Math.min(item.goal, Math.max(0, Math.floor(Number(item.progress) || 0)) + amount);
+      if (item.progress >= item.goal && !item.completedAt) {
+        item.completedAt = nowIso();
+      }
     }
   }
 }
 
+function recordChallengeEventForMatch(match, user, event, amount = 1) {
+  if (!isRealMatch(match)) return false;
+  recordChallengeEvent(user, event, amount);
+  return true;
+}
+
 function ensureSkillChallenges(user) {
-  if (!Array.isArray(user.skillChallenges) || user.skillChallenges.length === 0) {
+  if (!Array.isArray(user.skillChallenges)) {
+    user.skillChallenges = [];
+  }
+  if (user.skillChallenges.length === 0) {
     user.skillChallenges = SKILL_CHALLENGE_DEFS.map((def) => ({
       id: def.key,
       key: def.key,
@@ -1048,21 +1133,125 @@ function ensureSkillChallenges(user) {
       progress: 0,
       rewardChips: def.rewardChips,
       event: def.event,
-      claimed: false
+      completedAt: null,
+      claimed: false,
+      claimedAt: null
     }));
     return true;
   }
-  return false;
+  let changed = false;
+  for (const def of SKILL_CHALLENGE_DEFS) {
+    const existing = user.skillChallenges.find((item) => item.key === def.key || item.id === def.key);
+    if (!existing) {
+      user.skillChallenges.push({
+        id: def.key,
+        key: def.key,
+        title: def.title,
+        description: def.description,
+        goal: def.goal,
+        progress: 0,
+        rewardChips: def.rewardChips,
+        event: def.event,
+        completedAt: null,
+        claimed: false,
+        claimedAt: null
+      });
+      changed = true;
+      continue;
+    }
+    if (existing.id !== def.key) {
+      existing.id = def.key;
+      changed = true;
+    }
+    if (existing.key !== def.key) {
+      existing.key = def.key;
+      changed = true;
+    }
+    if (existing.title !== def.title) {
+      existing.title = def.title;
+      changed = true;
+    }
+    if (existing.description !== def.description) {
+      existing.description = def.description;
+      changed = true;
+    }
+    if (existing.goal !== def.goal) {
+      existing.goal = def.goal;
+      changed = true;
+    }
+    if (existing.rewardChips !== def.rewardChips) {
+      existing.rewardChips = def.rewardChips;
+      changed = true;
+    }
+    if (existing.event !== def.event) {
+      existing.event = def.event;
+      changed = true;
+    }
+    const normalizedProgress = Math.max(0, Math.min(existing.goal, Math.floor(Number(existing.progress) || 0)));
+    if (existing.progress !== normalizedProgress) {
+      existing.progress = normalizedProgress;
+      changed = true;
+    }
+    if (existing.claimed === undefined) {
+      existing.claimed = Boolean(existing.claimedAt);
+      changed = true;
+    }
+    if (existing.claimed && !existing.claimedAt) {
+      existing.claimedAt = nowIso();
+      changed = true;
+    }
+    if (existing.progress >= existing.goal && !existing.completedAt) {
+      existing.completedAt = nowIso();
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function recordSkillEvent(user, event, amount = 1) {
   if (!user || !event || amount <= 0) return;
   ensureSkillChallenges(user);
   for (const item of user.skillChallenges) {
-    if (item.claimed) continue;
+    if (item.claimed || item.claimedAt) continue;
     if (item.event !== event) continue;
-    item.progress = Math.min(item.goal, (item.progress || 0) + amount);
+    item.progress = Math.min(item.goal, Math.max(0, Math.floor(Number(item.progress) || 0)) + amount);
+    if (item.progress >= item.goal && !item.completedAt) {
+      item.completedAt = nowIso();
+    }
   }
+}
+
+function buildChallengePayload(user) {
+  const now = new Date();
+  const resets = {
+    hourly: user.challengeSets?.hourly?.expiresAt || challengeExpiresAt('hourly', now),
+    daily: user.challengeSets?.daily?.expiresAt || challengeExpiresAt('daily', now),
+    weekly: user.challengeSets?.weekly?.expiresAt || challengeExpiresAt('weekly', now)
+  };
+  const challenges = {
+    hourly: (user.challengeSets?.hourly?.items || []).map((item) => ({
+      ...item,
+      expiresAt: item.expiresAt || resets.hourly,
+      resetAt: item.resetAt || item.expiresAt || resets.hourly
+    })),
+    daily: (user.challengeSets?.daily?.items || []).map((item) => ({
+      ...item,
+      expiresAt: item.expiresAt || resets.daily,
+      resetAt: item.resetAt || item.expiresAt || resets.daily
+    })),
+    weekly: (user.challengeSets?.weekly?.items || []).map((item) => ({
+      ...item,
+      expiresAt: item.expiresAt || resets.weekly,
+      resetAt: item.resetAt || item.expiresAt || resets.weekly
+    })),
+    skill: (user.skillChallenges || []).map((item) => ({ ...item }))
+  };
+  return {
+    challenges,
+    challengeResets: resets,
+    nextDailyResetAt: resets.daily,
+    nextWeeklyResetAt: resets.weekly
+  };
 }
 
 function startRound(match) {
@@ -1112,9 +1301,9 @@ function startRound(match) {
 
   const u1 = getUserById(p1);
   const u2 = getUserById(p2);
-  if (!match.isPractice) {
-    if (u1) recordChallengeEvent(u1, 'round_played', 1);
-    if (u2) recordChallengeEvent(u2, 'round_played', 1);
+  if (isRealMatch(match)) {
+    if (u1) recordChallengeEventForMatch(match, u1, 'round_played', 1);
+    if (u2) recordChallengeEventForMatch(match, u2, 'round_played', 1);
     db.write();
   }
 
@@ -1159,7 +1348,7 @@ function beginActionPhase(match) {
     }
   }
 
-  if (!match.isPractice) {
+  if (isRealMatch(match)) {
     const userP1 = getUserById(p1);
     const userP2 = getUserById(p2);
     if (userP1 && isSixSevenStartingHand(match.round.players[p1].hands[0].cards)) userP1.stats.sixSevenDealt += 1;
@@ -1199,6 +1388,7 @@ function maybeBeginRoundAfterBetConfirm(match) {
 function resolveRound(match) {
   clearRoundPhaseTimer(match.id);
   match.phase = PHASES.ROUND_RESOLVE;
+  const realMatch = isRealMatch(match);
   const [aId, bId] = match.playerIds;
   const a = match.round.players[aId];
   const b = match.round.players[bId];
@@ -1283,7 +1473,7 @@ function resolveRound(match) {
     }
   }
 
-  if (!match.isPractice) {
+  if (realMatch) {
     setParticipantChips(match, aId, getParticipantChips(match, aId) + chipsDelta[aId]);
     setParticipantChips(match, bId, getParticipantChips(match, bId) + chipsDelta[bId]);
   }
@@ -1310,36 +1500,36 @@ function resolveRound(match) {
     }
   }
 
-  if (!match.isPractice) {
+  if (realMatch) {
     for (const out of outcomes) {
       applyHandOutcomeStats(userA, aId, out);
       applyHandOutcomeStats(userB, bId, out);
     }
   }
 
-  for (const out of outcomes) {
-    const handA = a.hands[out.handIndex] || a.hands[0];
-    const handB = b.hands[0];
-    if (userA) {
-      if (match.isPractice) recordSkillEvent(userA, 'practice_hand_played', 1);
-      if (out.winner === aId && handA && !handA.bust) recordSkillEvent(userA, 'win_no_bust', 1);
-      if (handA?.naturalBlackjack) recordSkillEvent(userA, 'blackjack', 1);
-    }
-    if (userB) {
-      if (match.isPractice) recordSkillEvent(userB, 'practice_hand_played', 1);
-      if (out.winner === bId && handB && !handB.bust) recordSkillEvent(userB, 'win_no_bust', 1);
-      if (handB?.naturalBlackjack) recordSkillEvent(userB, 'blackjack', 1);
+  if (realMatch) {
+    for (const out of outcomes) {
+      const handA = a.hands[out.handIndex] || a.hands[0];
+      const handB = b.hands[0];
+      if (userA) {
+        if (out.winner === aId && handA && !handA.bust) recordSkillEvent(userA, 'win_no_bust', 1);
+        if (handA?.naturalBlackjack) recordSkillEvent(userA, 'blackjack', 1);
+      }
+      if (userB) {
+        if (out.winner === bId && handB && !handB.bust) recordSkillEvent(userB, 'win_no_bust', 1);
+        if (handB?.naturalBlackjack) recordSkillEvent(userB, 'blackjack', 1);
+      }
     }
   }
 
-  if (!match.isPractice && userA) {
+  if (realMatch && userA) {
     const naturals = a.hands.filter((h) => handMeta(h.cards).isNaturalBlackjack).length;
     if (naturals > 0) {
       userA.stats.blackjacks = (userA.stats.blackjacks || 0) + naturals;
       recordChallengeEvent(userA, 'blackjack', naturals);
     }
   }
-  if (!match.isPractice && userB) {
+  if (realMatch && userB) {
     const naturals = b.hands.filter((h) => handMeta(h.cards).isNaturalBlackjack).length;
     if (naturals > 0) {
       userB.stats.blackjacks = (userB.stats.blackjacks || 0) + naturals;
@@ -1349,13 +1539,13 @@ function resolveRound(match) {
 
   const netA = chipsDelta[aId];
 
-  if (!match.isPractice && netA > 0) {
+  if (realMatch && netA > 0) {
     if (userA) {
       userA.stats.roundsWon += 1;
       recordChallengeEvent(userA, 'round_won', 1);
     }
     if (userB) userB.stats.roundsLost += 1;
-  } else if (!match.isPractice && netA < 0) {
+  } else if (realMatch && netA < 0) {
     if (userB) {
       userB.stats.roundsWon += 1;
       recordChallengeEvent(userB, 'round_won', 1);
@@ -1363,12 +1553,12 @@ function resolveRound(match) {
     if (userA) userA.stats.roundsLost += 1;
   }
 
-  if (!match.isPractice) {
+  if (realMatch) {
     if (userA) userA.stats.matchesPlayed += 1;
     if (userB) userB.stats.matchesPlayed += 1;
   }
 
-  if (!match.isPractice) {
+  if (realMatch) {
     for (let idx = 0; idx < outcomes.length; idx += 1) {
       const out = outcomes[idx];
       const handA = a.hands[out.handIndex] || a.hands[0];
@@ -1420,7 +1610,7 @@ function resolveRound(match) {
       deltaChips: chipsDelta[aId],
       previousBankroll: bankrollBefore[aId],
       newBankroll: bankrollAfter[aId],
-      isPractice: Boolean(match.isPractice)
+      isPractice: isPracticeMatch(match)
     },
     [bId]: {
       matchId: match.id,
@@ -1430,7 +1620,7 @@ function resolveRound(match) {
       deltaChips: chipsDelta[bId],
       previousBankroll: bankrollBefore[bId],
       newBankroll: bankrollAfter[bId],
-      isPractice: Boolean(match.isPractice)
+      isPractice: isPracticeMatch(match)
     }
   };
 
@@ -1737,7 +1927,7 @@ function applyAction(match, playerId, action) {
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     const total = handTotal(hand.cards);
-    if (!isBotPlayer(playerId) && total >= 16) {
+    if (!isBotPlayer(playerId) && total >= 16 && isRealMatch(match)) {
       const user = getUserById(playerId);
       if (user) recordSkillEvent(user, 'stand_16_plus', 1);
     }
@@ -1811,7 +2001,7 @@ function applyAction(match, playerId, action) {
     state.hands.splice(idx, 1, newOne, newTwo);
     state.activeHandIndex = idx;
 
-    if (!match.isPractice) {
+    if (isRealMatch(match)) {
       const user = getUserById(playerId);
       if (user) {
         if (isSixSevenStartingHand(newOne.cards)) user.stats.sixSevenDealt += 1;
@@ -1940,7 +2130,9 @@ function confirmBaseBet(match, playerId) {
 
 function createMatch(lobby, options = {}) {
   const playerIds = [lobby.ownerId, lobby.opponentId];
-  const isPractice = (lobby.stakeType || 'FAKE') === 'FAKE';
+  const stakeType = resolveStakeType(lobby.stakeType);
+  const mode = resolveMatchMode(stakeType);
+  const isPractice = mode === 'practice';
   const botId = playerIds.find((pid) => isBotPlayer(pid));
   const botDifficulty = botId ? options.botDifficultyById?.[botId] || 'normal' : null;
   const betLimits = botDifficulty ? getBetLimitsForDifficulty(botDifficulty) : { min: MIN_BET, max: MAX_BET_CAP };
@@ -1964,7 +2156,8 @@ function createMatch(lobby, options = {}) {
     playerIds,
     startingPlayerIndex: 0,
     roundNumber: 0,
-    stakeType: lobby.stakeType || (isPractice ? 'FAKE' : 'REAL'),
+    stakeType,
+    mode,
     isPractice,
     practiceBankrollById: isPractice
       ? playerIds.reduce((acc, pid) => {
@@ -2036,7 +2229,7 @@ function leaveMatchByForfeit(match, leaverId) {
   const opponentId = match.playerIds.find((id) => id !== leaverId);
   const leaverUser = !isBotPlayer(leaverId) ? getUserById(leaverId) : null;
   const opponentUser = !isBotPlayer(opponentId) ? getUserById(opponentId) : null;
-  if (leaverUser && opponentUser && !match.isPractice) {
+  if (leaverUser && opponentUser && isRealMatch(match)) {
     const currentPot =
       (match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0) +
       (match.round?.players?.[opponentId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0);
@@ -2177,9 +2370,9 @@ app.get('/api/me', authMiddleware, async (req, res) => {
   const friendsData = buildFriendsPayload(req.user);
   const refreshed = refreshChallengesForUser(req.user);
   const refreshedSkills = ensureSkillChallenges(req.user);
-  if (refreshed) await db.write();
+  if (refreshed || refreshedSkills) await db.write();
   const freeClaim = freeClaimMeta(req.user);
-  if (refreshedSkills) await db.write();
+  const challengeData = buildChallengePayload(req.user);
   return res.json({
     user: sanitizeSelfUser(req.user),
     friends: friendsData.friends,
@@ -2197,12 +2390,10 @@ app.get('/api/me', authMiddleware, async (req, res) => {
     freeClaimNextAt: freeClaim.nextAt,
     streakCount: freeClaim.streakCount,
     nextStreakReward: freeClaim.nextReward,
-    challenges: {
-      hourly: req.user.challengeSets.hourly?.items || [],
-      daily: req.user.challengeSets.daily?.items || [],
-      weekly: req.user.challengeSets.weekly?.items || [],
-      skill: req.user.skillChallenges || []
-    }
+    challenges: challengeData.challenges,
+    challengeResets: challengeData.challengeResets,
+    nextDailyResetAt: challengeData.nextDailyResetAt,
+    nextWeeklyResetAt: challengeData.nextWeeklyResetAt
   });
 });
 
@@ -2447,10 +2638,17 @@ app.post('/api/friends/challenge/respond', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
+  const hasStakeTypeInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'stakeType');
+  const resolvedStakeType = hasStakeTypeInput ? resolveStakeType(req.body?.stakeType) : 'FAKE';
   const existing = db.data.lobbies.find(
     (l) => l.ownerId === req.user.id && l.status === 'waiting' && l.type !== 'bot'
   );
   if (existing) {
+    if (hasStakeTypeInput && existing.stakeType !== resolvedStakeType) {
+      existing.stakeType = resolvedStakeType;
+      await db.write();
+      emitLobbyUpdate(existing);
+    }
     return res.json({
       lobby: existing,
       link: `${req.protocol}://${req.get('host')}/lobbies?code=${existing.id}`
@@ -2462,6 +2660,7 @@ app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
     opponentId: null,
     status: 'waiting',
     invited: [],
+    stakeType: resolvedStakeType,
     createdAt: nowIso()
   };
   db.data.lobbies.push(lobby);
@@ -2512,6 +2711,8 @@ app.get('/api/lobbies/:id', authMiddleware, (req, res) => {
 
 app.post('/api/lobbies/invite', authMiddleware, async (req, res) => {
   const { username } = req.body || {};
+  const hasStakeTypeInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'stakeType');
+  const resolvedStakeType = hasStakeTypeInput ? resolveStakeType(req.body?.stakeType) : 'FAKE';
   const friend = getUserByUsername(username || '');
   if (!friend) return res.status(404).json({ error: 'Friend not found' });
   if (!req.user.friends.includes(friend.id)) return res.status(403).json({ error: 'Can only invite friends' });
@@ -2524,10 +2725,13 @@ app.post('/api/lobbies/invite', authMiddleware, async (req, res) => {
       opponentId: null,
       status: 'waiting',
       invited: [],
+      stakeType: resolvedStakeType,
       createdAt: nowIso()
     };
     db.data.lobbies.push(lobby);
   }
+  if (!lobby.stakeType) lobby.stakeType = resolvedStakeType;
+  if (hasStakeTypeInput && lobby.stakeType !== resolvedStakeType) lobby.stakeType = resolvedStakeType;
   if (!Array.isArray(lobby.invited)) lobby.invited = [];
   if (!lobby.invited.includes(friend.username)) lobby.invited.push(friend.username);
 
@@ -2547,7 +2751,7 @@ async function createBotPracticeLobby(req, res) {
   if (!['easy', 'medium', 'normal'].includes(difficulty)) {
     return res.status(400).json({ error: 'Difficulty must be easy, medium, or normal' });
   }
-  const resolvedStake = stakeType === 'REAL' ? 'REAL' : 'FAKE';
+  const resolvedStake = resolveStakeType(stakeType);
 
   const botId = `bot:${difficulty}:${nanoid(6)}`;
   const lobby = {
@@ -2650,14 +2854,12 @@ app.get('/api/challenges', authMiddleware, async (req, res) => {
   const refreshed = refreshChallengesForUser(req.user);
   const refreshedSkills = ensureSkillChallenges(req.user);
   if (refreshed || refreshedSkills) await db.write();
-  const payload = {
-    hourly: req.user.challengeSets.hourly?.items || [],
-    daily: req.user.challengeSets.daily?.items || [],
-    weekly: req.user.challengeSets.weekly?.items || [],
-    skill: req.user.skillChallenges || []
-  };
+  const payload = buildChallengePayload(req.user);
   return res.json({
-    challenges: payload
+    challenges: payload.challenges,
+    challengeResets: payload.challengeResets,
+    nextDailyResetAt: payload.nextDailyResetAt,
+    nextWeeklyResetAt: payload.nextWeeklyResetAt
   });
 });
 
@@ -2676,13 +2878,15 @@ app.post('/api/challenges/claim', authMiddleware, async (req, res) => {
     target = (req.user.skillChallenges || []).find((c) => c.id === targetId);
   }
   if (!target) return res.status(404).json({ error: 'Challenge not found' });
-  if (target.claimed) return res.status(409).json({ error: 'Already claimed' });
+  if (target.claimed || target.claimedAt) return res.status(409).json({ error: 'Already claimed' });
   if (target.progress < target.goal) return res.status(400).json({ error: 'Not complete' });
+  if (!target.completedAt) target.completedAt = nowIso();
   target.claimed = true;
-  req.user.chips += target.rewardChips;
+  target.claimedAt = nowIso();
+  const bankroll = creditUserBankroll(req.user, target.rewardChips);
   await db.write();
   emitUserUpdate(req.user.id);
-  return res.json({ id: targetId, reward: target.rewardChips, chips: req.user.chips });
+  return res.json({ id: targetId, reward: target.rewardChips, chips: bankroll, bankroll, claimedAt: target.claimedAt });
 });
 
 app.get('/api/patch-notes', async (_req, res) => {
@@ -2941,5 +3145,9 @@ export {
   newHand,
   hasPlayableHand,
   advanceToNextPlayableHand,
-  serializeMatchFor
+  serializeMatchFor,
+  refreshChallengesForUser,
+  recordChallengeEventForMatch,
+  buildChallengePayload,
+  isRealMatch
 };

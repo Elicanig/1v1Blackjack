@@ -12,7 +12,10 @@ import {
   applyPressureDecision,
   newHand,
   hasPlayableHand,
-  advanceToNextPlayableHand
+  advanceToNextPlayableHand,
+  refreshChallengesForUser,
+  recordChallengeEventForMatch,
+  buildChallengePayload
 } from '../server.js';
 
 function card(rank, suit = 'H') {
@@ -505,4 +508,29 @@ test('41 bot split first-hand bust advances to second bot hand', () => {
   assert.equal(m.round.players[botId].activeHandIndex, 1);
   assert.equal(m.round.players[botId].hands[0].bust, true);
   assert.equal(m.round.players[botId].hands[1].bust, false);
+});
+
+test('42 practice matches do not advance challenge progress, real matches do', () => {
+  const user = { challengeSets: {}, skillChallenges: [] };
+  refreshChallengesForUser(user, true);
+  const item = user.challengeSets.hourly.items[0];
+  const before = item.progress;
+
+  const blocked = recordChallengeEventForMatch({ mode: 'practice' }, user, item.event, 1);
+  assert.equal(blocked, false);
+  assert.equal(item.progress, before);
+
+  const recorded = recordChallengeEventForMatch({ mode: 'real' }, user, item.event, 1);
+  assert.equal(recorded, true);
+  assert.equal(item.progress, Math.min(item.goal, before + 1));
+});
+
+test('43 challenge payload includes reset timestamps for countdown UI', () => {
+  const user = { challengeSets: {}, skillChallenges: [] };
+  refreshChallengesForUser(user, true);
+  const payload = buildChallengePayload(user);
+  assert.ok(payload.challengeResets.daily);
+  assert.ok(payload.challengeResets.weekly);
+  assert.equal(Number.isFinite(new Date(payload.nextDailyResetAt).getTime()), true);
+  assert.equal(Number.isFinite(new Date(payload.nextWeeklyResetAt).getTime()), true);
 });
