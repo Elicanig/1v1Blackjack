@@ -45,6 +45,10 @@ const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DISCONNECT_TIMEOUT_MS = 60_000;
 const BOT_BET_CONFIRM_MIN_MS = 200;
 const BOT_BET_CONFIRM_MAX_MS = 600;
+const BOT_ACTION_DELAY_MIN_MS = 900;
+const BOT_ACTION_DELAY_MAX_MS = 1400;
+const BOT_FIRST_ACTION_DELAY_MIN_MS = 2000;
+const BOT_FIRST_ACTION_DELAY_MAX_MS = 3000;
 const ROUND_REVEAL_MS = 2200;
 const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
 const PATCH_REPO = 'Elicanig/1v1Blackjack';
@@ -390,6 +394,43 @@ function buildParticipants(playerIds, botDifficultyById = {}) {
     };
     return acc;
   }, {});
+}
+
+function randomIntInclusive(min, max) {
+  const lo = Math.max(0, Math.floor(Number(min) || 0));
+  const hi = Math.max(lo, Math.floor(Number(max) || lo));
+  return lo + Math.floor(Math.random() * (hi - lo + 1));
+}
+
+function ensureBotPacingState(round) {
+  if (!round.botPacing || typeof round.botPacing !== 'object') {
+    round.botPacing = { firstActionDoneById: {} };
+  }
+  if (!round.botPacing.firstActionDoneById || typeof round.botPacing.firstActionDoneById !== 'object') {
+    round.botPacing.firstActionDoneById = {};
+  }
+  return round.botPacing;
+}
+
+function markBotActionCompleted(match, botId) {
+  if (!match?.round || !botId) return;
+  const pacing = ensureBotPacingState(match.round);
+  pacing.firstActionDoneById[botId] = true;
+}
+
+function botTurnDelayMs(match, botId) {
+  if (!match?.round || !botId) return randomIntInclusive(BOT_ACTION_DELAY_MIN_MS, BOT_ACTION_DELAY_MAX_MS);
+  const pacing = ensureBotPacingState(match.round);
+  const botStartsRound = match.round.firstActionPlayerId === botId;
+  const firstDecisionPending = botStartsRound && !match.round.firstActionTaken && !pacing.firstActionDoneById[botId];
+  if (
+    match.phase === PHASES.ACTION_TURN &&
+    match.round.turnPlayerId === botId &&
+    firstDecisionPending
+  ) {
+    return randomIntInclusive(BOT_FIRST_ACTION_DELAY_MIN_MS, BOT_FIRST_ACTION_DELAY_MAX_MS);
+  }
+  return randomIntInclusive(BOT_ACTION_DELAY_MIN_MS, BOT_ACTION_DELAY_MAX_MS);
 }
 
 function nowIso() {
@@ -888,8 +929,8 @@ function buildClientState(match, viewerId) {
           outcome: hand.outcome || null,
           cards: hand.cards.map((card, idx) => {
             const hiddenToViewer = !isViewer && !revealAllTotals && idx > 0;
-            if (hiddenToViewer) return { hidden: true };
-            return { rank: card.rank, suit: card.suit };
+            if (hiddenToViewer) return { id: card.id || null, hidden: true };
+            return { id: card.id || null, rank: card.rank, suit: card.suit };
           }),
           naturalBlackjack: Boolean(hand.naturalBlackjack)
         };
@@ -1280,6 +1321,7 @@ function startRound(match) {
       [p2]: false
     },
     pendingPressure: null,
+    botPacing: { firstActionDoneById: {} },
     resultChoiceByPlayer: {},
     firstActionPlayerId: null,
     turnPlayerId: null,
@@ -1849,6 +1891,7 @@ function scheduleBotTurn(match) {
     botTurnTimers.delete(match.id);
   }
 
+  const delay = botTurnDelayMs(match, botId);
   const timer = setTimeout(() => {
     if (!matches.has(match.id)) return;
 
@@ -1860,6 +1903,7 @@ function scheduleBotTurn(match) {
       const decision = chooseBotPressureDecision(match, botId);
       const result = applyPressureDecision(match, botId, decision);
       if (!result.error) {
+        markBotActionCompleted(match, botId);
         pushMatchState(match);
         db.write();
         scheduleBotTurn(match);
@@ -1877,11 +1921,12 @@ function scheduleBotTurn(match) {
       const fallback = applyAction(match, botId, 'stand');
       if (fallback.error) return;
     }
+    markBotActionCompleted(match, botId);
 
     pushMatchState(match);
     db.write();
     scheduleBotTurn(match);
-  }, 650);
+  }, delay);
 
   botTurnTimers.set(match.id, timer);
 }

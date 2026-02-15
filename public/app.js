@@ -195,6 +195,17 @@ const state = {
   confirmActionModal: null,
   emoteCooldownUntil: 0,
   pendingNavAfterLeave: null,
+  cardAnimState: {
+    enterUntilById: {},
+    revealUntilById: {},
+    shiftUntilById: {},
+    tiltById: {}
+  },
+  pressureGlow: {
+    key: '',
+    expiresAt: 0,
+    seen: true
+  },
   turnTimerFreezeKey: '',
   turnTimerFreezeRemainingMs: null,
   roundResultChoicePending: false
@@ -246,6 +257,101 @@ function formatCooldown(ms) {
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function prefersReducedMotion() {
+  return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+function pruneCardAnimState(now = Date.now()) {
+  const anim = state.cardAnimState;
+  for (const bucket of [anim.enterUntilById, anim.revealUntilById, anim.shiftUntilById]) {
+    for (const [cardId, until] of Object.entries(bucket)) {
+      if (until <= now) delete bucket[cardId];
+    }
+  }
+  for (const cardId of Object.keys(anim.tiltById)) {
+    if (!anim.enterUntilById[cardId]) delete anim.tiltById[cardId];
+  }
+}
+
+function cardSnapshot(match) {
+  const byId = {};
+  if (!match?.players || !Array.isArray(match?.playerIds)) return byId;
+  for (const playerId of match.playerIds) {
+    const hands = match.players?.[playerId]?.hands || [];
+    for (let handIndex = 0; handIndex < hands.length; handIndex += 1) {
+      const cards = hands[handIndex]?.cards || [];
+      for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
+        const card = cards[cardIndex];
+        if (!card || typeof card.id !== 'string' || !card.id) continue;
+        byId[card.id] = {
+          playerId,
+          handIndex,
+          cardIndex,
+          visible: !card.hidden
+        };
+      }
+    }
+  }
+  return byId;
+}
+
+function updateCardAnimationState(previousMatch, nextMatch) {
+  const now = Date.now();
+  const anim = state.cardAnimState;
+  pruneCardAnimState(now);
+  if (prefersReducedMotion()) {
+    anim.enterUntilById = {};
+    anim.revealUntilById = {};
+    anim.shiftUntilById = {};
+    anim.tiltById = {};
+    return;
+  }
+  const previous = cardSnapshot(previousMatch);
+  const next = cardSnapshot(nextMatch);
+  for (const [cardId, nextPos] of Object.entries(next)) {
+    const prevPos = previous[cardId];
+    if (!prevPos) {
+      anim.enterUntilById[cardId] = now + 560;
+      anim.tiltById[cardId] = ((Math.random() * 2) - 1) * 3.4;
+      continue;
+    }
+    if (prevPos.visible === false && nextPos.visible === true) {
+      anim.revealUntilById[cardId] = now + 520;
+    }
+    if (prevPos.playerId !== nextPos.playerId || prevPos.handIndex !== nextPos.handIndex) {
+      anim.shiftUntilById[cardId] = now + 500;
+    }
+  }
+}
+
+function cardAnimationMeta(card) {
+  const cardId = typeof card?.id === 'string' ? card.id : '';
+  if (!cardId) {
+    return {
+      cardId: '',
+      isEntering: false,
+      isRevealing: false,
+      isShifting: false,
+      tiltDeg: 0
+    };
+  }
+  const now = Date.now();
+  const anim = state.cardAnimState;
+  return {
+    cardId,
+    isEntering: (anim.enterUntilById[cardId] || 0) > now,
+    isRevealing: (anim.revealUntilById[cardId] || 0) > now,
+    isShifting: (anim.shiftUntilById[cardId] || 0) > now,
+    tiltDeg: Number(anim.tiltById[cardId] || 0)
+  };
+}
+
+function pressureGlowKey(match, pressure, viewerId) {
+  if (!match || !pressure || !viewerId) return '';
+  const indices = Array.isArray(pressure.affectedHandIndices) ? pressure.affectedHandIndices.join(',') : '';
+  return `${match.id}:${match.roundNumber}:${viewerId}:${pressure.initiatorId}:${pressure.type}:${pressure.delta}:${indices}`;
 }
 
 function toValidIso(value) {
@@ -607,7 +713,9 @@ function connectSocket() {
     render();
   });
   state.socket.on('match:state', (match) => {
+    const previousMatch = state.currentMatch;
     const previousRound = state.currentMatch?.roundNumber || 0;
+    updateCardAnimationState(previousMatch, match);
     state.currentMatch = match;
     state.leaveMatchModal = false;
     const myChoice = state.me?.id ? match?.resultChoiceByPlayer?.[state.me.id] : null;
@@ -668,6 +776,8 @@ function connectSocket() {
     setStatus(reason);
     state.currentMatch = null;
     state.currentLobby = null;
+    state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
+    state.pressureGlow = { key: '', expiresAt: 0, seen: true };
     state.leaveMatchModal = false;
     const target = state.pendingNavAfterLeave || 'home';
     state.pendingNavAfterLeave = null;
@@ -1387,6 +1497,8 @@ function logout() {
   state.challengeResets = { hourly: null, daily: null, weekly: null };
   state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
   state.challengeResetRefreshInFlight = false;
+  state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
+  state.pressureGlow = { key: '', expiresAt: 0, seen: true };
   state.revealPin = false;
   state.newPin = '';
   localStorage.removeItem('bb_token');
@@ -2377,9 +2489,19 @@ function renderSuitIcon(suit, className = '') {
 }
 
 function renderPlayingCard(card, cardIndex = 0) {
+  const anim = cardAnimationMeta(card);
+  const animationClasses = [];
+  if (anim.isEntering) animationClasses.push('card-enter');
+  if (anim.isRevealing) animationClasses.push('card-reveal');
+  if (anim.isShifting) animationClasses.push('card-shift');
+  const styleTokens = [`--card-enter-delay:${cardIndex * 35}ms`];
+  if (anim.cardId) styleTokens.push(`--card-enter-rot:${anim.tiltDeg.toFixed(2)}deg`);
+  const styleAttr = `style="${styleTokens.join(';')}"`;
+  const idAttr = anim.cardId ? `data-card-id="${anim.cardId}"` : '';
+
   if (card.hidden) {
     return `
-      <div class="playing-card hidden deal-in" style="animation-delay:${cardIndex * 40}ms" aria-label="Face-down card">
+      <div class="playing-card hidden ${animationClasses.join(' ')}" ${styleAttr} ${idAttr} aria-label="Face-down card">
         <div class="card-back-inner">
           <span class="card-back-mark">BB</span>
         </div>
@@ -2390,7 +2512,7 @@ function renderPlayingCard(card, cardIndex = 0) {
   const isRed = card.suit === 'H' || card.suit === 'D';
   const colorClass = isRed ? 'red' : 'black';
   return `
-    <article class="playing-card face ${colorClass} deal-in flip-in" style="animation-delay:${cardIndex * 40}ms" aria-label="${card.rank} of ${suitLabel(card.suit)}">
+    <article class="playing-card face ${colorClass} ${animationClasses.join(' ')}" ${styleAttr} ${idAttr} aria-label="${card.rank} of ${suitLabel(card.suit)}">
       <div class="card-face-sheen"></div>
       <div class="corner top">
         <span class="rank">${card.rank}</span>
@@ -2412,6 +2534,7 @@ function renderMatch() {
     goToView('home');
     return render();
   }
+  pruneCardAnimState();
 
   const myState = match.players[me.id];
   const oppId = getOpponentId();
@@ -2461,11 +2584,14 @@ function renderMatch() {
   const draftBet = sanitizeInt(state.betInputDraft);
   const effectiveBet = hasBetDraft ? draftBet : sanitizeInt(state.currentBet);
   const isBetValid = Number.isInteger(effectiveBet) && effectiveBet >= minBet && effectiveBet <= maxBet;
+  const opponentThinking = Boolean(!canAct && !waitingPressure && isBotOpponent && match.phase === 'ACTION_TURN' && match.currentTurn === oppId);
   const actionHint = canAct
     ? 'Choose an action for your active hand.'
     : waitingPressure
       ? 'Respond to pressure: Match or Surrender.'
-      : 'Waiting for next turn.';
+      : opponentThinking
+        ? 'Opponent thinking...'
+        : 'Waiting for next turn.';
   const pressureMine = waitingPressure ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const pressureOpp = pressure && pressure.opponentId === oppId ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const turnTimerState = getTurnTimerState(match);
@@ -2781,6 +2907,7 @@ function syncPressureOverlay() {
   const match = state.currentMatch;
   const me = state.me;
   if (!match || !me || state.view !== 'match' || !match.pendingPressure) {
+    state.pressureGlow = { key: '', expiresAt: 0, seen: true };
     mount.innerHTML = '';
     return;
   }
@@ -2788,9 +2915,24 @@ function syncPressureOverlay() {
   const pressure = match.pendingPressure;
   const waitingPressure = pressure?.opponentId === me.id;
   const initiatorName = playerName(pressure.initiatorId);
+  const glowKey = waitingPressure ? pressureGlowKey(match, pressure, me.id) : '';
+  if (waitingPressure && state.pressureGlow.key !== glowKey) {
+    state.pressureGlow = {
+      key: glowKey,
+      expiresAt: Date.now() + 5000,
+      seen: false
+    };
+  } else if (!waitingPressure) {
+    state.pressureGlow = {
+      key: '',
+      expiresAt: 0,
+      seen: true
+    };
+  }
+  const shouldPulse = waitingPressure && !state.pressureGlow.seen && Date.now() < state.pressureGlow.expiresAt;
 
   mount.innerHTML = `
-    <div class="pressure-overlay-wrap">
+    <div class="pressure-overlay-wrap ${shouldPulse ? 'is-attention' : ''}">
       <div class="pressure-overlay card">
         <strong>Pressure Bet Response Required</strong>
         <div class="muted">${initiatorName} used <strong>${pressure.type}</strong>.</div>
@@ -2798,8 +2940,8 @@ function syncPressureOverlay() {
           waitingPressure
             ? `<div class="muted">Match +${pressure.delta} or surrender this hand.</div>
                <div class="pressure-actions">
-                 <button class="primary" id="pressureOverlayMatch">Match Bet</button>
-                 <button class="warn" id="pressureOverlaySurrender">Surrender Hand</button>
+                 <button class="primary ${shouldPulse ? 'attention-pulse' : ''}" id="pressureOverlayMatch">Match Bet</button>
+                 <button class="warn ${shouldPulse ? 'attention-pulse' : ''}" id="pressureOverlaySurrender">Surrender Hand</button>
                </div>`
             : '<div class="muted">Waiting for opponent decision...</div>'
         }
@@ -2808,9 +2950,21 @@ function syncPressureOverlay() {
   `;
 
   const matchBtn = document.getElementById('pressureOverlayMatch');
-  if (matchBtn) matchBtn.onclick = () => emitPressureDecision('match');
+  if (matchBtn) {
+    matchBtn.onclick = () => {
+      state.pressureGlow.seen = true;
+      syncPressureOverlay();
+      emitPressureDecision('match');
+    };
+  }
   const surrenderBtn = document.getElementById('pressureOverlaySurrender');
-  if (surrenderBtn) surrenderBtn.onclick = () => emitPressureDecision('surrender');
+  if (surrenderBtn) {
+    surrenderBtn.onclick = () => {
+      state.pressureGlow.seen = true;
+      syncPressureOverlay();
+      emitPressureDecision('surrender');
+    };
+  }
 }
 
 function render() {

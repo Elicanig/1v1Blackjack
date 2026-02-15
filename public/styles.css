@@ -1578,18 +1578,24 @@ select:focus-visible {
   color: rgba(243, 227, 190, 0.88);
 }
 
-.deal-in {
-  animation: dealIn 280ms ease-out both;
+.card-enter {
+  animation: cardEnter 360ms cubic-bezier(.2, .78, .26, 1) both;
+  animation-delay: var(--card-enter-delay, 0ms);
 }
 
-.flip-in {
-  animation: dealIn 280ms ease-out both, cardFlipReveal 320ms ease-out both;
+.card-reveal {
+  animation: cardFlipReveal 360ms ease-out both;
+  animation-delay: var(--card-enter-delay, 0ms);
 }
 
-@keyframes dealIn {
+.card-shift {
+  animation: cardShift 340ms ease-out both;
+}
+
+@keyframes cardEnter {
   from {
     opacity: 0;
-    transform: translate3d(0, -10px, 0) rotate(-2deg) scale(0.98);
+    transform: translate3d(0, -12px, 0) rotate(var(--card-enter-rot, -2deg)) scale(0.965);
   }
   to {
     opacity: 1;
@@ -1599,12 +1605,21 @@ select:focus-visible {
 
 @keyframes cardFlipReveal {
   from {
-    transform: perspective(680px) rotateY(-18deg) translate3d(0, -10px, 0) scale(0.98);
+    transform: perspective(680px) rotateY(-18deg) translate3d(0, -9px, 0) scale(0.98);
     filter: brightness(0.92);
   }
   to {
     transform: perspective(680px) rotateY(0deg) translate3d(0, 0, 0) scale(1);
     filter: brightness(1);
+  }
+}
+
+@keyframes cardShift {
+  from {
+    transform: translate3d(-10px, -4px, 0) scale(0.985);
+  }
+  to {
+    transform: translate3d(0, 0, 0) scale(1);
   }
 }
 
@@ -1867,6 +1882,26 @@ select:focus-visible {
   box-shadow: var(--shadow-md);
   pointer-events: auto;
   animation: overlayIn 180ms ease-out;
+}
+
+.pressure-overlay-wrap.is-attention .pressure-overlay {
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 1px rgba(212, 175, 55, 0.22),
+    0 0 18px rgba(212, 175, 55, 0.24);
+}
+
+.attention-pulse {
+  animation: glowPulse 1.2s ease-in-out 4;
+}
+
+@keyframes glowPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(214, 176, 95, 0), 0 0 0 0 rgba(214, 176, 95, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 1px rgba(214, 176, 95, 0.38), 0 0 18px 2px rgba(214, 176, 95, 0.24);
+  }
 }
 
 .modal {
@@ -2235,8 +2270,10 @@ select:focus-visible {
   .bg::before,
   .bg::after,
   .noise,
-  .deal-in,
-  .flip-in,
+  .card-enter,
+  .card-reveal,
+  .card-shift,
+  .attention-pulse,
   .match-shell::before,
   .match-shell::after,
   .turn-timer.is-urgent .turn-timer-seconds,
