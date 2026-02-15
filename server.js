@@ -47,7 +47,6 @@ const DISCONNECT_TIMEOUT_MS = 60_000;
 const BOT_BET_CONFIRM_MIN_MS = 200;
 const BOT_BET_CONFIRM_MAX_MS = 600;
 const ROUND_REVEAL_MS = 2200;
-const ROUND_RESULT_MS = 1700;
 const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
 const PATCH_REPO = 'Elicanig/1v1Blackjack';
 const FRIEND_INVITE_TTL_MS = 30 * 60 * 1000;
@@ -904,6 +903,7 @@ function buildClientState(match, viewerId) {
     allInPlayers: round.allInPlayers,
     firstActionPlayerId: round.firstActionPlayerId,
     roundResult: round.resultByPlayer?.[viewerId] || null,
+    resultChoiceByPlayer: round.resultChoiceByPlayer || {},
     players,
     disconnects: match.playerIds.reduce((acc, pid) => {
       acc[pid] = {
@@ -1098,6 +1098,7 @@ function startRound(match) {
       [p2]: false
     },
     pendingPressure: null,
+    resultChoiceByPlayer: {},
     firstActionPlayerId: null,
     turnPlayerId: null,
     resultByPlayer: null,
@@ -1446,21 +1447,43 @@ function resolveRound(match) {
   const revealTimer = setTimeout(() => {
     if (!matches.has(match.id)) return;
     match.phase = PHASES.RESULT;
+    match.round.resultChoiceByPlayer = {};
     pushMatchState(match);
     emitToUser(aId, 'round:result', match.round.resultByPlayer[aId]);
     emitToUser(bId, 'round:result', match.round.resultByPlayer[bId]);
-
-    const resultTimer = setTimeout(() => {
-      if (!matches.has(match.id)) return;
-      match.phase = PHASES.NEXT_ROUND;
-      pushMatchState(match);
-      match.startingPlayerIndex = (match.startingPlayerIndex + 1) % 2;
-      startRound(match);
-      roundPhaseTimers.delete(match.id);
-    }, ROUND_RESULT_MS);
-    roundPhaseTimers.set(match.id, resultTimer);
+    roundPhaseTimers.delete(match.id);
   }, ROUND_REVEAL_MS);
   roundPhaseTimers.set(match.id, revealTimer);
+}
+
+function applyRoundResultChoice(match, playerId, choice) {
+  if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.RESULT) return { error: 'Round result is not ready' };
+  if (!['next', 'betting'].includes(choice)) return { error: 'Invalid round choice' };
+
+  if (!match.round.resultChoiceByPlayer) match.round.resultChoiceByPlayer = {};
+  match.round.resultChoiceByPlayer[playerId] = choice;
+
+  const botId = match.playerIds.find((id) => isBotPlayer(id));
+  if (botId && !match.round.resultChoiceByPlayer[botId]) {
+    match.round.resultChoiceByPlayer[botId] = choice;
+  }
+
+  const allChosen = match.playerIds.every((pid) => Boolean(match.round.resultChoiceByPlayer?.[pid]));
+  if (!allChosen) return { ok: true, waiting: true };
+
+  const everyoneNext = match.playerIds.every((pid) => match.round.resultChoiceByPlayer?.[pid] === 'next');
+  match.startingPlayerIndex = (match.startingPlayerIndex + 1) % 2;
+  startRound(match);
+
+  if (everyoneNext) {
+    for (const pid of match.playerIds) {
+      match.round.betConfirmedByPlayer[pid] = true;
+    }
+    maybeBeginRoundAfterBetConfirm(match);
+  }
+
+  return { ok: true, advanced: true, mode: everyoneNext ? 'next' : 'betting' };
 }
 
 function maybeEndRound(match) {
@@ -2775,6 +2798,34 @@ io.on('connection', (socket) => {
     return null;
   });
 
+  socket.on('match:nextRound', (payload = {}) => {
+    const { matchId } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    if (!match.playerIds.includes(userId)) return socket.emit('match:error', { error: 'Unauthorized' });
+    const result = applyRoundResultChoice(match, userId, 'next');
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    scheduleBotBetConfirm(match);
+    scheduleBotTurn(match);
+    return null;
+  });
+
+  socket.on('match:changeBet', (payload = {}) => {
+    const { matchId } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    if (!match.playerIds.includes(userId)) return socket.emit('match:error', { error: 'Unauthorized' });
+    const result = applyRoundResultChoice(match, userId, 'betting');
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    scheduleBotBetConfirm(match);
+    scheduleBotTurn(match);
+    return null;
+  });
+
   socket.on('match:pressureDecision', (payload = {}) => {
     const { matchId, decision } = payload;
     const match = matches.get(matchId);
@@ -2885,6 +2936,7 @@ export {
   applyAction,
   applyBaseBetSelection,
   confirmBaseBet,
+  applyRoundResultChoice,
   applyPressureDecision,
   newHand,
   hasPlayableHand,

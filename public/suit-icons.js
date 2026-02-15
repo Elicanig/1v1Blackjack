@@ -1,18 +1,20 @@
 const SUIT_PATHS = {
   H: `
-    <path d="M12 21.3c-.28 0-.55-.1-.76-.28C8.89 18.97 4 15.2 4 10.33 4 7.37 6.34 5 9.21 5c1.13 0 2.24.48 3.08 1.31A4.2 4.2 0 0 1 15.38 5C18.45 5 21 7.45 21 10.43c0 4.77-4.86 8.52-7.2 10.58a1.1 1.1 0 0 1-.8.3z"/>
+    <path d="M50 88C46.8 85.1 12 59.6 12 33.6C12 20.6 21.8 11 34 11C40.3 11 46.1 13.6 50 18.1C53.9 13.6 59.7 11 66 11C78.2 11 88 20.6 88 33.6C88 59.6 53.2 85.1 50 88Z"/>
   `,
   D: `
-    <path d="M12 2.4 20.2 12 12 21.6 3.8 12z"/>
+    <path d="M50 8L84 50L50 92L16 50Z"/>
   `,
   C: `
-    <circle cx="12" cy="7.1" r="3.55"/>
-    <circle cx="7.7" cy="12.1" r="3.55"/>
-    <circle cx="16.3" cy="12.1" r="3.55"/>
-    <path d="M11.22 14.55h1.56v5.15H15V22H9v-2.3h2.22z"/>
+    <circle cx="50" cy="28.5" r="16.5"/>
+    <circle cx="31" cy="53" r="16.5"/>
+    <circle cx="69" cy="53" r="16.5"/>
+    <path d="M44 57.5C44 64.4 42.5 71.5 36.6 80H63.4C57.5 71.5 56 64.4 56 57.5H44Z"/>
+    <rect x="39" y="80" width="22" height="11" rx="5.5" ry="5.5"/>
   `,
   S: `
-    <path d="M12 2.35c-.28 0-.55.1-.75.31-2.95 3.1-6.72 6.02-6.72 9.88 0 2.47 1.89 4.48 4.21 4.48 1.27 0 2.42-.61 3.26-1.6V22H9.9v2.35h6.2V22H14v-6.58c.84.99 2 1.6 3.26 1.6 2.32 0 4.21-2.01 4.21-4.48 0-3.86-3.77-6.78-6.72-9.88a1.06 1.06 0 0 0-.75-.31z"/>
+    <path d="M50 11C45.2 19.2 37.9 27.3 30.7 33.7C23.9 39.8 17 45.9 17 56.4C17 67 25.6 75.5 36.2 75.5C42.1 75.5 47.3 72.9 50 68.8C52.7 72.9 57.9 75.5 63.8 75.5C74.4 75.5 83 67 83 56.4C83 45.9 76.1 39.8 69.3 33.7C62.1 27.3 54.8 19.2 50 11Z"/>
+    <path d="M44.5 73.5C44.5 79.5 43.2 85.2 38.8 92H61.2C56.8 85.2 55.5 79.5 55.5 73.5H44.5Z"/>
   `
 };
 
@@ -20,7 +22,7 @@ export function renderSuitIconSvg(suit, className = '') {
   const iconClass = className ? `suit-icon ${className}` : 'suit-icon';
   const key = SUIT_PATHS[suit] ? suit : 'S';
   return `
-    <svg class="${iconClass}" viewBox="0 0 24 24" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
+    <svg class="${iconClass}" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
       ${SUIT_PATHS[key]}
     </svg>
   `;

@@ -192,7 +192,7 @@ const state = {
   pendingNavAfterLeave: null,
   turnTimerFreezeKey: '',
   turnTimerFreezeRemainingMs: null,
-  dismissedRoundResultKey: ''
+  roundResultChoicePending: false
 };
 
 let freeClaimTicker = null;
@@ -545,9 +545,11 @@ function connectSocket() {
     const previousRound = state.currentMatch?.roundNumber || 0;
     state.currentMatch = match;
     state.leaveMatchModal = false;
+    const myChoice = state.me?.id ? match?.resultChoiceByPlayer?.[state.me.id] : null;
+    state.roundResultChoicePending = Boolean(match.phase === 'RESULT' && myChoice);
     if (match.roundNumber > previousRound && match.phase !== 'RESULT') {
       state.roundResultBanner = null;
-      state.dismissedRoundResultKey = '';
+      state.roundResultChoicePending = false;
     }
     const myBankroll = match.players?.[state.me?.id]?.bankroll;
     if (state.me && Number.isFinite(myBankroll)) {
@@ -573,7 +575,7 @@ function connectSocket() {
     const key = `${matchId}:${roundNumber}`;
     if (state.lastRoundResultKey === key) return;
     state.lastRoundResultKey = key;
-    state.dismissedRoundResultKey = '';
+    state.roundResultChoicePending = false;
     state.roundResultBanner = {
       matchId,
       roundNumber,
@@ -835,6 +837,16 @@ function emitSetBaseBet(amount) {
 function emitConfirmBet() {
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:confirmBet', { matchId: state.currentMatch.id });
+}
+
+function emitNextRoundChoice() {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('match:nextRound', { matchId: state.currentMatch.id });
+}
+
+function emitChangeBetChoice() {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('match:changeBet', { matchId: state.currentMatch.id });
 }
 
 function emitLeaveMatch() {
@@ -1327,16 +1339,14 @@ function syncRoundResultModal() {
     mount.innerHTML = '';
     return;
   }
-  const resultKey = `${result.matchId || match?.id || 'match'}:${result.roundNumber || match?.roundNumber || 0}`;
-  if (state.dismissedRoundResultKey === resultKey) {
-    mount.innerHTML = '';
-    return;
-  }
   const delta = result.deltaChips || 0;
   const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
   const bankroll = Number.isFinite(state.bankrollDisplay) ? Math.round(state.bankrollDisplay) : state.me?.chips || 0;
   const headline = result.outcome === 'win' ? 'WIN' : result.outcome === 'lose' ? 'LOSE' : 'PUSH';
   const subtitle = result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push');
+  const meId = state.me?.id;
+  const alreadySelected = Boolean(meId && match?.resultChoiceByPlayer?.[meId]);
+  const busy = state.roundResultChoicePending || alreadySelected;
   mount.innerHTML = `
     <div class="round-result-wrap">
       <div class="round-result-popup result-modal card">
@@ -1345,27 +1355,26 @@ function syncRoundResultModal() {
         <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${Math.abs(delta)}</div>
         <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
         <div class="result-actions">
-          <button id="roundResultNextBtn" class="primary">Next Round</button>
-          <button id="roundResultLobbyBtn" class="ghost">Back to Lobby</button>
+          <button id="roundResultNextBtn" class="primary" ${busy ? 'disabled' : ''}>Next Round</button>
+          <button id="roundResultChangeBetBtn" class="ghost" ${busy ? 'disabled' : ''}>Change Bet</button>
         </div>
+        ${busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : ''}
       </div>
     </div>
   `;
   const nextBtn = document.getElementById('roundResultNextBtn');
   if (nextBtn) {
     nextBtn.onclick = () => {
-      state.dismissedRoundResultKey = resultKey;
-      state.roundResultBanner = null;
+      state.roundResultChoicePending = true;
+      emitNextRoundChoice();
       render();
     };
   }
-  const lobbyBtn = document.getElementById('roundResultLobbyBtn');
-  if (lobbyBtn) {
-    lobbyBtn.onclick = () => {
-      state.dismissedRoundResultKey = resultKey;
-      state.roundResultBanner = null;
-      state.pendingNavAfterLeave = 'lobbies';
-      emitLeaveMatch();
+  const changeBetBtn = document.getElementById('roundResultChangeBetBtn');
+  if (changeBetBtn) {
+    changeBetBtn.onclick = () => {
+      state.roundResultChoicePending = true;
+      emitChangeBetChoice();
       render();
     };
   }

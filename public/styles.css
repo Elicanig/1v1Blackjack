@@ -1481,16 +1481,22 @@ select:focus-visible {
 }
 
 .suit-icon {
-  width: 13px;
-  height: 13px;
+  --suit-size: 13px;
+  width: var(--suit-size);
+  height: auto;
+  aspect-ratio: 1 / 1;
   display: block;
   fill: currentColor;
   shape-rendering: geometricPrecision;
+  flex: 0 0 auto;
+}
+
+.suit-icon.corner-suit {
+  --suit-size: 13px;
 }
 
 .suit-icon.center-suit-icon {
-  width: clamp(28px, 4.4vw, 42px);
-  height: clamp(28px, 4.4vw, 42px);
+  --suit-size: clamp(28px, 4.4vw, 42px);
   opacity: 0.82;
 }
 
