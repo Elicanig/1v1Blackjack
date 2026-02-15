@@ -35,6 +35,12 @@ const STARTING_CHIPS = 1000;
 const BASE_BET = 5;
 const MIN_BET = 5;
 const MAX_BET_CAP = 500;
+const BOT_UNLIMITED_BANKROLL = 1_000_000_000;
+const BOT_BET_LIMITS = {
+  easy: { min: 1, max: 250 },
+  medium: { min: 100, max: 500 },
+  normal: { min: 500, max: 2000 }
+};
 const DAILY_REWARD = 100;
 const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DISCONNECT_TIMEOUT_MS = 60_000;
@@ -47,7 +53,7 @@ const PATCH_REPO = 'Elicanig/1v1Blackjack';
 const FRIEND_INVITE_TTL_MS = 30 * 60 * 1000;
 const EMOTE_COOLDOWN_MS = 5000;
 const FRIEND_CHALLENGE_TTL_MS = 10 * 60 * 1000;
-const TURN_TIMEOUT_MS = 20_000;
+const TURN_TIMEOUT_MS = 30_000;
 const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -321,15 +327,29 @@ const RULES = {
   BOTH_BUST_IS_PUSH: true,
   SURRENDER_LOSS_FRACTION: 0.75,
   MAX_SPLITS: 3,
-  MAX_DOUBLES_PER_HAND: 2,
+  MAX_HANDS_PER_PLAYER: 4,
+  MAX_DOUBLES_PER_HAND: 1,
   ALL_IN_ON_INSUFFICIENT_BASE_BET: true
 };
 
-function clampBet(amount, balance = MAX_BET_CAP) {
+function getBetLimitsForDifficulty(difficulty = 'normal') {
+  return BOT_BET_LIMITS[difficulty] || BOT_BET_LIMITS.normal;
+}
+
+function clampBet(amount, balance = MAX_BET_CAP, limits = { min: MIN_BET, max: MAX_BET_CAP }) {
   const numeric = Number(amount);
   if (!Number.isFinite(numeric)) return BASE_BET;
-  const bounded = Math.max(MIN_BET, Math.min(MAX_BET_CAP, Math.floor(numeric)));
+  const min = Math.max(1, Math.floor(Number(limits?.min ?? MIN_BET)));
+  const max = Math.max(min, Math.floor(Number(limits?.max ?? MAX_BET_CAP)));
+  const bounded = Math.max(min, Math.min(max, Math.floor(numeric)));
   return Math.min(bounded, Math.max(0, Math.floor(balance)));
+}
+
+function getMatchBetLimits(match) {
+  const botId = match?.playerIds?.find((id) => isBotPlayer(id));
+  if (!botId) return { min: MIN_BET, max: MAX_BET_CAP };
+  const difficulty = getBotDifficulty(match, botId);
+  return getBetLimitsForDifficulty(difficulty);
 }
 
 function isBotPlayer(playerId) {
@@ -633,26 +653,23 @@ function buildFriendsPayload(user) {
 }
 
 function getParticipantChips(match, playerId) {
+  if (isBotPlayer(playerId)) {
+    return BOT_UNLIMITED_BANKROLL;
+  }
   if (match?.isPractice && match.practiceBankrollById) {
     return match.practiceBankrollById[playerId] ?? STARTING_CHIPS;
-  }
-  if (isBotPlayer(playerId)) {
-    return match.bot?.chipsById?.[playerId] ?? STARTING_CHIPS;
   }
   return getUserById(playerId)?.chips ?? STARTING_CHIPS;
 }
 
 function setParticipantChips(match, playerId, chips) {
+  if (isBotPlayer(playerId)) {
+    return;
+  }
   const safe = Math.max(0, Math.floor(chips));
   if (match?.isPractice) {
     if (!match.practiceBankrollById) match.practiceBankrollById = {};
     match.practiceBankrollById[playerId] = safe;
-    return;
-  }
-  if (isBotPlayer(playerId)) {
-    if (!match.bot) match.bot = { difficultyById: {}, chipsById: {} };
-    if (!match.bot.chipsById) match.bot.chipsById = {};
-    match.bot.chipsById[playerId] = safe;
     return;
   }
   const user = getUserById(playerId);
@@ -660,6 +677,7 @@ function setParticipantChips(match, playerId, chips) {
 }
 
 function canAffordIncrement(match, playerId, amount) {
+  if (isBotPlayer(playerId)) return true;
   return getParticipantChips(match, playerId) >= amount;
 }
 
@@ -814,6 +832,7 @@ function clearRoundPhaseTimer(matchId) {
 // Build per-viewer sanitized state to avoid leaking opponent hole/hit cards.
 function buildClientState(match, viewerId) {
   const round = match.round;
+  const betLimits = getMatchBetLimits(match);
   const players = {};
   const revealAllTotals =
     match.phase === PHASES.ROUND_RESOLVE ||
@@ -876,14 +895,16 @@ function buildClientState(match, viewerId) {
       !round.betConfirmedByPlayer?.[viewerId],
     canConfirmBet: match.phase === PHASES.ROUND_INIT && !round.betConfirmedByPlayer?.[viewerId],
     betConfirmedByPlayer: round.betConfirmedByPlayer,
-    minBet: MIN_BET,
+    minBet: betLimits.min,
     maxDoublesPerHand: RULES.MAX_DOUBLES_PER_HAND,
-    maxBetCap: MAX_BET_CAP,
+    maxBetCap: betLimits.max,
+    maxHandsPerPlayer: RULES.MAX_HANDS_PER_PLAYER,
     betControllerId: match.betControllerId,
     postedBetByPlayer: round.postedBetByPlayer,
     allInPlayers: round.allInPlayers,
     firstActionPlayerId: round.firstActionPlayerId,
     roundResult: round.resultByPlayer?.[viewerId] || null,
+    resultChoiceByPlayer: round.resultChoiceByPlayer || {},
     players,
     disconnects: match.playerIds.reduce((acc, pid) => {
       acc[pid] = {
@@ -1054,11 +1075,12 @@ function recordSkillEvent(user, event, amount = 1) {
 
 function startRound(match) {
   const [p1, p2] = match.playerIds;
+  const betLimits = getMatchBetLimits(match);
   const controllerId = match.betControllerId || p1;
   const controllerBalance = getParticipantChips(match, controllerId);
   const desiredBase = match.betSettings?.selectedBetById?.[controllerId] || BASE_BET;
-  const proposedBase = clampBet(desiredBase, controllerBalance || MIN_BET);
-  const baseBet = Math.max(1, proposedBase || MIN_BET);
+  const proposedBase = clampBet(desiredBase, controllerBalance || betLimits.min, betLimits);
+  const baseBet = Math.max(betLimits.min, proposedBase || betLimits.min);
 
   match.round = {
     deck: [],
@@ -1077,6 +1099,7 @@ function startRound(match) {
       [p2]: false
     },
     pendingPressure: null,
+    resultChoiceByPlayer: {},
     firstActionPlayerId: null,
     turnPlayerId: null,
     resultByPlayer: null,
@@ -1425,21 +1448,44 @@ function resolveRound(match) {
   const revealTimer = setTimeout(() => {
     if (!matches.has(match.id)) return;
     match.phase = PHASES.RESULT;
+    match.round.resultChoiceByPlayer = {};
     pushMatchState(match);
     emitToUser(aId, 'round:result', match.round.resultByPlayer[aId]);
     emitToUser(bId, 'round:result', match.round.resultByPlayer[bId]);
-
-    const resultTimer = setTimeout(() => {
-      if (!matches.has(match.id)) return;
-      match.phase = PHASES.NEXT_ROUND;
-      pushMatchState(match);
-      match.startingPlayerIndex = (match.startingPlayerIndex + 1) % 2;
-      startRound(match);
-      roundPhaseTimers.delete(match.id);
-    }, ROUND_RESULT_MS);
-    roundPhaseTimers.set(match.id, resultTimer);
+    roundPhaseTimers.delete(match.id);
   }, ROUND_REVEAL_MS);
   roundPhaseTimers.set(match.id, revealTimer);
+}
+
+function applyRoundResultChoice(match, playerId, choice) {
+  if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.RESULT) return { error: 'Round result is not ready' };
+  if (!['next', 'betting'].includes(choice)) return { error: 'Invalid round choice' };
+
+  if (!match.round.resultChoiceByPlayer) match.round.resultChoiceByPlayer = {};
+  match.round.resultChoiceByPlayer[playerId] = choice;
+
+  const botId = match.playerIds.find((id) => isBotPlayer(id));
+  if (botId && !match.round.resultChoiceByPlayer[botId]) {
+    // Bot mirrors the player's choice so rounds don't stall waiting on bot input.
+    match.round.resultChoiceByPlayer[botId] = choice;
+  }
+
+  const allChosen = match.playerIds.every((pid) => Boolean(match.round.resultChoiceByPlayer?.[pid]));
+  if (!allChosen) return { ok: true, waiting: true };
+
+  const wantsFastNext = match.playerIds.every((pid) => match.round.resultChoiceByPlayer?.[pid] === 'next');
+  match.startingPlayerIndex = (match.startingPlayerIndex + 1) % 2;
+  startRound(match);
+
+  if (wantsFastNext) {
+    for (const pid of match.playerIds) {
+      match.round.betConfirmedByPlayer[pid] = true;
+    }
+    maybeBeginRoundAfterBetConfirm(match);
+  }
+
+  return { ok: true, advanced: true, mode: wantsFastNext ? 'next' : 'betting' };
 }
 
 function maybeEndRound(match) {
@@ -1469,8 +1515,9 @@ function progressTurn(match, actingPlayerId) {
   maybeEndRound(match);
 }
 
-function canSplit(hand) {
+function canSplit(hand, playerRoundState = null) {
   if (!hand) return false;
+  if (playerRoundState?.hands?.length >= RULES.MAX_HANDS_PER_PLAYER) return false;
   if (hand.cards.length !== 2) return false;
   if (hand.splitDepth >= RULES.MAX_SPLITS) return false;
   return hand.cards[0].rank === hand.cards[1].rank;
@@ -1481,12 +1528,12 @@ function visibleTotal(cards, hiddenFlags) {
   return handTotal(visibleCards);
 }
 
-function legalActionsForHand(hand) {
+function legalActionsForHand(hand, playerRoundState = null) {
   if (!hand || hand.locked || hand.stood || hand.bust || hand.surrendered) return [];
   const actions = ['hit', 'stand'];
   if ((hand.actionCount || 0) === 0) actions.push('surrender');
-  if ((hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
-  if (canSplit(hand)) actions.push('split');
+  if ((hand.actionCount || 0) === 0 && !hand.doubled && (hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
+  if (canSplit(hand, playerRoundState)) actions.push('split');
   return actions;
 }
 
@@ -1499,7 +1546,7 @@ function chooseBotAction(match, botId) {
   const hand = currentHand(botState);
   if (!hand) return 'stand';
 
-  const legal = legalActionsForHand(hand);
+  const legal = legalActionsForHand(hand, botState);
   if (!legal.length) return 'stand';
 
   const opponentId = nextPlayerId(match, botId);
@@ -1655,9 +1702,11 @@ function applyAction(match, playerId, action) {
   const state = match.round.players[playerId];
   const hand = currentHand(state);
   if (!hand) return { error: 'No active hand' };
+  if (hand.locked || hand.stood || hand.bust || hand.surrendered) return { error: 'Hand is already resolved' };
 
   const opponentId = nextPlayerId(match, playerId);
   const opponentState = match.round.players[opponentId];
+  const betLimits = getMatchBetLimits(match);
 
   if (action === 'hit') {
     match.round.firstActionTaken = true;
@@ -1668,8 +1717,7 @@ function applyAction(match, playerId, action) {
     if (total > 21) {
       hand.bust = true;
       hand.locked = true;
-      // Instant round resolution on bust.
-      resolveRound(match);
+      progressTurn(match, playerId);
       return { ok: true };
     }
     if (total === 21) {
@@ -1708,11 +1756,13 @@ function applyAction(match, playerId, action) {
   }
 
   if (action === 'double') {
-    if (hand.locked || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
+    if ((hand.actionCount || 0) > 0) return { error: 'Double is only available as your first action on this hand' };
+    if (hand.locked || hand.doubled || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     const delta = hand.bet;
     if (!canAffordIncrement(match, playerId, delta)) return { error: 'Insufficient chips to double' };
+    if (hand.bet * 2 > betLimits.max) return { error: `Bet cannot exceed ${betLimits.max} for this table` };
     hand.bet *= 2;
     hand.doubleCount = (hand.doubleCount || 0) + 1;
     hand.doubled = hand.doubleCount > 0;
@@ -1722,14 +1772,12 @@ function applyAction(match, playerId, action) {
     if (total > 21) {
       hand.bust = true;
       hand.locked = true;
-      // Bust ends the round immediately.
-      resolveRound(match);
+      progressTurn(match, playerId);
       return { ok: true };
     }
-    if (total >= 21 || hand.doubleCount >= RULES.MAX_DOUBLES_PER_HAND) {
-      hand.locked = true;
-      hand.stood = true;
-    }
+    // Standard double-down: exactly one card, then forced stand.
+    hand.locked = true;
+    hand.stood = true;
 
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
     match.round.pendingPressure = {
@@ -1746,7 +1794,7 @@ function applyAction(match, playerId, action) {
   }
 
   if (action === 'split') {
-    if (!canSplit(hand)) return { error: 'Split unavailable' };
+    if (!canSplit(hand, state)) return { error: 'Split unavailable' };
     if (!canAffordIncrement(match, playerId, hand.bet)) return { error: 'Insufficient chips to split' };
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
@@ -1797,12 +1845,16 @@ function applyPressureDecision(match, playerId, decision) {
 
   const opponentState = match.round.players[playerId];
   const targetIndices = pressure.affectedHandIndices || [opponentState.activeHandIndex || 0];
+  const betLimits = getMatchBetLimits(match);
 
   if (decision === 'match') {
     const required = pressure.delta * targetIndices.length;
     if (!canAffordIncrement(match, playerId, required)) return { error: 'Insufficient chips to match pressure' };
     for (const idx of targetIndices) {
       const hand = opponentState.hands[idx] || opponentState.hands[0];
+      if (hand.bet + pressure.delta > betLimits.max) {
+        return { error: `Bet cannot exceed ${betLimits.max} for this table` };
+      }
       hand.bet += pressure.delta;
       hand.actionCount = (hand.actionCount || 0) + 1;
     }
@@ -1845,10 +1897,11 @@ function applyBaseBetSelection(match, playerId, amount) {
   if (match.phase !== PHASES.ROUND_INIT) return { error: 'Bet can only be changed before cards are dealt' };
   if (playerId !== match.betControllerId) return { error: 'Only the round owner can set base bet' };
   if (match.round.betConfirmedByPlayer?.[playerId]) return { error: 'Bet already confirmed for this round' };
+  const betLimits = getMatchBetLimits(match);
   const chips = getParticipantChips(match, playerId);
-  if (chips < MIN_BET) return { error: `Need at least ${MIN_BET} chips to set base bet` };
-  if (Number(amount) < MIN_BET) return { error: `Bet must be at least ${MIN_BET}` };
-  const selected = clampBet(amount, chips || MIN_BET);
+  if (chips < betLimits.min) return { error: `Need at least ${betLimits.min} chips to set base bet` };
+  const selected = clampBet(amount, chips || betLimits.min, betLimits);
+  if (selected < betLimits.min) return { error: `Bet must be at least ${betLimits.min}` };
   if (!match.betSettings) match.betSettings = { selectedBetById: {} };
   match.betSettings.selectedBetById[playerId] = selected;
 
@@ -1868,9 +1921,14 @@ function confirmBaseBet(match, playerId) {
   if (match.phase !== PHASES.ROUND_INIT) return { error: 'Bet confirmation is only available before dealing' };
   if (match.round.betConfirmedByPlayer?.[playerId]) return { ok: true };
 
-  const selected = match.betSettings?.selectedBetById?.[match.betControllerId] || match.round.baseBet || BASE_BET;
-  if (selected < MIN_BET) return { error: `Bet must be at least ${MIN_BET}` };
-  if (getParticipantChips(match, match.betControllerId) < MIN_BET) return { error: 'Insufficient chips to start round' };
+  const betLimits = getMatchBetLimits(match);
+  const selected = clampBet(
+    match.betSettings?.selectedBetById?.[match.betControllerId] || match.round.baseBet || BASE_BET,
+    getParticipantChips(match, match.betControllerId) || betLimits.min,
+    betLimits
+  );
+  if (selected < betLimits.min) return { error: `Bet must be at least ${betLimits.min}` };
+  if (getParticipantChips(match, match.betControllerId) < betLimits.min) return { error: 'Insufficient chips to start round' };
 
   match.round.baseBet = selected;
   match.round.betConfirmedByPlayer[playerId] = true;
@@ -1881,13 +1939,20 @@ function confirmBaseBet(match, playerId) {
 function createMatch(lobby, options = {}) {
   const playerIds = [lobby.ownerId, lobby.opponentId];
   const isPractice = (lobby.stakeType || 'FAKE') === 'FAKE';
+  const botId = playerIds.find((pid) => isBotPlayer(pid));
+  const botDifficulty = botId ? options.botDifficultyById?.[botId] || 'normal' : null;
+  const betLimits = botDifficulty ? getBetLimitsForDifficulty(botDifficulty) : { min: MIN_BET, max: MAX_BET_CAP };
   const selectedBetById = {};
   for (const pid of playerIds) {
     if (isBotPlayer(pid)) {
-      selectedBetById[pid] = BASE_BET;
+      selectedBetById[pid] = betLimits.min;
     } else {
       const user = getUserById(pid);
-      selectedBetById[pid] = clampBet(user?.selectedBet || BASE_BET, isPractice ? STARTING_CHIPS : (user?.chips || STARTING_CHIPS));
+      selectedBetById[pid] = clampBet(
+        user?.selectedBet || BASE_BET,
+        isPractice ? STARTING_CHIPS : (user?.chips || STARTING_CHIPS),
+        betLimits
+      );
     }
   }
   const match = {
@@ -2735,6 +2800,34 @@ io.on('connection', (socket) => {
     return null;
   });
 
+  socket.on('match:nextRound', (payload = {}) => {
+    const { matchId } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    if (!match.playerIds.includes(userId)) return socket.emit('match:error', { error: 'Unauthorized' });
+    const result = applyRoundResultChoice(match, userId, 'next');
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    scheduleBotBetConfirm(match);
+    scheduleBotTurn(match);
+    return null;
+  });
+
+  socket.on('match:backToBetting', (payload = {}) => {
+    const { matchId } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    if (!match.playerIds.includes(userId)) return socket.emit('match:error', { error: 'Unauthorized' });
+    const result = applyRoundResultChoice(match, userId, 'betting');
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    scheduleBotBetConfirm(match);
+    scheduleBotTurn(match);
+    return null;
+  });
+
   socket.on('match:pressureDecision', (payload = {}) => {
     const { matchId, decision } = payload;
     const match = matches.get(matchId);
@@ -2845,6 +2938,7 @@ export {
   applyAction,
   applyBaseBetSelection,
   confirmBaseBet,
+  applyRoundResultChoice,
   applyPressureDecision,
   newHand,
   hasPlayableHand,

@@ -10,6 +10,11 @@ const PERMISSION_ERROR_PATTERNS = [
   /permission denied/i,
   /the request is not allowed/i
 ];
+const BOT_BET_RANGES = {
+  easy: { min: 1, max: 250 },
+  medium: { min: 100, max: 500 },
+  normal: { min: 500, max: 2000 }
+};
 
 function initialViewFromPath() {
   const pathname = window.location.pathname.toLowerCase();
@@ -186,7 +191,7 @@ const state = {
   pendingNavAfterLeave: null,
   turnTimerFreezeKey: '',
   turnTimerFreezeRemainingMs: null,
-  dismissedRoundResultKey: ''
+  roundResultChoicePending: false
 };
 
 let freeClaimTicker = null;
@@ -253,7 +258,7 @@ function shouldPauseTurnTimer(match) {
 }
 
 function getTurnTimerState(match = state.currentMatch) {
-  const timeoutMs = Number(match?.turnTimeoutMs || 20_000);
+  const timeoutMs = Number(match?.turnTimeoutMs || 30_000);
   const expiresAtMs = match?.turnExpiresAt ? new Date(match.turnExpiresAt).getTime() : 0;
   const active =
     Boolean(match) &&
@@ -539,9 +544,12 @@ function connectSocket() {
     const previousRound = state.currentMatch?.roundNumber || 0;
     state.currentMatch = match;
     state.leaveMatchModal = false;
+    if (match.phase !== 'RESULT') {
+      state.roundResultChoicePending = false;
+    }
     if (match.roundNumber > previousRound && match.phase !== 'RESULT') {
       state.roundResultBanner = null;
-      state.dismissedRoundResultKey = '';
+      state.roundResultChoicePending = false;
     }
     const myBankroll = match.players?.[state.me?.id]?.bankroll;
     if (state.me && Number.isFinite(myBankroll)) {
@@ -567,7 +575,7 @@ function connectSocket() {
     const key = `${matchId}:${roundNumber}`;
     if (state.lastRoundResultKey === key) return;
     state.lastRoundResultKey = key;
-    state.dismissedRoundResultKey = '';
+    state.roundResultChoicePending = false;
     state.roundResultBanner = {
       matchId,
       roundNumber,
@@ -757,8 +765,8 @@ function canTriggerAction(action) {
   const myState = match.players?.[me.id];
   const hand = myState?.hands?.[myState.activeHandIndex || 0];
   if (!hand || hand.locked || hand.bust || hand.surrendered || hand.stood) return false;
-  if (action === 'split' && !handCanSplit(hand)) return false;
-  if (action === 'double' && (hand.doubleCount || 0) >= (match.maxDoublesPerHand || 2)) return false;
+  if (action === 'split' && !handCanSplit(hand, myState?.hands?.length || 0, match.maxHandsPerPlayer || 4)) return false;
+  if (action === 'double' && ((hand.actionCount || 0) > 0 || hand.doubled || (hand.doubleCount || 0) >= (match.maxDoublesPerHand || 1))) return false;
   if (action === 'surrender' && (hand.actionCount || 0) > 0) return false;
   return true;
 }
@@ -780,10 +788,11 @@ function isTypingTarget(target) {
   return tag === 'input' || tag === 'textarea' || target.isContentEditable;
 }
 
-function handCanSplit(hand) {
+function handCanSplit(hand, handCount = 0, maxHands = 4) {
   if (!hand) return false;
   if (hand.cards.length !== 2) return false;
   if ((hand.splitDepth || 0) >= 3) return false;
+  if (handCount >= maxHands) return false;
   return hand.cards[0].rank && hand.cards[1].rank && hand.cards[0].rank === hand.cards[1].rank;
 }
 
@@ -828,6 +837,15 @@ function emitSetBaseBet(amount) {
 function emitConfirmBet() {
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:confirmBet', { matchId: state.currentMatch.id });
+}
+
+function emitRoundResultChoice(choice) {
+  if (!state.currentMatch || !state.socket) return;
+  if (choice === 'next') {
+    state.socket.emit('match:nextRound', { matchId: state.currentMatch.id });
+    return;
+  }
+  state.socket.emit('match:backToBetting', { matchId: state.currentMatch.id });
 }
 
 function emitLeaveMatch() {
@@ -1320,16 +1338,13 @@ function syncRoundResultModal() {
     mount.innerHTML = '';
     return;
   }
-  const resultKey = `${result.matchId || match?.id || 'match'}:${result.roundNumber || match?.roundNumber || 0}`;
-  if (state.dismissedRoundResultKey === resultKey) {
-    mount.innerHTML = '';
-    return;
-  }
   const delta = result.deltaChips || 0;
   const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
   const bankroll = Number.isFinite(state.bankrollDisplay) ? Math.round(state.bankrollDisplay) : state.me?.chips || 0;
   const headline = result.outcome === 'win' ? 'WIN' : result.outcome === 'lose' ? 'LOSE' : 'PUSH';
   const subtitle = result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push');
+  const myChoice = state.me?.id ? match?.resultChoiceByPlayer?.[state.me.id] : null;
+  const waitingOnOpponent = Boolean(match?.phase === 'RESULT' && myChoice);
   mount.innerHTML = `
     <div class="round-result-wrap">
       <div class="round-result-popup result-modal card">
@@ -1338,27 +1353,26 @@ function syncRoundResultModal() {
         <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${Math.abs(delta)}</div>
         <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
         <div class="result-actions">
-          <button id="roundResultNextBtn" class="primary">Next Round</button>
-          <button id="roundResultLobbyBtn" class="ghost">Back to Lobby</button>
+          <button id="roundResultNextBtn" class="primary" ${state.roundResultChoicePending ? 'disabled' : ''}>Next</button>
+          <button id="roundResultBettingBtn" class="ghost" ${state.roundResultChoicePending ? 'disabled' : ''}>Back to Betting</button>
         </div>
+        ${waitingOnOpponent ? '<div class="muted" style="margin-top:8px">Waiting for opponent choice…</div>' : ''}
       </div>
     </div>
   `;
   const nextBtn = document.getElementById('roundResultNextBtn');
   if (nextBtn) {
     nextBtn.onclick = () => {
-      state.dismissedRoundResultKey = resultKey;
-      state.roundResultBanner = null;
+      state.roundResultChoicePending = true;
+      emitRoundResultChoice('next');
       render();
     };
   }
-  const lobbyBtn = document.getElementById('roundResultLobbyBtn');
-  if (lobbyBtn) {
-    lobbyBtn.onclick = () => {
-      state.dismissedRoundResultKey = resultKey;
-      state.roundResultBanner = null;
-      state.pendingNavAfterLeave = 'lobbies';
-      emitLeaveMatch();
+  const bettingBtn = document.getElementById('roundResultBettingBtn');
+  if (bettingBtn) {
+    bettingBtn.onclick = () => {
+      state.roundResultChoicePending = true;
+      emitRoundResultChoice('betting');
       render();
     };
   }
@@ -1477,11 +1491,19 @@ function renderHome() {
         </div>
         <div class="grid" style="margin-top:0.7rem">
           <div class="muted">Play Against Bot</div>
-          <div class="bot-segmented bot-slider" data-diff-slider>
-            <div class="bot-slider-indicator" style="transform:translateX(${['easy', 'medium', 'normal'].indexOf(state.selectedBotDifficulty) * 100}%);"></div>
-            <button data-bot="easy" class="${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">Easy</button>
-            <button data-bot="medium" class="${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">Medium</button>
-            <button data-bot="normal" class="${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">Normal</button>
+          <div class="bot-difficulty-grid">
+            <button data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">
+              <span class="bot-diff-label">Easy</span>
+              <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.easy.min}-${BOT_BET_RANGES.easy.max}</span>
+            </button>
+            <button data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">
+              <span class="bot-diff-label">Medium</span>
+              <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.medium.min}-${BOT_BET_RANGES.medium.max}</span>
+            </button>
+            <button data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">
+              <span class="bot-diff-label">Normal</span>
+              <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.normal.min}-${BOT_BET_RANGES.normal.max}</span>
+            </button>
           </div>
           <div class="bot-segmented bot-slider stake-slider" data-stake-slider>
             <div class="bot-slider-indicator" style="transform:translateX(${state.botStakeType === 'REAL' ? 0 : 100}%);"></div>
@@ -2271,7 +2293,6 @@ function renderMatch() {
                   <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
-                ${renderTurnTimer(me.id, turnTimerState, 'strip')}
                 <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">
                   ${renderEmoteBubble(oppId)}
                   <div class="zone-head">
@@ -2306,13 +2327,19 @@ function renderMatch() {
                 </div>
 
                 <div class="actions-panel" ${roundResolved ? 'style="display:none"' : ''}>
-                  <div class="actions actions-main">
-                    <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
-                    <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
-                    <button data-action="double" title="${canAct ? 'Increase current bet and draw one card' : actionHint}" ${!canAct || (activeHand.doubleCount || 0) >= (match.maxDoublesPerHand || 2) ? 'disabled' : ''}>Double</button>
-                    <button data-action="split" title="${handCanSplit(activeHand) ? 'Split pair into two hands' : 'Split requires pair'}" ${!canAct || !handCanSplit(activeHand) ? 'disabled' : ''}>Split</button>
-                    <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender ? 'disabled' : ''}>Surrender</button>
+                  <div class="actions-row">
+                    <div class="actions actions-main">
+                      <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
+                      <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
+                      <button data-action="double" title="${canAct ? 'Double your bet and receive exactly one final card' : actionHint}" ${!canAct || (activeHand?.actionCount || 0) > 0 || activeHand?.doubled || (activeHand?.doubleCount || 0) >= (match.maxDoublesPerHand || 1) ? 'disabled' : ''}>Double</button>
+                      <button data-action="split" title="${handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4) ? 'Split pair into two hands' : 'Split requires pair (max 4 hands)'}" ${!canAct || !handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4) ? 'disabled' : ''}>Split</button>
+                      <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender ? 'disabled' : ''}>Surrender</button>
+                    </div>
+                    <div class="actions-timer-slot">
+                      ${renderTurnTimer(me.id, turnTimerState, 'action')}
+                    </div>
                   </div>
+                  <div class="muted action-hint">${actionHint}</div>
                   ${
                     isPvpMatch
                       ? `<div class="actions actions-extra">
@@ -2366,7 +2393,7 @@ function renderMatch() {
                           } / Opponent ${opponentConnected ? 'online' : 'offline'}`
                     }
                   </div>
-                  <div class="muted">AFK protection enabled: inactive turns auto-stand after ${Math.round((match.turnTimeoutMs || 20000) / 1000)}s.</div>
+                  <div class="muted">AFK protection enabled: inactive turns auto-stand after ${Math.round((match.turnTimeoutMs || 30000) / 1000)}s.</div>
                   <div class="muted">${actionHint}</div>
                 </details>
               </section>`

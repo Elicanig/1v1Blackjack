@@ -76,6 +76,35 @@ function makeBettingMatch() {
   };
 }
 
+function makeBotBettingMatch(difficulty = 'easy') {
+  const botId = `bot:${difficulty}:t1`;
+  return {
+    id: 'm-bot-bet',
+    phase: PHASES.ROUND_INIT,
+    playerIds: ['p1', botId],
+    betControllerId: 'p1',
+    betSettings: { selectedBetById: { p1: 25, [botId]: 25 } },
+    bot: { difficultyById: { [botId]: difficulty }, chipsById: { [botId]: 1000 } },
+    startingPlayerIndex: 0,
+    roundNumber: 1,
+    round: {
+      baseBet: 25,
+      firstActionTaken: false,
+      postedBetByPlayer: { p1: 0, [botId]: 0 },
+      allInPlayers: { p1: false, [botId]: false },
+      betConfirmedByPlayer: { p1: false, [botId]: false },
+      turnPlayerId: null,
+      firstActionPlayerId: null,
+      pendingPressure: null,
+      deck: [],
+      players: {
+        p1: { activeHandIndex: 0, hands: [] },
+        [botId]: { activeHandIndex: 0, hands: [] }
+      }
+    }
+  };
+}
+
 test('01 handTotal without aces', () => {
   assert.equal(handTotal([card('10'), card('7')]), 17);
 });
@@ -167,25 +196,24 @@ test('16 surrender locks and marks surrendered', () => {
   assert.equal(hand.locked, true);
 });
 
-test('17 double doubles bet, draws one, and creates pending pressure', () => {
+test('17 double doubles bet, draws one, locks hand, and creates pending pressure', () => {
   const m = makeMatch({ deck: [card('3')] });
   const res = applyAction(m, 'p1', 'double');
   assert.equal(res.ok, true);
   const hand = m.round.players.p1.hands[0];
   assert.equal(hand.bet, 10);
   assert.equal(hand.locked, true);
+  assert.equal(hand.stood, true);
   assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
   assert.ok(m.round.pendingPressure);
 });
 
-test('18 cannot double twice on same hand', () => {
-  const m = makeMatch({ deck: [card('3'), card('4')] });
-  applyAction(m, 'p1', 'double');
-  m.phase = PHASES.ACTION_TURN;
-  m.round.pendingPressure = null;
-  m.round.turnPlayerId = 'p1';
+test('18 cannot double after taking another action', () => {
+  const m = makeMatch({ p1Hand: newHand([card('5'), card('4')], [false, true], 5, 0), deck: [card('2')] });
+  const hit = applyAction(m, 'p1', 'hit');
+  assert.equal(hit.ok, true);
   const res = applyAction(m, 'p1', 'double');
-  assert.equal(res.error, 'Hand cannot double down');
+  assert.equal(res.error, 'Double is only available as your first action on this hand');
 });
 
 test('19 split creates two hands with hidden second cards', () => {
@@ -289,15 +317,18 @@ test('30 base bet cannot change current round after first action', () => {
   assert.equal(res.error, 'Bet can only be changed before cards are dealt');
 });
 
-test('31 pressure match rejected when insufficient bankroll', () => {
+test('31 pressure match rejected when it would exceed table max', () => {
   const m = makeMatch({ deck: [card('3')] });
-  m.bot = { chipsById: { 'bot:test': 0 } };
-  m.playerIds = ['p1', 'bot:test'];
-  m.round.players['bot:test'] = m.round.players.p2;
+  const botId = 'bot:easy:test';
+  m.playerIds = ['p1', botId];
+  m.bot = { difficultyById: { [botId]: 'easy' }, chipsById: { [botId]: 999999 } };
+  m.round.players[botId] = m.round.players.p2;
   delete m.round.players.p2;
+  m.round.players[botId].hands[0].bet = 250;
+  m.round.players.p1.hands[0].bet = 125;
   applyAction(m, 'p1', 'double');
-  const res = applyPressureDecision(m, 'bot:test', 'match');
-  assert.equal(res.error, 'Insufficient chips to match pressure');
+  const res = applyPressureDecision(m, botId, 'match');
+  assert.equal(res.error, 'Bet cannot exceed 250 for this table');
 });
 
 test('32 deal blocked until both players confirm', () => {
@@ -316,7 +347,8 @@ test('32 deal blocked until both players confirm', () => {
 test('33 invalid bet rejected during betting phase', () => {
   const m = makeBettingMatch();
   const res = applyBaseBetSelection(m, 'p1', 2);
-  assert.equal(res.error, 'Bet must be at least 5');
+  assert.equal(res.ok, true);
+  assert.equal(res.selected, 5);
 });
 
 test('34 bet change rejected outside betting phase', () => {
@@ -336,9 +368,9 @@ test('35 round starts with correct posted bets after confirm', () => {
   assert.equal(m.round.players.p2.hands[0].bet, 25);
 });
 
-test('36 all-in posting when opponent cannot fully match base bet', () => {
+test('36 bots have unlimited bankroll and always post full base bet', () => {
   const m = makeBettingMatch();
-  m.bot = { chipsById: { 'bot:easy': 12 } };
+  m.bot = { difficultyById: { 'bot:easy': 'easy' }, chipsById: { 'bot:easy': 12 } };
   m.playerIds = ['p1', 'bot:easy'];
   m.round.players['bot:easy'] = { activeHandIndex: 0, hands: [] };
   delete m.round.players.p2;
@@ -352,6 +384,60 @@ test('36 all-in posting when opponent cannot fully match base bet', () => {
   delete m.betSettings.selectedBetById.p2;
   confirmBaseBet(m, 'p1');
   confirmBaseBet(m, 'bot:easy');
-  assert.equal(m.round.players['bot:easy'].hands[0].bet, 12);
-  assert.equal(m.round.allInPlayers['bot:easy'], true);
+  assert.equal(m.round.players['bot:easy'].hands[0].bet, 25);
+  assert.equal(m.round.allInPlayers['bot:easy'], false);
+});
+
+test('37 busting one split hand advances to next split hand', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('10'), card('Q')], [false, true], 5, 0),
+    p2Hand: newHand([card('9'), card('7')], [false, true], 5, 0),
+    deck: [card('5')]
+  });
+  m.round.players.p1.hands = [
+    newHand([card('10'), card('Q')], [false, true], 5, 1),
+    newHand([card('9'), card('2')], [false, true], 5, 1)
+  ];
+  m.round.players.p1.activeHandIndex = 0;
+  const res = applyAction(m, 'p1', 'hit');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.ACTION_TURN);
+  assert.equal(m.round.turnPlayerId, 'p1');
+  assert.equal(m.round.players.p1.activeHandIndex, 1);
+  assert.equal(m.round.players.p1.hands[0].bust, true);
+});
+
+test('38 resplitting is allowed up to 4 hands total', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('8'), card('8', 'D')], [false, true], 5, 0),
+    deck: [card('5'), card('7'), card('6'), card('8')]
+  });
+  const first = applyAction(m, 'p1', 'split');
+  assert.equal(first.ok, true);
+  m.phase = PHASES.ACTION_TURN;
+  m.round.pendingPressure = null;
+  m.round.turnPlayerId = 'p1';
+  const second = applyAction(m, 'p1', 'split');
+  assert.equal(second.ok, true);
+  assert.equal(m.round.players.p1.hands.length, 3);
+
+  // Force 4th hand cap and verify split is then rejected.
+  m.round.players.p1.hands.push(newHand([card('4'), card('5')], [false, true], 5, 1));
+  m.round.players.p1.activeHandIndex = 0;
+  m.phase = PHASES.ACTION_TURN;
+  m.round.pendingPressure = null;
+  m.round.turnPlayerId = 'p1';
+  const blocked = applyAction(m, 'p1', 'split');
+  assert.equal(blocked.error, 'Split unavailable');
+});
+
+test('39 bot difficulty bet ranges are clamped server-side', () => {
+  const m = makeBotBettingMatch('easy');
+  const high = applyBaseBetSelection(m, 'p1', 9999);
+  assert.equal(high.ok, true);
+  assert.equal(high.selected, 250);
+
+  const low = applyBaseBetSelection(m, 'p1', 0);
+  assert.equal(low.ok, true);
+  assert.equal(low.selected, 1);
 });
