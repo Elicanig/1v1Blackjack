@@ -4,11 +4,10 @@ import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { Server } from 'socket.io';
-import { JSONFilePreset } from 'lowdb/node';
 import { nanoid } from 'nanoid';
 import path from 'path';
-import { mkdirSync, existsSync, statSync, writeFileSync, accessSync, constants } from 'fs';
 import { fileURLToPath } from 'url';
+import { createStorage } from './db/storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,27 +55,6 @@ const TURN_TIMEOUT_MS = 30_000;
 const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 
 const DATA_DIR = process.env.DATA_DIR || './data';
-const IN_PROJECT_DATA_DIR = './data';
-const ensureWritableDataDir = (dir) => {
-  mkdirSync(dir, { recursive: true });
-  accessSync(dir, constants.W_OK);
-};
-let activeDataDir = DATA_DIR;
-try {
-  ensureWritableDataDir(activeDataDir);
-} catch (error) {
-  if (activeDataDir !== IN_PROJECT_DATA_DIR) {
-    activeDataDir = IN_PROJECT_DATA_DIR;
-    ensureWritableDataDir(activeDataDir);
-    if (process.env.NODE_ENV !== 'test') {
-      // eslint-disable-next-line no-console
-      console.warn(`[storage] DATA_DIR=${DATA_DIR} is not writable (${error?.code || 'UNKNOWN'}); falling back to ${activeDataDir}`);
-    }
-  } else {
-    throw error;
-  }
-}
-const DB_PATH = path.join(activeDataDir, 'db.json');
 const EMPTY_DB = {
   users: [],
   lobbies: [],
@@ -84,22 +62,37 @@ const EMPTY_DB = {
   friendRequests: [],
   friendChallenges: []
 };
-const hadExistingStorage = existsSync(DB_PATH);
-if (!hadExistingStorage) {
-  writeFileSync(DB_PATH, `${JSON.stringify(EMPTY_DB, null, 2)}\n`, 'utf8');
-}
-
-const db = await JSONFilePreset(DB_PATH, EMPTY_DB);
+const storage = await createStorage({
+  emptyDb: EMPTY_DB,
+  dataDir: DATA_DIR,
+  nodeEnv: process.env.NODE_ENV,
+  startingChips: STARTING_CHIPS
+});
+const db = {
+  data: storage.data,
+  write: storage.write
+};
+const storageInfo = storage.getInfo();
+const STORAGE_BACKEND = storageInfo.backend;
+const ACTIVE_DATA_DIR = storageInfo.dataDir;
+const DB_PATH = storageInfo.dbPath;
 
 if (process.env.NODE_ENV !== 'test') {
-  // eslint-disable-next-line no-console
-  console.log(`[storage] Using DATA_DIR=${activeDataDir}`);
-  if (hadExistingStorage) {
+  if (STORAGE_BACKEND === 'postgres') {
     // eslint-disable-next-line no-console
-    console.log(`[storage] Loaded ${db.data.users.length} users from DB_PATH=${DB_PATH}`);
+    console.log('[storage] Using Postgres storage via DATABASE_URL');
+    // eslint-disable-next-line no-console
+    console.log(`[storage] Loaded ${db.data.users.length} users from Postgres`);
   } else {
     // eslint-disable-next-line no-console
-    console.log(`[storage] Initialized new DB at DB_PATH=${DB_PATH}`);
+    console.log(`[storage] Using DATA_DIR=${ACTIVE_DATA_DIR}`);
+    if (storageInfo.hadExistingStorage) {
+      // eslint-disable-next-line no-console
+      console.log(`[storage] Loaded ${db.data.users.length} users from DB_PATH=${DB_PATH}`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(`[storage] Initialized new DB at DB_PATH=${DB_PATH}`);
+    }
   }
 }
 
@@ -2695,17 +2688,13 @@ app.get('/api/debug/persistence', (_req, res) => {
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ error: 'Not found' });
   }
-  let lastWriteTime = null;
-  try {
-    lastWriteTime = statSync(DB_PATH).mtime.toISOString();
-  } catch {
-    lastWriteTime = null;
-  }
+  const info = storage.getInfo();
   return res.json({
-    dataDir: activeDataDir,
-    dbPath: DB_PATH,
+    backend: info.backend,
+    dataDir: info.dataDir,
+    dbPath: info.dbPath,
     userCount: db.data.users.length,
-    lastWriteTime
+    lastWriteTime: info.lastWriteTime
   });
 });
 

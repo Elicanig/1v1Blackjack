@@ -5,7 +5,7 @@ A playable 1v1 real-time web app that blends blackjack actions with head-to-head
 ## Stack
 - Node.js + Express
 - Socket.IO (authoritative real-time server)
-- LowDB JSON persistence for accounts/profiles/friends/lobbies/challenges
+- Postgres (Neon via `DATABASE_URL`) persistence for accounts/profiles/friends/lobbies/challenges
 - In-memory match engine/state (reconnect grace window supported)
 - Vanilla SPA frontend (mobile + desktop)
 
@@ -45,18 +45,20 @@ A playable 1v1 real-time web app that blends blackjack actions with head-to-head
   - `LOBBY -> ROUND_INIT -> ACTION_TURN -> PRESSURE_RESPONSE -> HAND_ADVANCE -> ROUND_RESOLVE -> NEXT_ROUND`
 
 ## Test
-- Run `npm test` for rule/state transition coverage (28 cases).
+- Run `npm test` for rule/state transition coverage.
 
 ## Notes
 - Match state is authoritative and server-side in memory.
-- Persistent entities (users/friends/lobbies/challenges) are in `db.json` under `DATA_DIR`.
-- `DATA_DIR` defaults:
-  - all environments: `./data` (unless overridden via `DATA_DIR`)
-- Render free-tier setup:
-  - Optional: set `DATA_DIR` to a writable path; otherwise `./data` is used.
+- Persistent entities (users/friends/lobbies/challenges) use Postgres when `DATABASE_URL` is set.
+- In production, `DATABASE_URL` is required (server fails fast if missing).
+- Local fallback:
+  - If `DATABASE_URL` is missing in non-production, the app falls back to `./data/db.json` for dev/test convenience.
+- Render setup:
+  - Set `DATABASE_URL=<your-neon-connection-string>`.
   - Set `SESSION_SECRET=<long-random-string>` (or `JWT_SECRET`).
+  - Optional local/dev-only override: `DATA_DIR=./data`.
   - On boot, storage logs include:
-    - `Using DATA_DIR=...`
-    - `Loaded X users from DB_PATH=...` (when existing DB is reused)
-    - `Initialized new DB ...` (only when DB file is missing)
+    - `Using Postgres storage via DATABASE_URL` (Postgres mode)
+    - `Loaded X users from Postgres`
+    - or JSON fallback logs for local dev mode
 - For production scale, replace in-memory match storage with Redis and add hardened auth/session handling.
