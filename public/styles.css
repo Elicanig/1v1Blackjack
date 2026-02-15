@@ -684,6 +684,9 @@ select:focus-visible {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
 }
 
 .bot-diff-btn {
@@ -695,6 +698,15 @@ select:focus-visible {
   justify-items: center;
   border-color: rgba(236, 241, 233, 0.12);
   background: rgba(13, 24, 20, 0.7);
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
+}
+
+.bot-diff-btn:hover {
+  transform: none;
+  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.2) inset;
+  border-color: rgba(205, 167, 100, 0.34);
 }
 
 .bot-diff-btn.is-selected {
@@ -723,21 +735,34 @@ select:focus-visible {
   background: linear-gradient(180deg, var(--gold-strong), var(--gold));
   transition: transform 180ms ease;
   z-index: 0;
+  pointer-events: none;
 }
 
 .bot-segmented button {
   flex: 1 1 0;
   position: relative;
   z-index: 1;
+  pointer-events: auto;
   background: transparent;
   border-color: transparent;
   color: var(--text-muted);
   min-width: 84px;
 }
 
+.bot-segmented button:hover {
+  transform: none;
+  box-shadow: none;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
 .bot-segmented button.is-selected {
   background: transparent;
   border-color: transparent;
+  color: #1a140a;
+}
+
+.bot-segmented button.is-selected:hover {
   color: #1a140a;
 }
 
@@ -1733,6 +1758,28 @@ select:focus-visible {
   margin-bottom: 10px;
 }
 
+.bet-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bet-input-label {
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
+.bet-input {
+  width: 118px;
+  min-height: 38px;
+  border-radius: 999px;
+  text-align: center;
+  font-weight: 700;
+  border: 1px solid rgba(205, 167, 100, 0.42);
+  background: rgba(9, 20, 17, 0.66);
+  color: #f4dfb6;
+}
+
 .bet-pill {
   min-width: 68px;
   text-align: center;
@@ -1767,6 +1814,29 @@ select:focus-visible {
   min-height: 38px;
   padding: 7px 14px;
   border-radius: 12px;
+}
+
+.bet-invalid-note {
+  color: #e8b5a7;
+}
+
+.bet-reset-link {
+  margin-left: 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 0;
+  min-height: 0;
+  box-shadow: none;
+  transform: none;
+}
+
+.bet-reset-link:hover {
+  transform: none;
+  box-shadow: none;
+  color: #f3e4c5;
 }
 
 .actions-secondary {

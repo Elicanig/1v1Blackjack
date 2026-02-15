@@ -133,7 +133,7 @@ function applyGlowFollowClasses() {
     return;
   }
   app
-    .querySelectorAll('button.primary, button.gold, button.ghost, .bot-segmented button, .tabs .nav-pill, .nav button:not(.warn), .card.section')
+    .querySelectorAll('button.primary, button.gold, button.ghost, .tabs .nav-pill, .nav button:not(.warn), .card.section')
     .forEach((el) => el.classList.add('glow-follow'));
 }
 
@@ -178,6 +178,7 @@ const state = {
   bankrollDisplay: null,
   bankrollTweenRaf: null,
   currentBet: 5,
+  betInputDraft: '',
   selectedBotDifficulty: 'normal',
   botStakeType: 'FAKE',
   emotePickerOpen: false,
@@ -558,11 +559,16 @@ function connectSocket() {
       tweenBankroll(from, myBankroll, match.phase === 'RESULT' ? 950 : 350);
     }
     if (typeof match.selectedBet === 'number') {
-      const preferred = state.currentBet;
-      state.currentBet = match.selectedBet;
-      if (state.me?.id) localStorage.setItem(`bb_last_bet_${state.me.id}`, String(match.selectedBet));
-      if (match.canEditBet && Number.isFinite(preferred) && preferred !== match.selectedBet) {
-        emitSetBaseBet(preferred);
+      const bounds = getBetBounds(match);
+      const clamped = clampBetValue(match.selectedBet, bounds);
+      if (!Number.isInteger(clamped)) {
+        state.currentBet = bounds.min;
+        state.betInputDraft = '';
+        persistBetValue(bounds.min);
+      } else {
+        state.currentBet = clamped;
+        state.betInputDraft = '';
+        persistBetValue(clamped);
       }
     }
     goToView('match');
@@ -634,9 +640,13 @@ async function loadMe() {
     }
     updateFreeClaimCountdown();
     if (typeof data.user?.selectedBet === 'number') {
-      const local = Number(localStorage.getItem(`bb_last_bet_${data.user.id}`));
-      state.currentBet = Number.isFinite(local) && local > 0 ? local : data.user.selectedBet;
-      localStorage.setItem(`bb_last_bet_${data.user.id}`, String(state.currentBet));
+      const fallback = Number.isFinite(Number(data.user.selectedBet)) ? Math.max(1, Math.floor(Number(data.user.selectedBet))) : 5;
+      const key = getBetStorageKey(data.user.id);
+      const local = sanitizeInt(localStorage.getItem(key));
+      const validLocal = Number.isInteger(local) && local >= 1 && local <= BOT_BET_RANGES.normal.max;
+      state.currentBet = validLocal ? local : fallback;
+      state.betInputDraft = '';
+      localStorage.setItem(key, String(state.currentBet));
     }
 
     if (state.pendingFriendInviteCode) {
@@ -859,16 +869,122 @@ function emitEmote(type, value) {
   state.socket.emit('game:emote', { matchId: state.currentMatch.id, type, value });
 }
 
+function getBetStorageKey(userId = state.me?.id) {
+  return userId ? `bb_last_bet_${userId}` : '';
+}
+
+function sanitizeInt(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.floor(n);
+}
+
+function getBetBounds(match = state.currentMatch) {
+  const min = Math.max(1, sanitizeInt(match?.minBet) || 5);
+  const maxCap = Math.max(min, sanitizeInt(match?.maxBetCap) || 500);
+  const bankroll = sanitizeInt(match?.players?.[state.me?.id]?.bankroll ?? state.me?.chips);
+  if (!Number.isFinite(bankroll) || bankroll === null) {
+    return { min, max: maxCap };
+  }
+  return { min, max: Math.max(min, Math.min(maxCap, bankroll)) };
+}
+
+function clampBetValue(value, bounds = getBetBounds()) {
+  const parsed = sanitizeInt(value);
+  if (!Number.isFinite(parsed) || parsed === null) return null;
+  return Math.max(bounds.min, Math.min(bounds.max, parsed));
+}
+
+function isValidBetValue(value, bounds = getBetBounds()) {
+  const parsed = sanitizeInt(value);
+  if (!Number.isInteger(parsed)) return false;
+  return parsed >= bounds.min && parsed <= bounds.max;
+}
+
+function persistBetValue(value) {
+  const key = getBetStorageKey();
+  if (!key) return;
+  localStorage.setItem(key, String(value));
+}
+
+function applyBetValue(nextValue, { emit = true, renderNow = true, showResetToast = false } = {}) {
+  const match = state.currentMatch;
+  if (!match) return false;
+  const bounds = getBetBounds(match);
+  const clamped = clampBetValue(nextValue, bounds);
+  if (!Number.isInteger(clamped)) {
+    state.currentBet = bounds.min;
+    state.betInputDraft = '';
+    persistBetValue(bounds.min);
+    if (showResetToast) pushToast('Bet reset');
+    if (emit && match.canEditBet) emitSetBaseBet(bounds.min);
+    if (renderNow) render();
+    return false;
+  }
+  const changed = state.currentBet !== clamped;
+  state.currentBet = clamped;
+  state.betInputDraft = '';
+  persistBetValue(clamped);
+  if (changed && emit && match.canEditBet) emitSetBaseBet(clamped);
+  if (renderNow) render();
+  return true;
+}
+
+function commitBetDraft({ renderNow = true } = {}) {
+  if (!state.currentMatch) return;
+  const draft = String(state.betInputDraft || '').trim();
+  if (draft === '') {
+    state.betInputDraft = '';
+    if (renderNow) {
+      render();
+    } else {
+      const confirmBtn = document.getElementById('confirmBetBtn');
+      if (confirmBtn) {
+        const bounds = getBetBounds(state.currentMatch);
+        confirmBtn.disabled = !state.currentMatch.canConfirmBet || !isValidBetValue(state.currentBet, bounds);
+      }
+    }
+    return;
+  }
+  applyBetValue(draft, { emit: true, renderNow, showResetToast: true });
+  if (!renderNow) {
+    const confirmBtn = document.getElementById('confirmBetBtn');
+    if (confirmBtn) {
+      const bounds = getBetBounds(state.currentMatch);
+      confirmBtn.disabled = !state.currentMatch.canConfirmBet || !isValidBetValue(state.currentBet, bounds);
+    }
+  }
+}
+
+function resetBetStateToLobby() {
+  const key = getBetStorageKey();
+  if (key) localStorage.removeItem(key);
+  const staleBetKeys = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith('bb_last_bet_')) staleBetKeys.push(k);
+  }
+  staleBetKeys.forEach((k) => localStorage.removeItem(k));
+  state.betInputDraft = '';
+  state.currentBet = 5;
+  if (state.currentMatch) emitLeaveMatch();
+  state.currentMatch = null;
+  state.currentLobby = null;
+  state.leaveMatchModal = false;
+  goToView('lobbies');
+  pushToast('Bet state reset');
+  render();
+}
+
 function adjustBet(delta) {
   if (!state.currentMatch) return;
   if (!state.currentMatch.canEditBet) return;
-  const min = state.currentMatch.minBet || 5;
-  const max = Math.min(state.currentMatch.maxBetCap || 500, state.me?.chips || 0);
-  const next = Math.max(min, Math.min(max, state.currentBet + delta));
-  state.currentBet = next;
-  if (state.me?.id) localStorage.setItem(`bb_last_bet_${state.me.id}`, String(next));
-  emitSetBaseBet(next);
-  render();
+  const bounds = getBetBounds(state.currentMatch);
+  const base = isValidBetValue(state.currentBet, bounds) ? sanitizeInt(state.currentBet) : bounds.min;
+  if (!isValidBetValue(state.currentBet, bounds)) {
+    pushToast('Bet reset');
+  }
+  applyBetValue(base + Number(delta || 0), { emit: true, renderNow: true });
 }
 
 async function handleAuth(mode, form) {
@@ -1493,24 +1609,24 @@ function renderHome() {
         </div>
         <div class="grid" style="margin-top:0.7rem">
           <div class="muted">Play Against Bot</div>
-          <div class="bot-difficulty-grid">
-            <button data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">
+          <div class="bot-difficulty-grid" id="botDifficultyGrid" role="radiogroup" aria-label="Bot difficulty">
+            <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'easy'}" data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">
               <span class="bot-diff-label">Easy</span>
               <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.easy.min}-${BOT_BET_RANGES.easy.max}</span>
             </button>
-            <button data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">
+            <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'medium'}" data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">
               <span class="bot-diff-label">Medium</span>
               <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.medium.min}-${BOT_BET_RANGES.medium.max}</span>
             </button>
-            <button data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">
+            <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'normal'}" data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">
               <span class="bot-diff-label">Normal</span>
               <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.normal.min}-${BOT_BET_RANGES.normal.max}</span>
             </button>
           </div>
-          <div class="bot-segmented bot-slider stake-slider" data-stake-slider>
+          <div class="bot-segmented bot-slider stake-slider" id="botStakeSlider" data-stake-slider>
             <div class="bot-slider-indicator" style="transform:translateX(${state.botStakeType === 'REAL' ? 0 : 100}%);"></div>
-            <button data-stake="REAL" class="${state.botStakeType === 'REAL' ? 'is-selected' : ''}">Real Chips</button>
-            <button data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
+            <button type="button" data-stake="REAL" class="${state.botStakeType === 'REAL' ? 'is-selected' : ''}">Real Chips</button>
+            <button type="button" data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
           </div>
           <div class="muted">Practice uses fake chips and won&apos;t affect your account.</div>
           <button class="gold" id="playBotBtn">Play Bot</button>
@@ -1614,18 +1730,40 @@ function renderHome() {
     goToView('friends');
     render();
   };
-  app.querySelectorAll('[data-bot]').forEach((btn) => {
-    btn.onclick = () => {
-      state.selectedBotDifficulty = btn.dataset.bot;
+  const botGrid = document.getElementById('botDifficultyGrid');
+  if (botGrid) {
+    const selectBot = (difficulty) => {
+      if (!difficulty || !BOT_BET_RANGES[difficulty]) return;
+      if (state.selectedBotDifficulty === difficulty) return;
+      state.selectedBotDifficulty = difficulty;
       render();
     };
-  });
-  app.querySelectorAll('[data-stake]').forEach((el) => {
-    el.onclick = () => {
-      state.botStakeType = el.dataset.stake;
+    botGrid.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-bot]');
+      if (!button) return;
+      event.preventDefault();
+      selectBot(button.dataset.bot);
+    });
+    botGrid.addEventListener('keydown', (event) => {
+      if (!['Enter', ' '].includes(event.key)) return;
+      const button = event.target.closest('[data-bot]');
+      if (!button) return;
+      event.preventDefault();
+      selectBot(button.dataset.bot);
+    });
+  }
+  const stakeSlider = document.getElementById('botStakeSlider');
+  if (stakeSlider) {
+    stakeSlider.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-stake]');
+      if (!button) return;
+      event.preventDefault();
+      const nextStake = button.dataset.stake === 'REAL' ? 'REAL' : 'FAKE';
+      if (state.botStakeType === nextStake) return;
+      state.botStakeType = nextStake;
       render();
-    };
-  });
+    });
+  }
   const playBotBtn = document.getElementById('playBotBtn');
   if (playBotBtn) playBotBtn.onclick = () => startBotMatch();
 
@@ -2236,8 +2374,13 @@ function renderMatch() {
   const canConfirmBet = Boolean(match.canConfirmBet);
   const myConfirmed = Boolean(match.betConfirmedByPlayer?.[me.id]);
   const oppConfirmed = Boolean(match.betConfirmedByPlayer?.[oppId]);
-  const minBet = match.minBet || 5;
-  const maxBet = Math.min(match.maxBetCap || 500, state.me?.chips || 0);
+  const betBounds = getBetBounds(match);
+  const minBet = betBounds.min;
+  const maxBet = betBounds.max;
+  const hasBetDraft = String(state.betInputDraft || '') !== '';
+  const draftBet = sanitizeInt(state.betInputDraft);
+  const effectiveBet = hasBetDraft ? draftBet : sanitizeInt(state.currentBet);
+  const isBetValid = Number.isInteger(effectiveBet) && effectiveBet >= minBet && effectiveBet <= maxBet;
   const actionHint = canAct
     ? 'Choose an action for your active hand.'
     : waitingPressure
@@ -2271,13 +2414,31 @@ function renderMatch() {
                       <button data-bet-quick="5" class="gold" ${!canEditBet ? 'disabled' : ''}>+5</button>
                       <button data-bet-quick="10" class="gold" ${!canEditBet ? 'disabled' : ''}>+10</button>
                       <button data-bet-quick="25" class="gold" ${!canEditBet ? 'disabled' : ''}>+25</button>
+                      <div class="bet-input-wrap">
+                        <label for="betInput" class="bet-input-label muted">Custom</label>
+                        <input
+                          id="betInput"
+                          class="bet-input"
+                          type="number"
+                          inputmode="numeric"
+                          step="1"
+                          min="${minBet}"
+                          max="${maxBet}"
+                          value="${hasBetDraft ? state.betInputDraft : state.currentBet}"
+                          ${!canEditBet ? 'disabled' : ''}
+                        />
+                      </div>
                     </div>
                     <div class="bet-confirm-row">
                       <div class="bet-confirm-actions">
-                        <button id="confirmBetBtn" class="primary" ${!canConfirmBet ? 'disabled' : ''}>Confirm Bet</button>
+                        <button id="confirmBetBtn" class="primary" ${!canConfirmBet || !isBetValid ? 'disabled' : ''}>Confirm Bet</button>
                         <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>
                       </div>
-                      <div class="muted">${myConfirmed ? 'You confirmed.' : 'Waiting for your confirmation.'} ${oppConfirmed ? 'Opponent confirmed.' : 'Waiting for opponent...'}</div>
+                      <div class="muted">
+                        ${myConfirmed ? 'You confirmed.' : 'Waiting for your confirmation.'} ${oppConfirmed ? 'Opponent confirmed.' : 'Waiting for opponent...'}
+                        ${!isBetValid ? '<span class="bet-invalid-note"> Enter a whole number in range.</span>' : ''}
+                        <button id="resetBetStateBtn" class="bet-reset-link" type="button">Reset</button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -2435,8 +2596,43 @@ function renderMatch() {
   app.querySelectorAll('[data-bet-quick]').forEach((btn) => {
     btn.onclick = () => adjustBet(Number(btn.dataset.betQuick));
   });
+  const betInput = document.getElementById('betInput');
+  if (betInput) {
+    betInput.addEventListener('input', (event) => {
+      state.betInputDraft = String(event.target.value || '');
+      const bounds = getBetBounds(state.currentMatch);
+      if (state.betInputDraft === '' || isValidBetValue(state.betInputDraft, bounds)) {
+        betInput.setCustomValidity('');
+      } else {
+        betInput.setCustomValidity(`Enter a whole number from ${bounds.min} to ${bounds.max}`);
+      }
+      const confirmBtn = document.getElementById('confirmBetBtn');
+      if (confirmBtn) confirmBtn.disabled = !canConfirmBet || !isValidBetValue(state.betInputDraft, bounds);
+    });
+    betInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      commitBetDraft({ renderNow: true });
+    });
+    betInput.addEventListener('blur', () => {
+      commitBetDraft({ renderNow: false });
+    });
+  }
   const confirmBetBtn = document.getElementById('confirmBetBtn');
-  if (confirmBetBtn) confirmBetBtn.onclick = () => emitConfirmBet();
+  if (confirmBetBtn) {
+    confirmBetBtn.onclick = () => {
+      if (state.betInputDraft !== '') commitBetDraft({ renderNow: false });
+      const bounds = getBetBounds(state.currentMatch);
+      if (!isValidBetValue(state.currentBet, bounds)) return;
+      emitConfirmBet();
+    };
+  }
+  const resetBetStateBtn = document.getElementById('resetBetStateBtn');
+  if (resetBetStateBtn) {
+    resetBetStateBtn.onclick = () => {
+      resetBetStateToLobby();
+    };
+  }
   const emoteToggleBtn = document.getElementById('toggleEmoteBtn');
   if (emoteToggleBtn) {
     emoteToggleBtn.onclick = () => {
