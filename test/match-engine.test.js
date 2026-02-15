@@ -441,3 +441,68 @@ test('39 bot difficulty bet ranges are clamped server-side', () => {
   assert.equal(low.ok, true);
   assert.equal(low.selected, 1);
 });
+
+test('40 bot bust resolves round immediately without waiting for player action', () => {
+  const botId = 'bot:normal:t2';
+  const m = {
+    id: 'm-bot-bust-now',
+    phase: PHASES.ACTION_TURN,
+    playerIds: ['p1', botId],
+    round: {
+      turnPlayerId: botId,
+      pendingPressure: null,
+      baseBet: 5,
+      firstActionTaken: false,
+      postedBetByPlayer: { p1: 5, [botId]: 5 },
+      allInPlayers: { p1: false, [botId]: false },
+      deck: [card('2', 'S')],
+      players: {
+        p1: { activeHandIndex: 0, hands: [newHand([card('9'), card('7')], [false, true], 5, 0)] },
+        [botId]: { activeHandIndex: 0, hands: [newHand([card('K'), card('Q')], [false, true], 5, 0)] }
+      }
+    }
+  };
+
+  const res = applyAction(m, botId, 'hit');
+  assert.equal(res.ok, true);
+  assert.equal(m.round.players[botId].hands[0].bust, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.outcome, 'win');
+  assert.equal(m.round.resultByPlayer[botId].outcome, 'lose');
+});
+
+test('41 bot split first-hand bust advances to second bot hand', () => {
+  const botId = 'bot:normal:t3';
+  const m = {
+    id: 'm-bot-split-bust-advance',
+    phase: PHASES.ACTION_TURN,
+    playerIds: ['p1', botId],
+    round: {
+      turnPlayerId: botId,
+      pendingPressure: null,
+      baseBet: 5,
+      firstActionTaken: false,
+      postedBetByPlayer: { p1: 5, [botId]: 5 },
+      allInPlayers: { p1: false, [botId]: false },
+      deck: [card('5', 'D')],
+      players: {
+        p1: { activeHandIndex: 0, hands: [newHand([card('9'), card('7')], [false, true], 5, 0)] },
+        [botId]: {
+          activeHandIndex: 0,
+          hands: [
+            newHand([card('10'), card('Q')], [false, true], 5, 1),
+            newHand([card('9'), card('2')], [false, true], 5, 1)
+          ]
+        }
+      }
+    }
+  };
+
+  const res = applyAction(m, botId, 'hit');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.ACTION_TURN);
+  assert.equal(m.round.turnPlayerId, botId);
+  assert.equal(m.round.players[botId].activeHandIndex, 1);
+  assert.equal(m.round.players[botId].hands[0].bust, true);
+  assert.equal(m.round.players[botId].hands[1].bust, false);
+});

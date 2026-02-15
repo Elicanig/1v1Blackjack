@@ -1486,6 +1486,11 @@ function maybeEndRound(match) {
   }
 }
 
+function allHandsTerminalByBustOrSurrender(playerRoundState) {
+  if (!playerRoundState || !Array.isArray(playerRoundState.hands) || playerRoundState.hands.length === 0) return false;
+  return playerRoundState.hands.every((hand) => Boolean(hand?.bust || hand?.surrendered));
+}
+
 function progressTurn(match, actingPlayerId) {
   match.phase = PHASES.HAND_ADVANCE;
   const other = nextPlayerId(match, actingPlayerId);
@@ -1501,6 +1506,12 @@ function progressTurn(match, actingPlayerId) {
     advanceToNextPlayableHand(otherState);
     match.round.turnPlayerId = other;
     match.phase = PHASES.ACTION_TURN;
+  }
+
+  // Bot bust/surrender terminal: resolve immediately so human is not forced to click.
+  if (isBotPlayer(actingPlayerId) && !hasPlayableHand(ownState) && !match.round.pendingPressure && allHandsTerminalByBustOrSurrender(ownState)) {
+    resolveRound(match);
+    return;
   }
 
   maybeEndRound(match);
