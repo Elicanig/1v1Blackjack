@@ -997,6 +997,11 @@ function resetRankedQueueState() {
   };
 }
 
+function rankedClientLog(event, payload = {}) {
+  if (typeof console === 'undefined') return;
+  console.info(`[ranked-client] ${event}`, payload);
+}
+
 function beginRankedConnectedState(payload = {}) {
   state.rankedQueue.connected = true;
   state.rankedQueue.searching = false;
@@ -2997,6 +3002,7 @@ async function joinRankedQueue({ continueSeries = false } = {}) {
     return setError('Cancel Quick Play first.');
   }
   if (rankedQueueIsActive()) return;
+  rankedClientLog('QUEUE_CLICK', { continueSeries, view: state.view });
   const selected = Math.max(
     1,
     Math.floor(Number(state.rankedOverview?.fixedBet || state.me.rankedFixedBet || state.me.rankedBetMin || 50))
@@ -3009,12 +3015,14 @@ async function joinRankedQueue({ continueSeries = false } = {}) {
   state.rankedQueue.status = 'searching';
   state.rankedQueue.bet = selected;
   state.rankedQueue.queuedAt = new Date().toISOString();
+  rankedClientLog('QUEUE_REQUEST_START', { selectedBet: selected, continueSeries });
   render();
   try {
     const data = await api('/api/ranked/join', {
       method: 'POST',
       body: JSON.stringify({ bet: selected, continueSeries: Boolean(continueSeries) })
     });
+    rankedClientLog('QUEUE_REQUEST_RESPONSE', { status: data?.status || null, queuedAt: data?.queuedAt || null });
     if (data?.status === 'found') {
       beginRankedConnectedState(data);
       render();
@@ -3028,19 +3036,23 @@ async function joinRankedQueue({ continueSeries = false } = {}) {
     setStatus('Searching for ranked opponent...');
     render();
   } catch (e) {
+    rankedClientLog('QUEUE_REQUEST_ERROR', { message: e.message });
     resetRankedQueueState();
     loadRankedOverview({ silent: true });
+    pushToast(`Could not queue ranked: ${e.message}`);
     setError(e.message);
   }
 }
 
 async function cancelRankedQueue({ silent = false } = {}) {
   if (!rankedQueueIsActive()) return;
+  rankedClientLog('QUEUE_CANCEL_REQUEST', { silent });
   try {
     await api('/api/ranked/cancel', { method: 'POST' });
   } catch {
     // best effort
   }
+  rankedClientLog('QUEUE_CANCELLED', {});
   resetRankedQueueState();
   loadRankedOverview({ silent: true });
   if (!silent) setStatus('Stopped ranked matchmaking.');
@@ -4800,7 +4812,15 @@ function renderRanked() {
   const canQueue = Boolean(overview.canQueue ?? (Math.floor(Number(me.chips) || 0) >= fixedBet));
   const queueDisabledReason = overview.disabledReason || `Need at least ${fixedBet.toLocaleString()} chips for this rank.`;
   const activeSeries = overview.activeSeries || null;
-  const activeSeriesLive = Boolean(activeSeries && !activeSeries.complete && String(activeSeries.status || '').toLowerCase() === 'active');
+  const activeSeriesLive = Boolean(
+    activeSeries &&
+    (activeSeries.inProgress === true || String(activeSeries.status || '').toUpperCase() === 'IN_PROGRESS' || String(activeSeries.status || '').toLowerCase() === 'active') &&
+    activeSeries.canContinue !== false &&
+    (
+      Number(activeSeries.nextGameIndex || 1) <= Number(activeSeries.targetGames || 9) ||
+      Boolean(activeSeries.inTiebreaker)
+    )
+  );
   const markers = Array.isArray(activeSeries?.markers) ? activeSeries.markers : [];
   const mainMarkers = Array.from({ length: 9 }, (_, idx) => {
     const entry = markers.find((marker) => marker.gameIndex === idx + 1) || null;
@@ -4830,7 +4850,7 @@ function renderRanked() {
           </div>
         </div>
         <div class="ranked-hero-actions">
-          <button id="rankedSeriesActionBtn" class="gold" ${actionDisabled || searching ? 'disabled' : ''}>${searching ? 'Searching...' : actionLabel}</button>
+          <button id="rankedSeriesActionBtn" class="gold" ${actionDisabled || searching ? 'disabled' : ''}>${searching ? 'Queueing...' : actionLabel}</button>
           ${searching ? '<button id="rankedSeriesCancelBtn" class="ghost">Cancel Search</button>' : ''}
           <button id="viewRankRankedBtn" class="ghost" type="button">View Rank</button>
           <button id="forfeitRankedSeriesBtn" class="warn" type="button" ${forfeitDisabled ? 'disabled' : ''}>Forfeit Series</button>

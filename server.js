@@ -53,6 +53,11 @@ const RANKED_SERIES_LOSS_DELTA_MAX = -12;
 const RANKED_MATCH_MAX_ELO_GAP = 220;
 const RANKED_QUEUE_TIMEOUT_MS = 60_000;
 const RANKED_SERIES_TARGET_GAMES = 9;
+const RANKED_SERIES_STATUS = Object.freeze({
+  IN_PROGRESS: 'IN_PROGRESS',
+  COMPLETED: 'COMPLETED',
+  FORFEITED: 'FORFEITED'
+});
 const RANKED_TIERS = Object.freeze([
   { key: 'BRONZE', label: 'Bronze', min: 0, max: 1199, bets: { min: 50, max: 50 } },
   { key: 'SILVER', label: 'Silver', min: 1200, max: 1399, bets: { min: 100, max: 100 } },
@@ -376,6 +381,14 @@ for (const user of db.data.users) {
     user.favoriteStatKey = FAVORITE_STAT_DEFAULT;
     dbTouched = true;
   }
+  if (user.activeRankedSeriesId !== null && user.activeRankedSeriesId !== undefined && typeof user.activeRankedSeriesId !== 'string') {
+    user.activeRankedSeriesId = String(user.activeRankedSeriesId);
+    dbTouched = true;
+  }
+  if (user.activeRankedSeriesId === undefined) {
+    user.activeRankedSeriesId = null;
+    dbTouched = true;
+  }
   if (!Number.isFinite(Number(user.xp))) {
     user.xp = 0;
     dbTouched = true;
@@ -486,6 +499,25 @@ if (!Array.isArray(db.data.rankedHistory)) {
 if (!Array.isArray(db.data.rankedSeries)) {
   db.data.rankedSeries = [];
   dbTouched = true;
+} else {
+  for (const series of db.data.rankedSeries) {
+    if (!series || typeof series !== 'object') continue;
+    const normalizedStatus = normalizeRankedSeriesStatus(series.status);
+    if (series.status !== normalizedStatus) {
+      series.status = normalizedStatus;
+      dbTouched = true;
+    }
+    if (!series.endedAt && (normalizedStatus === RANKED_SERIES_STATUS.COMPLETED || normalizedStatus === RANKED_SERIES_STATUS.FORFEITED)) {
+      series.endedAt = series.completedAt || nowIso();
+      if (!series.completedAt) series.completedAt = series.endedAt;
+      dbTouched = true;
+    }
+    if (normalizedStatus === RANKED_SERIES_STATUS.IN_PROGRESS && !Number.isFinite(Number(series.gameIndex || series.game_index))) {
+      series.gameIndex = 1;
+      series.game_index = 1;
+      dbTouched = true;
+    }
+  }
 }
 if (dbTouched) await db.write();
 
@@ -705,6 +737,12 @@ function getMatchBetLimits(match) {
 
 function highRollerUnlockError() {
   return `High Roller unlocks at ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips.`;
+}
+
+function logRankedQueueEvent(event, payload = {}) {
+  if (process.env.NODE_ENV === 'test') return;
+  // eslint-disable-next-line no-console
+  console.log(`[ranked-queue] ${event}`, JSON.stringify(payload));
 }
 
 function hasHighRollerAccess(user) {
@@ -1019,13 +1057,31 @@ function rankedOverviewForUser(user) {
   const fixedBet = Math.max(1, Math.floor(Number(meta.bets.min) || 50));
   const chips = Math.max(0, Math.floor(Number(user.chips) || 0));
   const canQueue = chips >= fixedBet;
-  const activeSeries = rankedSeriesSummaryForUser(activeRankedSeriesForUser(user.id), user.id);
+  const reconciled = reconcileRankedSeriesForUser(user.id);
+  const activeSeries = rankedSeriesSummaryForUser(reconciled.activeSeries, user.id);
   const recentSeries = (db.data.rankedSeries || [])
-    .filter((series) => series && series.status === 'complete' && (series.p1 === user.id || series.p2 === user.id))
+    .filter((series) => {
+      if (!series || (series.p1 !== user.id && series.p2 !== user.id)) return false;
+      const status = normalizeRankedSeriesStatus(series.status);
+      return status === RANKED_SERIES_STATUS.COMPLETED || status === RANKED_SERIES_STATUS.FORFEITED;
+    })
     .slice(-5)
     .reverse()
     .map((series) => rankedSeriesSummaryForUser(series, user.id))
     .filter(Boolean);
+  if (reconciled.changed) {
+    db.write();
+  }
+  if (process.env.NODE_ENV !== 'test') {
+    // eslint-disable-next-line no-console
+    console.log('[ranked-overview]', JSON.stringify({
+      userId: user.id,
+      activeSeriesId: activeSeries?.seriesId || null,
+      activeSeriesStatus: activeSeries?.status || null,
+      activeSeriesGameIndex: activeSeries?.nextGameIndex || null,
+      endedAt: activeSeries?.endedAt || null
+    }));
+  }
   return {
     elo: meta.elo,
     rankTier: meta.tierLabel,
@@ -1769,19 +1825,36 @@ function removeFromRankedQueue(userId) {
   if (!existing) return false;
   const idx = rankedQueue.findIndex((entry) => entry.userId === userId);
   if (idx !== -1) rankedQueue.splice(idx, 1);
+  logRankedQueueEvent('QUEUE_CANCELLED', {
+    userId,
+    queuedAt: existing.queuedAt || null,
+    rankTier: existing.rankTier || null,
+    reason: 'explicit_cancel_or_cleanup'
+  });
   return true;
 }
 
 function enqueueRankedUser(user, requestedBet) {
   if (!user) return { error: 'User not found' };
-  if (isUserInActiveMatch(user.id)) return { error: 'Already in an active match' };
+  logRankedQueueEvent('QUEUE_REQUEST', {
+    userId: user.id,
+    requestedBet: Number.isFinite(Number(requestedBet)) ? Math.floor(Number(requestedBet)) : null
+  });
+  if (isUserInActiveMatch(user.id)) {
+    logRankedQueueEvent('QUEUE_REJECTED', { userId: user.id, reason: 'already_in_active_match' });
+    return { error: 'Already in an active match' };
+  }
   removeFromQuickPlayQueue(user.id);
   const meta = rankedMetaForUser(user);
+  const reconciled = reconcileRankedSeriesForUser(user.id);
+  if (reconciled.changed) db.write();
   const fixedBet = Math.max(1, Math.floor(Number(meta.bets.min) || 50));
   if (Number.isFinite(Number(requestedBet)) && Math.floor(Number(requestedBet)) !== fixedBet) {
+    logRankedQueueEvent('QUEUE_REJECTED', { userId: user.id, reason: 'ranked_bet_mismatch', fixedBet, requestedBet: Math.floor(Number(requestedBet)) });
     return { error: `Ranked bet is fixed at ${fixedBet} for ${meta.tierLabel}` };
   }
   if (Math.max(0, Math.floor(Number(user?.chips) || 0)) < fixedBet) {
+    logRankedQueueEvent('QUEUE_REJECTED', { userId: user.id, reason: 'insufficient_chips', fixedBet, chips: Math.floor(Number(user?.chips) || 0) });
     return { error: `Need at least ${fixedBet} chips to queue ranked as ${meta.tierLabel}` };
   }
   const existing = rankedQueueByUser.get(user.id);
@@ -1790,6 +1863,13 @@ function enqueueRankedUser(user, requestedBet) {
     existing.elo = meta.elo;
     existing.rankTier = meta.tierKey;
     existing.queuedAt = existing.queuedAt || nowIso();
+    logRankedQueueEvent('QUEUE_ACCEPTED', {
+      userId: user.id,
+      fixedBet,
+      rankTier: meta.tierKey,
+      queuedAt: existing.queuedAt,
+      deduped: true
+    });
     return { ok: true, entry: existing };
   }
   const entry = {
@@ -1801,6 +1881,13 @@ function enqueueRankedUser(user, requestedBet) {
   };
   rankedQueue.push(entry);
   rankedQueueByUser.set(user.id, entry);
+  logRankedQueueEvent('QUEUE_ACCEPTED', {
+    userId: user.id,
+    fixedBet,
+    rankTier: meta.tierKey,
+    queuedAt: entry.queuedAt,
+    deduped: false
+  });
   return { ok: true, entry };
 }
 
@@ -1816,6 +1903,12 @@ function compactRankedQueue() {
     if (nowTs - queuedAtTs > RANKED_QUEUE_TIMEOUT_MS) {
       rankedQueue.splice(i, 1);
       rankedQueueByUser.delete(entry.userId);
+      logRankedQueueEvent('QUEUE_CANCELLED', {
+        userId: entry.userId,
+        rankTier: entry.rankTier || null,
+        queuedAt: entry.queuedAt || null,
+        reason: 'queue_timeout'
+      });
       emitToUser(entry.userId, 'ranked:cancelled', { reason: 'queue_timeout' });
       continue;
     }
@@ -1823,6 +1916,12 @@ function compactRankedQueue() {
     if (!user || isUserInActiveMatch(entry.userId)) {
       rankedQueue.splice(i, 1);
       rankedQueueByUser.delete(entry.userId);
+      logRankedQueueEvent('QUEUE_CANCELLED', {
+        userId: entry.userId,
+        rankTier: entry.rankTier || null,
+        queuedAt: entry.queuedAt || null,
+        reason: !user ? 'user_missing' : 'entered_match'
+      });
     }
   }
 }
@@ -1896,6 +1995,14 @@ async function processRankedQueue() {
     }
     pushMatchState(match);
     touched = true;
+    logRankedQueueEvent('MATCH_FOUND', {
+      seriesId: match.rankedSeriesId || null,
+      matchId: match.id,
+      userA: userA.id,
+      userB: userB.id,
+      rankTier: a.rankTier,
+      fixedBet
+    });
     matchedEntries.push({ userId: userA.id, payload: buildRankedFoundPayload(match, userA.id, fixedBet) });
     matchedEntries.push({ userId: userB.id, payload: buildRankedFoundPayload(match, userB.id, fixedBet) });
   }
@@ -2239,6 +2346,118 @@ function rankedTierByKey(rankKey) {
   return RANKED_TIERS.find((tier) => tier.key === safe) || null;
 }
 
+function normalizeRankedSeriesStatus(status) {
+  const safe = String(status || '').trim().toUpperCase();
+  if (safe === 'ACTIVE' || safe === 'IN_PROGRESS') return RANKED_SERIES_STATUS.IN_PROGRESS;
+  if (safe === 'COMPLETE' || safe === 'COMPLETED') return RANKED_SERIES_STATUS.COMPLETED;
+  if (safe === 'FORFEIT' || safe === 'FORFEITED') return RANKED_SERIES_STATUS.FORFEITED;
+  return RANKED_SERIES_STATUS.IN_PROGRESS;
+}
+
+function isRankedSeriesInProgress(series) {
+  return normalizeRankedSeriesStatus(series?.status) === RANKED_SERIES_STATUS.IN_PROGRESS;
+}
+
+function hasLiveRankedMatchForSeries(seriesId) {
+  if (!seriesId) return false;
+  for (const match of matches.values()) {
+    if (!match) continue;
+    if (String(match.matchType || '').toUpperCase() !== 'RANKED') continue;
+    if (!matches.has(match.id)) continue;
+    if (String(match.rankedSeriesId || '') === String(seriesId)) return true;
+  }
+  return false;
+}
+
+function clearUserActiveRankedSeriesPointer(userId, seriesId = null) {
+  const user = getUserById(userId);
+  if (!user) return false;
+  if (typeof user.activeRankedSeriesId !== 'string') user.activeRankedSeriesId = user.activeRankedSeriesId ? String(user.activeRankedSeriesId) : null;
+  if (!user.activeRankedSeriesId) return false;
+  if (seriesId && String(user.activeRankedSeriesId) !== String(seriesId)) return false;
+  user.activeRankedSeriesId = null;
+  return true;
+}
+
+function markRankedSeriesFinalized(series, status, {
+  winnerId = null,
+  loserId = null,
+  endedAt = nowIso(),
+  reason = ''
+} = {}) {
+  if (!series) return false;
+  const nextStatus = normalizeRankedSeriesStatus(status);
+  series.status = nextStatus;
+  series.endedAt = endedAt;
+  series.completedAt = endedAt;
+  if (winnerId) series.winnerId = winnerId;
+  if (loserId) series.loserId = loserId;
+  const clearedP1 = clearUserActiveRankedSeriesPointer(series.p1, series.id);
+  const clearedP2 = clearUserActiveRankedSeriesPointer(series.p2, series.id);
+  if (process.env.NODE_ENV !== 'test') {
+    // eslint-disable-next-line no-console
+    console.log('[ranked-series-finalize]', JSON.stringify({
+      seriesId: series.id,
+      status: nextStatus,
+      winnerId: series.winnerId || null,
+      loserId: series.loserId || null,
+      endedAt,
+      reason,
+      clearedPointers: { [series.p1]: clearedP1, [series.p2]: clearedP2 }
+    }));
+  }
+  return true;
+}
+
+function reconcileRankedSeriesForUser(userId) {
+  if (!userId || !Array.isArray(db.data.rankedSeries)) return { changed: false, activeSeries: null };
+  const user = getUserById(userId);
+  if (!user) return { changed: false, activeSeries: null };
+  let changed = false;
+  let activeSeries = null;
+  const pointerId = user.activeRankedSeriesId ? String(user.activeRankedSeriesId) : null;
+  const candidateSeries = db.data.rankedSeries
+    .filter((series) => series && (series.p1 === userId || series.p2 === userId))
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+  for (const series of candidateSeries) {
+    const normalizedStatus = normalizeRankedSeriesStatus(series.status);
+    if (series.status !== normalizedStatus) {
+      series.status = normalizedStatus;
+      changed = true;
+    }
+    if (!series.endedAt && (normalizedStatus === RANKED_SERIES_STATUS.COMPLETED || normalizedStatus === RANKED_SERIES_STATUS.FORFEITED)) {
+      series.endedAt = series.completedAt || nowIso();
+      if (!series.completedAt) series.completedAt = series.endedAt;
+      changed = true;
+    }
+    if (!isRankedSeriesInProgress(series)) continue;
+    const liveMatch = hasLiveRankedMatchForSeries(series.id);
+    if (!liveMatch) {
+      markRankedSeriesFinalized(series, RANKED_SERIES_STATUS.FORFEITED, {
+        winnerId: series.winnerId || null,
+        loserId: series.loserId || null,
+        reason: 'stale_active_series_cleanup'
+      });
+      changed = true;
+      continue;
+    }
+    if (!activeSeries) activeSeries = series;
+  }
+
+  if (activeSeries) {
+    if (pointerId !== String(activeSeries.id)) {
+      user.activeRankedSeriesId = activeSeries.id;
+      changed = true;
+    }
+  } else if (user.activeRankedSeriesId) {
+    user.activeRankedSeriesId = null;
+    changed = true;
+  }
+
+  return { changed, activeSeries };
+}
+
 function createRankedSeries(match) {
   if (!match || !Array.isArray(match.playerIds) || match.playerIds.length !== 2) return null;
   if (!Array.isArray(db.data.rankedSeries)) db.data.rankedSeries = [];
@@ -2269,18 +2488,23 @@ function createRankedSeries(match) {
     p1ChipDelta: 0,
     p2ChipDelta: 0,
     games: [],
-    status: 'active',
+    status: RANKED_SERIES_STATUS.IN_PROGRESS,
     winnerId: null,
     loserId: null,
     eloFinalizedAt: null,
     eloFinalizedBy: null,
     seriesElo: null,
     createdAt: nowIso(),
+    endedAt: null,
     completedAt: null
   };
   db.data.rankedSeries.push(series);
   db.data.rankedSeries = db.data.rankedSeries.slice(-1500);
   match.rankedSeriesId = seriesId;
+  const p1User = getUserById(p1);
+  const p2User = getUserById(p2);
+  if (p1User) p1User.activeRankedSeriesId = seriesId;
+  if (p2User) p2User.activeRankedSeriesId = seriesId;
   return series;
 }
 
@@ -2290,13 +2514,8 @@ function getRankedSeriesById(seriesId) {
 }
 
 function activeRankedSeriesForUser(userId) {
-  if (!userId || !Array.isArray(db.data.rankedSeries)) return null;
-  for (let i = db.data.rankedSeries.length - 1; i >= 0; i -= 1) {
-    const series = db.data.rankedSeries[i];
-    if (!series || series.status !== 'active') continue;
-    if (series.p1 === userId || series.p2 === userId) return series;
-  }
-  return null;
+  const reconciled = reconcileRankedSeriesForUser(userId);
+  return reconciled.activeSeries || null;
 }
 
 function ensureRankedSeriesForMatch(match, { createIfMissing = true } = {}) {
@@ -2305,7 +2524,8 @@ function ensureRankedSeriesForMatch(match, { createIfMissing = true } = {}) {
   if (series && !match.rankedSeriesId) {
     match.rankedSeriesId = series.id;
   }
-  if (series) return series;
+  if (series && isRankedSeriesInProgress(series)) return series;
+  if (series && !createIfMissing) return series;
   if (!createIfMissing) return null;
   series = createRankedSeries(match);
   return series;
@@ -2315,11 +2535,15 @@ function rankedSeriesSummaryForUser(series, userId) {
   if (!series || !userId) return null;
   const userIsP1 = series.p1 === userId;
   if (!userIsP1 && series.p2 !== userId) return null;
+  const status = normalizeRankedSeriesStatus(series.status);
   const targetGames = RANKED_SERIES_TARGET_GAMES;
   const games = Array.isArray(series.games) ? series.games : [];
   const completedMainGames = Math.min(targetGames, games.length);
   const tiebreakerRoundsPlayed = Math.max(0, games.length - targetGames);
-  const inTiebreaker = series.status === 'active' && completedMainGames >= targetGames && (Number(series.p1ChipDelta) === Number(series.p2ChipDelta));
+  const inProgress = status === RANKED_SERIES_STATUS.IN_PROGRESS;
+  const inTiebreaker = inProgress && completedMainGames >= targetGames && (Number(series.p1ChipDelta) === Number(series.p2ChipDelta));
+  const canContinue = inProgress && (completedMainGames < targetGames || inTiebreaker);
+  const nextGameIndex = Math.max(1, games.length + 1);
   const yourChipDelta = userIsP1 ? Number(series.p1ChipDelta || 0) : Number(series.p2ChipDelta || 0);
   const oppChipDelta = userIsP1 ? Number(series.p2ChipDelta || 0) : Number(series.p1ChipDelta || 0);
   const markers = games.map((game) => ({
@@ -2337,7 +2561,9 @@ function rankedSeriesSummaryForUser(series, userId) {
     : null;
   return {
     seriesId: series.id,
-    status: series.status,
+    status,
+    inProgress,
+    canContinue,
     rankTierKey: String(series.rankAtStart || series.rank_at_start || '').toUpperCase(),
     rankTier: rankedTierByKey(series.rankAtStart || series.rank_at_start)?.label || 'Bronze',
     fixedBet: Math.max(1, Math.floor(Number(series.betAmount || series.bet_amount) || 50)),
@@ -2346,16 +2572,18 @@ function rankedSeriesSummaryForUser(series, userId) {
     tiebreakerRoundsPlayed,
     inTiebreaker,
     nextTiebreakerRound: inTiebreaker ? (tiebreakerRoundsPlayed + 1) : 0,
+    nextGameIndex,
     yourChipDelta,
     opponentChipDelta: oppChipDelta,
     markers,
     winnerId: series.winnerId || null,
     loserId: series.loserId || null,
-    complete: series.status === 'complete',
+    complete: status !== RANKED_SERIES_STATUS.IN_PROGRESS,
     eloDelta: Number.isFinite(Number(eloDelta)) ? Math.floor(Number(eloDelta)) : null,
     eloFinalizedAt: series.eloFinalizedAt || null,
     createdAt: series.createdAt,
-    completedAt: series.completedAt || null
+    endedAt: series.endedAt || series.completedAt || null,
+    completedAt: series.completedAt || series.endedAt || null
   };
 }
 
@@ -2368,7 +2596,7 @@ function recordRankedSeriesGame(match, {
 } = {}) {
   const series = ensureRankedSeriesForMatch(match);
   if (!series) return null;
-  if (series.status === 'complete') {
+  if (!isRankedSeriesInProgress(series)) {
     return {
       series,
       gameEntry: null,
@@ -2424,30 +2652,32 @@ function recordRankedSeriesGame(match, {
   }
 
   if (seriesWinner) {
-    series.status = 'complete';
-    series.winnerId = seriesWinner;
-    series.loserId = seriesWinner === p1 ? p2 : p1;
-    series.completedAt = nowIso();
+    markRankedSeriesFinalized(series, RANKED_SERIES_STATUS.COMPLETED, {
+      winnerId: seriesWinner,
+      loserId: seriesWinner === p1 ? p2 : p1,
+      reason: 'series_complete_by_score'
+    });
   }
 
   return {
     series,
     gameEntry,
-    complete: series.status === 'complete',
+    complete: !isRankedSeriesInProgress(series),
     winnerId: series.winnerId || null,
     tiebreakerRound,
-    inTiebreaker: series.status === 'active' && gameIndex >= RANKED_SERIES_TARGET_GAMES && Number(series.p1ChipDelta) === Number(series.p2ChipDelta)
+    inTiebreaker: isRankedSeriesInProgress(series) && gameIndex >= RANKED_SERIES_TARGET_GAMES && Number(series.p1ChipDelta) === Number(series.p2ChipDelta)
   };
 }
 
 function finalizeRankedSeriesByForfeit(match, winnerId, loserId) {
   if (!match || String(match.matchType || '').toUpperCase() !== 'RANKED') return null;
   const series = ensureRankedSeriesForMatch(match);
-  if (!series || series.status === 'complete') return series;
-  series.status = 'complete';
-  series.winnerId = winnerId || null;
-  series.loserId = loserId || null;
-  series.completedAt = nowIso();
+  if (!series || !isRankedSeriesInProgress(series)) return series;
+  markRankedSeriesFinalized(series, RANKED_SERIES_STATUS.FORFEITED, {
+    winnerId: winnerId || null,
+    loserId: loserId || null,
+    reason: 'forfeit'
+  });
   return series;
 }
 
@@ -4987,6 +5217,7 @@ function buildNewUser(username) {
     rankedLosses: 0,
     rankedGames: 0,
     rankedLossStreak: 0,
+    activeRankedSeriesId: null,
     rankTier: rankedTierFromElo(RANKED_BASE_ELO).key,
     peakRankedElo: RANKED_BASE_ELO,
     peakRankTier: rankedTierFromElo(RANKED_BASE_ELO).key,
@@ -5843,25 +6074,27 @@ app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
 app.post('/api/ranked/join', authMiddleware, async (req, res) => {
   const wantsContinueSeries = Boolean(req.body?.continueSeries);
   if (wantsContinueSeries) {
-    const activeSeries = activeRankedSeriesForUser(req.user.id);
-    if (!activeSeries) {
+    const activeSeriesSummary = rankedSeriesSummaryForUser(activeRankedSeriesForUser(req.user.id), req.user.id);
+    if (!activeSeriesSummary || !activeSeriesSummary.inProgress || !activeSeriesSummary.canContinue) {
+      logRankedQueueEvent('QUEUE_REJECTED', {
+        userId: req.user.id,
+        reason: 'continue_requested_without_active_series'
+      });
       return res.status(409).json({
         error: 'No active ranked series found to continue. Refreshing ranked state.',
         overview: rankedOverviewForUser(req.user)
       });
     }
-    if (!isUserInActiveMatch(req.user.id)) {
-      return res.status(409).json({
-        error: 'Active series exists but no live ranked match is attached. Refreshing ranked state.',
-        overview: rankedOverviewForUser(req.user)
-      });
-    }
   }
   if (isUserInActiveMatch(req.user.id)) {
+    logRankedQueueEvent('QUEUE_REJECTED', {
+      userId: req.user.id,
+      reason: 'already_in_active_match_on_join'
+    });
     return res.status(409).json({ error: 'Already in an active match' });
   }
   const enqueued = enqueueRankedUser(req.user, req.body?.bet);
-  if (enqueued.error) return res.status(400).json({ error: enqueued.error });
+  if (enqueued.error) return res.status(400).json({ error: enqueued.error, overview: rankedOverviewForUser(req.user) });
   const matched = await processRankedQueue();
   const found = matched.find((entry) => entry.userId === req.user.id);
   if (found) return res.json(found.payload);
@@ -5878,6 +6111,10 @@ app.post('/api/ranked/join', authMiddleware, async (req, res) => {
 
 app.post('/api/ranked/cancel', authMiddleware, async (req, res) => {
   const removed = removeFromRankedQueue(req.user.id);
+  logRankedQueueEvent('QUEUE_CANCEL_ENDPOINT', {
+    userId: req.user.id,
+    removed
+  });
   return res.json({ status: 'cancelled', removed });
 });
 
