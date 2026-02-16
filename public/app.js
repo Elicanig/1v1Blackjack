@@ -50,6 +50,14 @@ const TITLE_DEFS = Object.freeze([
   { key: 'GIANT_KILLER', label: 'Giant Killer', unlockHint: 'Beat a player with higher level or bankroll.' },
   { key: 'STREAK_LORD', label: 'Streak Lord', unlockHint: 'Reach a 10-match win streak.' }
 ]);
+const CORE_FAVORITE_STAT_KEYS = new Set([
+  'TOTAL_MATCHES',
+  'HANDS_WON',
+  'HANDS_LOST',
+  'PUSHES',
+  'BLACKJACKS',
+  'SIX_SEVEN_DEALT'
+]);
 const FAVORITE_STAT_DEFS = Object.freeze([
   {
     key: 'TOTAL_MATCHES',
@@ -470,6 +478,7 @@ const state = {
   betHistoryModalOpen: false,
   favoriteStatModalOpen: false,
   favoriteStatDraftKey: '',
+  favoriteStatFilter: '',
   rankTimelineModalOpen: false,
   rankedForfeitModalOpen: false,
   network: {
@@ -1957,6 +1966,7 @@ async function loadMe() {
     state.rankedOverview = null;
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
+    state.favoriteStatFilter = '';
     state.rankTimelineModalOpen = false;
     state.rankedForfeitModalOpen = false;
     render();
@@ -1974,6 +1984,7 @@ function goToView(view) {
     if (view !== 'profile') {
       state.favoriteStatModalOpen = false;
       state.favoriteStatDraftKey = '';
+      state.favoriteStatFilter = '';
     }
   }
   state.view = view;
@@ -2118,12 +2129,7 @@ function canTriggerAction(action) {
 
 function triggerAction(action) {
   if (!canTriggerAction(action)) return;
-  const myState = state.currentMatch.players[state.me.id];
-  const hand = myState.hands[myState.activeHandIndex || 0];
-  if (action === 'double' || action === 'split') {
-    openActionConfirm(action, hand);
-    return;
-  }
+  state.confirmActionModal = null;
   emitAction(action);
 }
 
@@ -2175,14 +2181,16 @@ function userLikeById(id) {
 }
 
 function emitAction(action) {
+  const normalizedAction = String(action || '').trim().toLowerCase();
+  if (!normalizedAction) return;
   if (isOfflineMatchActive()) {
-    const result = applyOfflineMatchAction(action);
+    const result = applyOfflineMatchAction(normalizedAction);
     if (result?.error) setError(result.error);
     render();
     return;
   }
   if (!state.currentMatch || !state.socket) return;
-  state.socket.emit('match:action', { matchId: state.currentMatch.id, action });
+  state.socket.emit('match:action', { matchId: state.currentMatch.id, action: normalizedAction });
 }
 
 function emitPressureDecision(decision) {
@@ -2452,6 +2460,7 @@ async function saveProfile(form) {
     state.me = meData.user || profileData.user;
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
+    state.favoriteStatFilter = '';
     setStatus('Profile saved.');
     loadLeaderboard({ silent: true });
   } catch (e) {
@@ -2470,6 +2479,7 @@ async function saveFavoriteStatPreference(nextKey) {
     state.me = data?.user || { ...state.me, favoriteStatKey };
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
+    state.favoriteStatFilter = '';
     setStatus('Favorite stat updated.');
     render();
   } catch (e) {
@@ -3160,6 +3170,7 @@ function logout() {
   state.betHistoryModalOpen = false;
   state.favoriteStatModalOpen = false;
   state.favoriteStatDraftKey = '';
+  state.favoriteStatFilter = '';
   state.rankTimelineModalOpen = false;
   state.rankedForfeitModalOpen = false;
   state.presenceByUser = {};
@@ -4151,6 +4162,24 @@ function renderProfile() {
   const selectedFavoriteKey = normalizeFavoriteStatKey(me.favoriteStatKey);
   const selectedFavorite = favoriteStats.find((entry) => entry.key === selectedFavoriteKey) || favoriteStats[0];
   const favoriteDraftKey = normalizeFavoriteStatKey(state.favoriteStatDraftKey || selectedFavorite.key);
+  const favoriteStatFilter = String(state.favoriteStatFilter || '').trim().toLowerCase();
+  const filteredFavoriteStats = favoriteStatFilter
+    ? favoriteStats.filter((entry) => {
+        const haystack = `${entry.label} ${entry.description} ${entry.key}`.toLowerCase();
+        return haystack.includes(favoriteStatFilter);
+      })
+    : favoriteStats;
+  const coreFavoriteStats = filteredFavoriteStats.filter((entry) => CORE_FAVORITE_STAT_KEYS.has(entry.key));
+  const otherFavoriteStats = filteredFavoriteStats.filter((entry) => !CORE_FAVORITE_STAT_KEYS.has(entry.key));
+  const renderFavoriteStatRows = (entries = []) => entries.map((entry) => `
+    <button class="favorite-stat-option ${entry.key === favoriteDraftKey ? 'is-selected' : ''}" type="button" data-favorite-stat-select="${entry.key}">
+      <div class="favorite-stat-option-head">
+        <strong>${entry.label}</strong>
+        <span class="favorite-stat-option-value">${entry.valueText}</span>
+      </div>
+      <div class="muted">${entry.description}</div>
+    </button>
+  `).join('');
   app.innerHTML = `
     ${renderTopbar('Profile')}
     <main class="view-stack">
@@ -4272,25 +4301,28 @@ function renderProfile() {
       state.favoriteStatModalOpen
         ? `<div class="modal" id="favoriteStatModal">
             <div class="modal-panel card favorite-stat-modal" role="dialog" aria-modal="true" aria-label="Choose favorite stat">
-              <div class="stats-more-head">
-                <h3>Choose Favorite Stat</h3>
+              <div class="favorite-stat-modal-head stats-more-head">
+                <div>
+                  <h3>Choose Favorite Stat</h3>
+                  <p class="muted">Pick one stat to display publicly on your profile.</p>
+                </div>
                 <button id="closeFavoriteStatModalBtn" class="ghost" type="button">Cancel</button>
               </div>
-              <p class="muted">Pick one stat to display publicly on your profile.</p>
+              <label class="favorite-stat-search">
+                <span class="muted">Search stats</span>
+                <input id="favoriteStatSearchInput" type="text" placeholder="Search stats..." value="${state.favoriteStatFilter || ''}" />
+              </label>
               <div class="favorite-stat-list">
-                ${favoriteStats
-                  .map((entry) => `
-                    <button class="favorite-stat-option ${entry.key === favoriteDraftKey ? 'is-selected' : ''}" type="button" data-favorite-stat-select="${entry.key}">
-                      <div class="favorite-stat-option-head">
-                        <strong>${entry.label}</strong>
-                        <span>${entry.valueText}</span>
-                      </div>
-                      <div class="muted">${entry.description}</div>
-                    </button>
-                  `)
-                  .join('')}
+                ${
+                  !filteredFavoriteStats.length
+                    ? '<div class="muted favorite-stat-empty">No stats match your search.</div>'
+                    : `
+                      ${coreFavoriteStats.length ? `<section class="favorite-stat-group"><div class="favorite-stat-group-title">Core Stats</div>${renderFavoriteStatRows(coreFavoriteStats)}</section>` : ''}
+                      ${otherFavoriteStats.length ? `<section class="favorite-stat-group"><div class="favorite-stat-group-title">Other Stats</div>${renderFavoriteStatRows(otherFavoriteStats)}</section>` : ''}
+                    `
+                }
               </div>
-              <div class="row profile-favorite-modal-actions">
+              <div class="row profile-favorite-modal-actions favorite-stat-modal-foot">
                 <button id="cancelFavoriteStatModalBtn" class="ghost" type="button">Cancel</button>
                 <button id="saveFavoriteStatModalBtn" class="primary" type="button">Save</button>
               </div>
@@ -4322,6 +4354,7 @@ function renderProfile() {
   if (openFavoriteStatModalBtn) {
     openFavoriteStatModalBtn.onclick = () => {
       state.favoriteStatDraftKey = selectedFavorite.key;
+      state.favoriteStatFilter = '';
       state.favoriteStatModalOpen = true;
       render();
     };
@@ -4331,6 +4364,7 @@ function renderProfile() {
     favoriteStatModal.onclick = () => {
       state.favoriteStatModalOpen = false;
       state.favoriteStatDraftKey = '';
+      state.favoriteStatFilter = '';
       render();
     };
   }
@@ -4343,6 +4377,7 @@ function renderProfile() {
     closeFavoriteStatModalBtn.onclick = () => {
       state.favoriteStatModalOpen = false;
       state.favoriteStatDraftKey = '';
+      state.favoriteStatFilter = '';
       render();
     };
   }
@@ -4351,8 +4386,16 @@ function renderProfile() {
     cancelFavoriteStatModalBtn.onclick = () => {
       state.favoriteStatModalOpen = false;
       state.favoriteStatDraftKey = '';
+      state.favoriteStatFilter = '';
       render();
     };
+  }
+  const favoriteStatSearchInput = document.getElementById('favoriteStatSearchInput');
+  if (favoriteStatSearchInput) {
+    favoriteStatSearchInput.addEventListener('input', (event) => {
+      state.favoriteStatFilter = String(event.target.value || '');
+      render();
+    });
   }
   const saveFavoriteStatModalBtn = document.getElementById('saveFavoriteStatModalBtn');
   if (saveFavoriteStatModalBtn) {
@@ -5266,6 +5309,28 @@ function renderMatch() {
   const canEditBet = Boolean(match.canEditBet);
   const canConfirmBet = Boolean(match.canConfirmBet);
   const rankedMatch = String(match.matchType || '').toUpperCase() === 'RANKED';
+  const rankedSeriesHud = rankedMatch
+    ? (match.rankedSeriesHud || {
+        seriesGameIndex: Number(match.seriesGameIndex) || 0,
+        baseSeriesGames: Number(match.baseSeriesGames) || 9,
+        isTiebreaker: Boolean(match.isTiebreaker),
+        tiebreakerIndex: Number(match.tiebreakerIndex) || 0
+      })
+    : null;
+  const seriesGameIndex = Math.max(0, Math.floor(Number(rankedSeriesHud?.seriesGameIndex) || 0));
+  const baseSeriesGames = Math.max(1, Math.floor(Number(rankedSeriesHud?.baseSeriesGames) || 9));
+  const isTiebreaker = Boolean(rankedSeriesHud?.isTiebreaker) || seriesGameIndex > baseSeriesGames;
+  const tiebreakerIndex = Math.max(
+    0,
+    Math.floor(Number(rankedSeriesHud?.tiebreakerIndex) || (isTiebreaker ? (seriesGameIndex - baseSeriesGames) : 0))
+  );
+  const rankedSeriesHudText = rankedMatch && seriesGameIndex > 0
+    ? (
+      isTiebreaker
+        ? `Series: ${baseSeriesGames}/${baseSeriesGames} • TB ${Math.max(1, tiebreakerIndex)}`
+        : `Series: ${Math.min(seriesGameIndex, baseSeriesGames)}/${baseSeriesGames}`
+    )
+    : '';
   const myConfirmed = Boolean(match.betConfirmedByPlayer?.[me.id]);
   const oppConfirmed = Boolean(match.betConfirmedByPlayer?.[oppId]);
   const betBounds = getBetBounds(match);
@@ -5417,7 +5482,7 @@ function renderMatch() {
                 <div class="status-strip">
                   <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
                   <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
-                  <div class="strip-item"><span class="muted">Phase</span> <strong>${phaseLabel}</strong></div>
+                  <div class="strip-item"><span class="muted">Phase</span> <strong class="phase-strong">${phaseLabel}${rankedSeriesHudText ? ` <span class="series-pill">${rankedSeriesHudText}</span>` : ''}</strong></div>
                   <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ' <span class="streak-flame" aria-hidden="true">🔥</span>' : ''}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>

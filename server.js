@@ -2684,6 +2684,22 @@ function buildClientState(match, viewerId) {
   const rankedSeries = String(match.matchType || '').toUpperCase() === 'RANKED'
     ? rankedSeriesSummaryForUser(ensureRankedSeriesForMatch(match), viewerId)
     : null;
+  const rankedSeriesHud = rankedSeries
+    ? (() => {
+        const baseSeriesGames = RANKED_SERIES_TARGET_GAMES;
+        const seriesGameIndex = Math.max(
+          1,
+          Math.floor(Number(match.roundNumber) || 0) || ((rankedSeries.markers?.length || 0) + 1)
+        );
+        const isTiebreaker = seriesGameIndex > baseSeriesGames;
+        return {
+          seriesGameIndex,
+          baseSeriesGames,
+          isTiebreaker,
+          tiebreakerIndex: isTiebreaker ? (seriesGameIndex - baseSeriesGames) : 0
+        };
+      })()
+    : null;
   const opponentId = nextPlayerId(match, viewerId);
   const yourProposal = negotiation ? Number(negotiation.proposalsByPlayerId?.[viewerId]) || null : null;
   const opponentProposal = negotiation ? Number(negotiation.proposalsByPlayerId?.[opponentId]) || null : null;
@@ -2743,6 +2759,11 @@ function buildClientState(match, viewerId) {
     highRoller: String(match?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(match?.highRoller),
     quickPlayBucket: normalizeQuickPlayBucket(match.quickPlayBucket),
     rankedSeries,
+    rankedSeriesHud,
+    seriesGameIndex: rankedSeriesHud?.seriesGameIndex || null,
+    baseSeriesGames: rankedSeriesHud?.baseSeriesGames || null,
+    isTiebreaker: Boolean(rankedSeriesHud?.isTiebreaker),
+    tiebreakerIndex: rankedSeriesHud?.tiebreakerIndex || null,
     roundNumber: match.roundNumber,
     phase: match.phase,
     playerIds: match.playerIds,
@@ -4154,6 +4175,7 @@ function scheduleBotTurn(match) {
 }
 
 function applyAction(match, playerId, action) {
+  const normalizedAction = String(action || '').trim().toLowerCase();
   if (match.phase !== PHASES.ACTION_TURN) return { error: 'Round not in action phase' };
   if (match.round.turnPlayerId !== playerId) return { error: 'Not your turn' };
   if (match.round.pendingPressure) return { error: 'Pending pressure decision' };
@@ -4167,7 +4189,7 @@ function applyAction(match, playerId, action) {
   const opponentState = match.round.players[opponentId];
   const betLimits = getMatchBetLimits(match);
 
-  if (action === 'hit') {
+  if (normalizedAction === 'hit') {
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     hand.cards.push(drawCard(match.round));
@@ -4194,7 +4216,7 @@ function applyAction(match, playerId, action) {
     return { ok: true };
   }
 
-  if (action === 'stand') {
+  if (normalizedAction === 'stand') {
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     const total = handTotal(hand.cards);
@@ -4208,7 +4230,7 @@ function applyAction(match, playerId, action) {
     return { ok: true };
   }
 
-  if (action === 'surrender') {
+  if (normalizedAction === 'surrender') {
     if ((hand.actionCount || 0) > 0) return { error: 'Surrender is only available before you act on this hand' };
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
@@ -4218,7 +4240,7 @@ function applyAction(match, playerId, action) {
     return { ok: true };
   }
 
-  if (action === 'double') {
+  if (normalizedAction === 'double') {
     if ((hand.actionCount || 0) > 0) return { error: 'Double is only available as your first action on this hand' };
     if (hand.locked || hand.doubled || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
     match.round.firstActionTaken = true;
@@ -4274,7 +4296,7 @@ function applyAction(match, playerId, action) {
     return { ok: true };
   }
 
-  if (action === 'split') {
+  if (normalizedAction === 'split') {
     if (!canSplit(hand, state)) return { error: 'Split unavailable' };
     if (!canAffordIncrement(match, playerId, hand.bet)) return { error: 'Insufficient chips to split' };
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);

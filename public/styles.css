@@ -1891,6 +1891,31 @@ select:focus-visible {
   min-width: 0;
 }
 
+.phase-strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.series-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 999px;
+  border: 1px solid rgba(205, 167, 100, 0.34);
+  background: rgba(205, 167, 100, 0.12);
+  color: #efd7a8;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
 .bankroll-pill {
   background: rgba(205, 167, 100, 0.14);
   border: 1px solid rgba(205, 167, 100, 0.36);
@@ -3101,46 +3126,122 @@ select:focus-visible {
 }
 
 .favorite-stat-modal {
-  width: min(640px, 96vw);
+  width: min(960px, 98vw);
+  max-height: min(86vh, 760px);
   display: grid;
-  gap: 10px;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.favorite-stat-modal-head {
+  align-items: flex-start;
+}
+
+.favorite-stat-modal-head p {
+  margin: 5px 0 0;
+}
+
+.favorite-stat-search {
+  display: grid;
+  gap: 6px;
+}
+
+.favorite-stat-search input {
+  width: 100%;
 }
 
 .favorite-stat-list {
   display: grid;
-  gap: 8px;
-  max-height: min(60vh, 540px);
+  gap: 10px;
+  min-height: 0;
+  border: 1px solid rgba(230, 238, 225, 0.14);
+  border-radius: 12px;
+  background: rgba(9, 20, 17, 0.62);
+  padding: 8px;
   overflow-y: auto;
+}
+
+.favorite-stat-group {
+  display: grid;
+  gap: 0;
+}
+
+.favorite-stat-group-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #e4c789;
+  background: linear-gradient(180deg, rgba(9, 20, 17, 0.94), rgba(9, 20, 17, 0.78));
+  padding: 6px 8px;
 }
 
 .favorite-stat-option {
   width: 100%;
   text-align: left;
-  border-radius: 12px;
-  border: 1px solid rgba(230, 238, 225, 0.16);
-  background: rgba(12, 24, 20, 0.7);
-  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  border-top-color: rgba(230, 238, 225, 0.14);
+  background: rgba(12, 24, 20, 0.58);
+  padding: 14px 14px;
   color: var(--text-strong);
   display: grid;
-  gap: 5px;
+  gap: 6px;
+  margin-top: -1px;
+}
+
+.favorite-stat-group .favorite-stat-option:first-of-type {
+  margin-top: 0;
 }
 
 .favorite-stat-option:hover,
 .favorite-stat-option:focus-visible {
-  border-color: rgba(205, 167, 100, 0.48);
-  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.2) inset;
+  border-color: rgba(205, 167, 100, 0.52);
+  background: rgba(22, 36, 31, 0.82);
+  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.22) inset;
 }
 
 .favorite-stat-option.is-selected {
-  border-color: rgba(205, 167, 100, 0.55);
-  background: linear-gradient(160deg, rgba(205, 167, 100, 0.2), rgba(13, 24, 20, 0.86));
+  border-color: rgba(205, 167, 100, 0.58);
+  background: linear-gradient(160deg, rgba(205, 167, 100, 0.2), rgba(13, 24, 20, 0.9));
+  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.16) inset;
 }
 
 .favorite-stat-option-head {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
-  gap: 10px;
+  gap: 14px;
+}
+
+.favorite-stat-option-head strong {
+  font-size: 0.98rem;
+  line-height: 1.25;
+}
+
+.favorite-stat-option-value {
+  text-align: right;
+  color: #f2dfb7;
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.favorite-stat-option .muted {
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+
+.favorite-stat-empty {
+  padding: 16px 12px;
+}
+
+.favorite-stat-modal-foot {
+  justify-content: flex-end;
+  margin-top: 2px;
 }
 
 .rank-timeline-modal {
@@ -3654,10 +3755,24 @@ select:focus-visible {
   }
 
   .profile-favorite-selected,
-  .favorite-stat-option-head,
   .rank-timeline-row {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .favorite-stat-modal {
+    width: min(100%, 98vw);
+    max-height: min(88vh, 760px);
+    padding: 12px;
+  }
+
+  .favorite-stat-option {
+    padding: 12px;
+  }
+
+  .favorite-stat-option-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
   }
 }
 

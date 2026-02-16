@@ -705,6 +705,84 @@ test('41d split payout handles push scenarios per hand', () => {
   assert.equal(m.round.resultByPlayer.p2.deltaChips, -5);
 });
 
+test('41e PvP double executes and syncs through pressure resolution', () => {
+  const m = makeMatch({ deck: [card('3', 'C')] });
+  const doubleRes = applyAction(m, 'p1', 'double');
+  assert.equal(doubleRes.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+  assert.equal(m.round.pendingPressure?.type, 'double');
+  assert.equal(m.round.players.p1.hands[0].bet, 10);
+
+  const matchRes = applyPressureDecision(m, 'p2', 'match');
+  assert.equal(matchRes.ok, true);
+  assert.equal(m.phase, PHASES.ACTION_TURN);
+  assert.equal(m.round.players.p2.hands[0].bet, 10);
+});
+
+test('41f PvP split executes and resumes with two playable split hands', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('8'), card('8', 'D')], [false, true], 5, 0),
+    deck: [card('4', 'S'), card('3', 'C')]
+  });
+  const splitRes = applyAction(m, 'p1', 'split');
+  assert.equal(splitRes.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+  assert.equal(m.round.pendingPressure?.type, 'split');
+  assert.equal(m.round.players.p1.hands.length, 2);
+
+  const matchRes = applyPressureDecision(m, 'p2', 'match');
+  assert.equal(matchRes.ok, true);
+  assert.equal(m.phase, PHASES.ACTION_TURN);
+  assert.equal(m.round.turnPlayerId, 'p1');
+  assert.equal(m.round.players.p2.hands[0].bet, 10);
+});
+
+test('41g bot double works against player pressure response', () => {
+  const botId = 'bot:normal:double-flow';
+  const m = makeMatch({ deck: [card('2', 'D')] });
+  m.playerIds = ['p1', botId];
+  m.round.players[botId] = m.round.players.p2;
+  delete m.round.players.p2;
+  m.round.turnPlayerId = botId;
+
+  const doubleRes = applyAction(m, botId, 'double');
+  assert.equal(doubleRes.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+  assert.equal(m.round.pendingPressure?.opponentId, 'p1');
+  assert.equal(m.round.players[botId].hands[0].bet, 10);
+
+  const matchRes = applyPressureDecision(m, 'p1', 'match');
+  assert.equal(matchRes.ok, true);
+  assert.equal(m.round.players.p1.hands[0].bet, 10);
+});
+
+test('41h bot split works against player pressure response', () => {
+  const botId = 'bot:normal:split-flow';
+  const botPair = newHand([card('9'), card('9', 'D')], [false, true], 5, 0);
+  const m = makeMatch({ p2Hand: botPair, deck: [card('4', 'S'), card('3', 'C')] });
+  m.playerIds = ['p1', botId];
+  m.round.players[botId] = m.round.players.p2;
+  delete m.round.players.p2;
+  m.round.turnPlayerId = botId;
+
+  const splitRes = applyAction(m, botId, 'split');
+  assert.equal(splitRes.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+  assert.equal(m.round.pendingPressure?.opponentId, 'p1');
+  assert.equal(m.round.players[botId].hands.length, 2);
+
+  const matchRes = applyPressureDecision(m, 'p1', 'match');
+  assert.equal(matchRes.ok, true);
+  assert.equal(m.round.players.p1.hands[0].bet, 10);
+});
+
+test('41i action identifiers are case-insensitive server-side', () => {
+  const m = makeMatch({ deck: [card('3', 'S')] });
+  const res = applyAction(m, 'p1', 'DOUBLE');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+});
+
 test('42 practice matches do not advance challenge progress, real matches do', () => {
   const user = { challengeSets: {}, skillChallenges: [] };
   refreshChallengesForUser(user, true);
