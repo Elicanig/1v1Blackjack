@@ -139,7 +139,8 @@ async function loadPostgresState(pool, emptyDb, startingChips) {
     friendInvites: ensureArray(stateValue.friendInvites),
     friendRequests: ensureArray(stateValue.friendRequests),
     friendChallenges: ensureArray(stateValue.friendChallenges),
-    rankedHistory: ensureArray(stateValue.rankedHistory)
+    rankedHistory: ensureArray(stateValue.rankedHistory),
+    rankedSeries: ensureArray(stateValue.rankedSeries)
   };
 
   return {
@@ -200,7 +201,8 @@ async function persistPostgresState(pool, data, startingChips) {
       friendInvites: ensureArray(data.friendInvites),
       friendRequests: ensureArray(data.friendRequests),
       friendChallenges: ensureArray(data.friendChallenges),
-      rankedHistory: ensureArray(data.rankedHistory)
+      rankedHistory: ensureArray(data.rankedHistory),
+      rankedSeries: ensureArray(data.rankedSeries)
     };
     await client.query(
       `

@@ -44,18 +44,20 @@ const BOT_BET_LIMITS = {
 const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000, 5000];
 const RANKED_BASE_ELO = 1000;
 const RANKED_K_BASE = 24;
-const RANKED_MAX_GAIN = 18;
-const RANKED_MIN_LOSS = -6;
+const RANKED_MIN_WIN_DELTA = 4;
+const RANKED_MAX_WIN_DELTA = 20;
+const RANKED_MIN_LOSS_DELTA = 4;
+const RANKED_MAX_LOSS_DELTA = 20;
+const RANKED_PUSH_MAX_NUDGE = 1;
 const RANKED_MATCH_MAX_ELO_GAP = 220;
 const RANKED_QUEUE_TIMEOUT_MS = 60_000;
+const RANKED_SERIES_TARGET_GAMES = 9;
 const RANKED_TIERS = Object.freeze([
-  { key: 'BRONZE', label: 'Bronze', min: 0, max: 1099, bets: { min: 50, max: 250 } },
-  { key: 'SILVER', label: 'Silver', min: 1100, max: 1249, bets: { min: 100, max: 500 } },
-  { key: 'GOLD', label: 'Gold', min: 1250, max: 1399, bets: { min: 250, max: 1000 } },
-  { key: 'PLATINUM', label: 'Platinum', min: 1400, max: 1549, bets: { min: 500, max: 2000 } },
-  { key: 'DIAMOND', label: 'Diamond', min: 1550, max: 1699, bets: { min: 1000, max: 5000 } },
-  { key: 'MASTER', label: 'Master', min: 1700, max: 1849, bets: { min: 1000, max: 5000 } },
-  { key: 'GRANDMASTER', label: 'Grandmaster', min: 1850, max: Number.POSITIVE_INFINITY, bets: { min: 1000, max: 5000 } }
+  { key: 'BRONZE', label: 'Bronze', min: 0, max: 1199, bets: { min: 50, max: 50 } },
+  { key: 'SILVER', label: 'Silver', min: 1200, max: 1399, bets: { min: 100, max: 100 } },
+  { key: 'GOLD', label: 'Gold', min: 1400, max: 1599, bets: { min: 250, max: 250 } },
+  { key: 'DIAMOND', label: 'Diamond', min: 1600, max: 1849, bets: { min: 500, max: 500 } },
+  { key: 'LEGENDARY', label: 'Legendary', min: 1850, max: Number.POSITIVE_INFINITY, bets: { min: 1000, max: 1000 } }
 ]);
 const DAILY_REWARD = 100;
 const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -74,6 +76,8 @@ const EMOTE_COOLDOWN_MS = 5000;
 const FRIEND_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const TURN_TIMEOUT_MS = 30_000;
 const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
+const NOTIFICATION_SEEN_TTL_MS = 60 * 60 * 1000;
+const NOTIFICATION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const HOURLY_RESET_MS = 60 * 60 * 1000;
 const DAILY_RESET_MS = 24 * 60 * 60 * 1000;
 const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000;
@@ -156,7 +160,8 @@ const EMPTY_DB = {
   friendInvites: [],
   friendRequests: [],
   friendChallenges: [],
-  rankedHistory: []
+  rankedHistory: [],
+  rankedSeries: []
 };
 const storage = await createStorage({
   emptyDb: EMPTY_DB,
@@ -221,16 +226,28 @@ for (const user of db.data.users) {
     const existingNotifications = user.notifications;
     const normalizedNotifications = existingNotifications
       .filter((n) => n && typeof n === 'object')
-      .map((n) => ({
-        id: n.id || nanoid(10),
-        type: n.type || 'info',
-        message: n.message || '',
-        createdAt: n.createdAt || nowIso(),
-        action: n.action || null,
-        requestId: typeof n.requestId === 'string' ? n.requestId : null,
-        fromUserId: typeof n.fromUserId === 'string' ? n.fromUserId : null,
-        read: Boolean(n.read)
-      }))
+      .map((n) => {
+        const seenAt = n.seenAt || n.seen_at || null;
+        const seenTs = seenAt ? new Date(seenAt).getTime() : NaN;
+        const seenIso = Number.isFinite(seenTs) ? new Date(seenTs).toISOString() : null;
+        const expiresAt = n.expiresAt || n.expires_at || null;
+        const fallbackExpires = seenIso ? new Date(new Date(seenIso).getTime() + NOTIFICATION_SEEN_TTL_MS).toISOString() : null;
+        const expiresTs = expiresAt ? new Date(expiresAt).getTime() : NaN;
+        return {
+          id: n.id || nanoid(10),
+          type: n.type || 'info',
+          message: n.message || '',
+          createdAt: n.createdAt || nowIso(),
+          action: n.action || null,
+          requestId: typeof n.requestId === 'string' ? n.requestId : null,
+          fromUserId: typeof n.fromUserId === 'string' ? n.fromUserId : null,
+          read: Boolean(n.read || seenIso),
+          seenAt: seenIso,
+          seen_at: seenIso,
+          expiresAt: Number.isFinite(expiresTs) ? new Date(expiresTs).toISOString() : fallbackExpires,
+          expires_at: Number.isFinite(expiresTs) ? new Date(expiresTs).toISOString() : fallbackExpires
+        };
+      })
       .slice(0, 60);
     const changed =
       normalizedNotifications.length !== existingNotifications.length ||
@@ -245,6 +262,8 @@ for (const user of db.data.users) {
           entry.requestId !== (typeof prev.requestId === 'string' ? prev.requestId : null) ||
           entry.fromUserId !== (typeof prev.fromUserId === 'string' ? prev.fromUserId : null) ||
           entry.read !== Boolean(prev.read) ||
+          entry.seenAt !== (prev.seenAt || prev.seen_at || null) ||
+          entry.expiresAt !== (prev.expiresAt || prev.expires_at || null) ||
           entry.action !== (prev.action || null)
         );
       });
@@ -381,6 +400,11 @@ for (const user of db.data.users) {
     user.rankedLossStreak = 0;
     dbTouched = true;
   }
+  if (!Number.isFinite(Number(user.lastLevelRewarded))) {
+    const currentLevel = levelFromXp(user.xp || 0);
+    user.lastLevelRewarded = Math.floor(currentLevel / 5) * 5;
+    dbTouched = true;
+  }
   if (typeof user.rankTier !== 'string') {
     user.rankTier = rankedTierFromElo(user.rankedElo).key;
     dbTouched = true;
@@ -417,6 +441,10 @@ if (!Array.isArray(db.data.rankedHistory)) {
   db.data.rankedHistory = [];
   dbTouched = true;
 }
+if (!Array.isArray(db.data.rankedSeries)) {
+  db.data.rankedSeries = [];
+  dbTouched = true;
+}
 if (dbTouched) await db.write();
 
 app.use(cors());
@@ -446,6 +474,17 @@ let leaderboardCache = {
   rows: [],
   rankByUserId: new Map()
 };
+
+if (process.env.NODE_ENV !== 'test') {
+  const notificationCleanupTimer = setInterval(() => {
+    if (cleanupExpiredNotificationsGlobally()) {
+      db.write();
+    }
+  }, NOTIFICATION_CLEANUP_INTERVAL_MS);
+  if (typeof notificationCleanupTimer.unref === 'function') {
+    notificationCleanupTimer.unref();
+  }
+}
 
 const LOCAL_PATCH_NOTES = [
   {
@@ -916,6 +955,36 @@ function ensureRankedState(user) {
   return changed;
 }
 
+function rankedOverviewForUser(user) {
+  if (!user) return null;
+  ensureRankedState(user);
+  const meta = rankedMetaForUser(user);
+  const fixedBet = Math.max(1, Math.floor(Number(meta.bets.min) || 50));
+  const chips = Math.max(0, Math.floor(Number(user.chips) || 0));
+  const canQueue = chips >= fixedBet;
+  const activeSeries = rankedSeriesSummaryForUser(activeRankedSeriesForUser(user.id), user.id);
+  const recentSeries = (db.data.rankedSeries || [])
+    .filter((series) => series && series.status === 'complete' && (series.p1 === user.id || series.p2 === user.id))
+    .slice(-5)
+    .reverse()
+    .map((series) => rankedSeriesSummaryForUser(series, user.id))
+    .filter(Boolean);
+  return {
+    elo: meta.elo,
+    rankTier: meta.tierLabel,
+    rankTierKey: meta.tierKey,
+    fixedBet,
+    rankedWins: meta.wins,
+    rankedLosses: meta.losses,
+    rankedGames: meta.games,
+    canQueue,
+    disabledReason: canQueue ? '' : `Need at least ${fixedBet.toLocaleString()} chips for ${meta.tierLabel} ranked.`,
+    queueStatus: rankedQueueStatus(user.id),
+    activeSeries,
+    recentSeries
+  };
+}
+
 function xpFloorForLevel(level) {
   const safeLevel = Math.max(1, Math.floor(Number(level) || 1));
   const completedLevels = safeLevel - 1;
@@ -1094,11 +1163,44 @@ function updateDailyWinStreak(user, eventIso = nowIso()) {
   user.lastDailyWinDate = today;
 }
 
+function levelRewardForLevel(level) {
+  const safeLevel = Math.max(1, Math.floor(Number(level) || 1));
+  if (safeLevel % 5 !== 0) return 0;
+  return Math.max(0, Math.floor(200 + ((safeLevel / 5) * 150)));
+}
+
+function applyLevelRewards(user, previousLevel, newLevel) {
+  if (!user) return 0;
+  const prev = Math.max(1, Math.floor(Number(previousLevel) || 1));
+  const next = Math.max(prev, Math.floor(Number(newLevel) || prev));
+  const alreadyRewarded = Math.max(0, Math.floor(Number(user.lastLevelRewarded) || 0));
+  let totalReward = 0;
+  for (let level = prev + 1; level <= next; level += 1) {
+    if (level % 5 !== 0) continue;
+    if (level <= alreadyRewarded) continue;
+    const reward = levelRewardForLevel(level);
+    if (reward <= 0) continue;
+    totalReward += reward;
+    user.lastLevelRewarded = level;
+    creditUserBankroll(user, reward);
+    pushNotification(user.id, {
+      type: 'level_reward',
+      message: `Level reward: +${reward.toLocaleString()} chips`
+    });
+  }
+  return totalReward;
+}
+
 function awardXp(user, amount) {
   if (!user) return 0;
   const gain = Math.max(0, Math.floor(Number(amount) || 0));
   if (gain <= 0) return Math.max(0, Math.floor(Number(user.xp) || 0));
+  const beforeLevel = levelFromXp(user.xp || 0);
   user.xp = Math.max(0, Math.floor(Number(user.xp) || 0) + gain);
+  const afterLevel = levelFromXp(user.xp || 0);
+  if (afterLevel > beforeLevel) {
+    applyLevelRewards(user, beforeLevel, afterLevel);
+  }
   invalidateLeaderboardCache();
   return user.xp;
 }
@@ -1124,6 +1226,7 @@ function sanitizeUser(user) {
   const rank = userRankFromLeaderboard(user?.id);
   const dynamicBadge = dynamicBadgeForUser(user?.id);
   const rankedMeta = rankedMetaForUser(user);
+  const fixedRankedBet = Math.max(1, Math.floor(Number(rankedMeta.bets.min) || 50));
   const unlockedTitles = (Array.isArray(user?.unlockedTitles) ? user.unlockedTitles : [])
     .map((titleKey) => normalizeTitleKey(titleKey))
     .filter(Boolean);
@@ -1141,7 +1244,7 @@ function sanitizeUser(user) {
     chips: user.chips,
     bankroll: user.chips,
     stats: user.stats,
-    betHistory: (user.betHistory || []).slice(0, 10),
+    betHistory: (user.betHistory || []).slice(0, 15),
     selectedBet: user.selectedBet || BASE_BET,
     hasClaimedFree100: Boolean(user.lastStreakClaimAt || user.lastFreeClaimAt),
     streakCount: streak.streakCount,
@@ -1162,6 +1265,8 @@ function sanitizeUser(user) {
     rankedGames: rankedMeta.games,
     rankedBetMin: rankedMeta.bets.min,
     rankedBetMax: rankedMeta.bets.max,
+    rankedFixedBet: fixedRankedBet,
+    rankedCanQueue: Math.max(0, Math.floor(Number(user?.chips) || 0)) >= fixedRankedBet,
     peakRankedElo: rankedMeta.peakElo,
     peakRankTierKey: rankedMeta.peakTierKey,
     pvpWins: Math.max(0, Math.floor(Number(user?.pvpWins) || 0)),
@@ -1279,9 +1384,101 @@ function emitUserUpdate(userId) {
   emitToUser(userId, 'user:update', { user: sanitizeSelfUser(user) });
 }
 
+function notificationExpiryIso(fromIso = nowIso()) {
+  const ts = new Date(fromIso).getTime();
+  const safeTs = Number.isFinite(ts) ? ts : Date.now();
+  return new Date(safeTs + NOTIFICATION_SEEN_TTL_MS).toISOString();
+}
+
+function cleanupExpiredNotificationsForUser(user, { remove = true, nowTs = Date.now() } = {}) {
+  if (!user || !Array.isArray(user.notifications)) return { changed: false, removedCount: 0 };
+  const before = user.notifications.length;
+  const filtered = user.notifications.filter((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const expiresRaw = entry.expiresAt || entry.expires_at || null;
+    if (!expiresRaw) return true;
+    const expiresTs = new Date(expiresRaw).getTime();
+    if (!Number.isFinite(expiresTs)) return true;
+    return expiresTs > nowTs;
+  });
+  const changed = filtered.length !== before;
+  if (changed && remove) {
+    user.notifications = filtered;
+  }
+  return { changed, removedCount: Math.max(0, before - filtered.length) };
+}
+
+function markNotificationsSeenForUser(user, ids = null) {
+  if (!user || !Array.isArray(user.notifications)) return { changed: false, markedCount: 0 };
+  const idSet = Array.isArray(ids) && ids.length ? new Set(ids.map((id) => String(id))) : null;
+  let changed = false;
+  let markedCount = 0;
+  const now = nowIso();
+  user.notifications = user.notifications.map((entry) => {
+    if (!entry || typeof entry !== 'object') return entry;
+    if (idSet && !idSet.has(String(entry.id))) return entry;
+    const existingSeen = entry.seenAt || entry.seen_at || null;
+    if (existingSeen) {
+      const existingExpires = entry.expiresAt || entry.expires_at || null;
+      const resolvedExpires = existingExpires || notificationExpiryIso(existingSeen);
+      if (!entry.read || !existingExpires || entry.seenAt !== existingSeen || entry.seen_at !== existingSeen) {
+        changed = true;
+        return {
+          ...entry,
+          read: true,
+          seenAt: existingSeen,
+          seen_at: existingSeen,
+          expiresAt: resolvedExpires,
+          expires_at: resolvedExpires
+        };
+      }
+      return entry;
+    }
+    changed = true;
+    markedCount += 1;
+    const expiresAt = notificationExpiryIso(now);
+    return {
+      ...entry,
+      read: true,
+      seenAt: now,
+      seen_at: now,
+      expiresAt,
+      expires_at: expiresAt
+    };
+  });
+  return { changed, markedCount };
+}
+
+function notificationsForUser(user, { limit = 50, markSeen = false, ids = null } = {}) {
+  if (!user) return { notifications: [], changed: false, markedCount: 0, removedCount: 0 };
+  const cleaned = cleanupExpiredNotificationsForUser(user, { remove: true });
+  let marked = { changed: false, markedCount: 0 };
+  if (markSeen) {
+    marked = markNotificationsSeenForUser(user, ids);
+  }
+  const removedAfterSeen = cleanupExpiredNotificationsForUser(user, { remove: true });
+  const notifications = (user.notifications || []).slice(0, Math.max(1, Math.floor(Number(limit) || 50)));
+  return {
+    notifications,
+    changed: Boolean(cleaned.changed || marked.changed || removedAfterSeen.changed),
+    markedCount: marked.markedCount || 0,
+    removedCount: (cleaned.removedCount || 0) + (removedAfterSeen.removedCount || 0)
+  };
+}
+
+function cleanupExpiredNotificationsGlobally() {
+  let changed = false;
+  for (const user of db.data.users || []) {
+    const result = cleanupExpiredNotificationsForUser(user, { remove: true });
+    if (result.changed) changed = true;
+  }
+  return changed;
+}
+
 function pushNotification(userId, notification) {
   const user = getUserById(userId);
   if (!user) return;
+  cleanupExpiredNotificationsForUser(user, { remove: true });
   const payload = {
     id: notification.id || nanoid(10),
     type: notification.type || 'info',
@@ -1290,7 +1487,11 @@ function pushNotification(userId, notification) {
     action: notification.action || null,
     requestId: typeof notification.requestId === 'string' ? notification.requestId : null,
     fromUserId: typeof notification.fromUserId === 'string' ? notification.fromUserId : null,
-    read: false
+    read: false,
+    seenAt: null,
+    seen_at: null,
+    expiresAt: null,
+    expires_at: null
   };
   user.notifications.unshift(payload);
   user.notifications = user.notifications.slice(0, 60);
@@ -1487,7 +1688,8 @@ function rankedQueueStatus(userId) {
   return {
     status: 'searching',
     queuedAt: entry.queuedAt,
-    requestedBet: entry.bet,
+    requestedBet: entry.fixedBet,
+    fixedBet: entry.fixedBet,
     rankTier: entry.rankTier,
     elo: entry.elo
   };
@@ -1495,16 +1697,11 @@ function rankedQueueStatus(userId) {
 
 function rankedQueueRangeForUser(user) {
   const meta = rankedMetaForUser(user);
-  return { ...meta.bets };
-}
-
-function normalizeRankedQueueBet(user, requestedBet) {
-  const range = rankedQueueRangeForUser(user);
-  const bankroll = Math.max(0, Math.floor(Number(user?.chips) || 0));
-  const maxAllowed = Math.min(range.max, bankroll);
-  if (maxAllowed < range.min) return null;
-  const chosen = Number.isFinite(Number(requestedBet)) ? Math.floor(Number(requestedBet)) : range.min;
-  return Math.max(range.min, Math.min(maxAllowed, chosen));
+  return {
+    min: meta.bets.min,
+    max: meta.bets.max,
+    fixed: meta.bets.min
+  };
 }
 
 function removeFromRankedQueue(userId) {
@@ -1520,27 +1717,27 @@ function enqueueRankedUser(user, requestedBet) {
   if (!user) return { error: 'User not found' };
   if (isUserInActiveMatch(user.id)) return { error: 'Already in an active match' };
   removeFromQuickPlayQueue(user.id);
-  const normalizedBet = normalizeRankedQueueBet(user, requestedBet);
-  if (!normalizedBet) {
-    const meta = rankedMetaForUser(user);
-    return { error: `Need at least ${meta.bets.min} chips to queue ranked as ${meta.tierLabel}` };
-  }
   const meta = rankedMetaForUser(user);
+  const fixedBet = Math.max(1, Math.floor(Number(meta.bets.min) || 50));
+  if (Number.isFinite(Number(requestedBet)) && Math.floor(Number(requestedBet)) !== fixedBet) {
+    return { error: `Ranked bet is fixed at ${fixedBet} for ${meta.tierLabel}` };
+  }
+  if (Math.max(0, Math.floor(Number(user?.chips) || 0)) < fixedBet) {
+    return { error: `Need at least ${fixedBet} chips to queue ranked as ${meta.tierLabel}` };
+  }
   const existing = rankedQueueByUser.get(user.id);
   if (existing) {
-    existing.bet = normalizedBet;
+    existing.fixedBet = fixedBet;
     existing.elo = meta.elo;
     existing.rankTier = meta.tierKey;
-    existing.range = { ...meta.bets };
     existing.queuedAt = existing.queuedAt || nowIso();
     return { ok: true, entry: existing };
   }
   const entry = {
     userId: user.id,
-    bet: normalizedBet,
+    fixedBet,
     elo: meta.elo,
     rankTier: meta.tierKey,
-    range: { ...meta.bets },
     queuedAt: nowIso()
   };
   rankedQueue.push(entry);
@@ -1569,13 +1766,6 @@ function compactRankedQueue() {
       rankedQueueByUser.delete(entry.userId);
     }
   }
-}
-
-function rankedIntersection(a, b) {
-  const min = Math.max(a.range.min, b.range.min);
-  const max = Math.min(a.range.max, b.range.max);
-  if (max < min) return null;
-  return { min, max };
 }
 
 function buildRankedFoundPayload(match, userId, fixedBet) {
@@ -1608,18 +1798,17 @@ async function processRankedQueue() {
       const userB = getUserById(b.userId);
       if (!userB || userA.id === userB.id) continue;
       if (Math.abs((a.elo || RANKED_BASE_ELO) - (b.elo || RANKED_BASE_ELO)) > RANKED_MATCH_MAX_ELO_GAP) continue;
-      const overlap = rankedIntersection(a, b);
-      if (!overlap) continue;
-      const bankrollCap = Math.min(Math.floor(Number(userA.chips) || 0), Math.floor(Number(userB.chips) || 0), overlap.max);
-      if (bankrollCap < overlap.min) continue;
+      if (a.rankTier !== b.rankTier) continue;
+      if (Math.floor(Number(a.fixedBet) || 0) !== Math.floor(Number(b.fixedBet) || 0)) continue;
+      if (Math.floor(Number(userA.chips) || 0) < Math.floor(Number(a.fixedBet) || 0)) continue;
+      if (Math.floor(Number(userB.chips) || 0) < Math.floor(Number(b.fixedBet) || 0)) continue;
       foundIndex = j;
       break;
     }
     if (foundIndex === -1) continue;
     const b = rankedQueue[foundIndex];
     const userB = getUserById(b.userId);
-    const overlap = rankedIntersection(a, b);
-    const fixedBet = Math.max(overlap.min, Math.min(overlap.max, Math.min(a.bet, b.bet)));
+    const fixedBet = Math.max(1, Math.floor(Number(a.fixedBet || b.fixedBet) || 0));
     rankedQueue.splice(foundIndex, 1);
     rankedQueue.splice(i, 1);
     rankedQueueByUser.delete(a.userId);
@@ -1639,6 +1828,7 @@ async function processRankedQueue() {
     };
     db.data.lobbies.push(lobby);
     const match = createMatch(lobby, { matchType: 'RANKED', rankedBet: fixedBet });
+    ensureRankedSeriesForMatch(match);
     if (match.round?.betConfirmedByPlayer) {
       for (const pid of match.playerIds) {
         match.round.betConfirmedByPlayer[pid] = true;
@@ -1770,7 +1960,7 @@ function appendBetHistory(user, entry) {
     time: nowIso(),
     ...entry
   });
-  user.betHistory = user.betHistory.slice(0, 10);
+  user.betHistory = user.betHistory.slice(0, 15);
 }
 
 function matchHistoryModeLabel(match) {
@@ -1793,19 +1983,81 @@ function countWinningSplitHandsForPlayer(outcomes, playerId) {
   }, 0);
 }
 
-function rankedVarianceDampener(outcomes = [], handStatesByPlayer = {}) {
-  if (!Array.isArray(outcomes) || outcomes.length === 0) return 1;
-  let highVarianceHits = 0;
-  for (const out of outcomes) {
-    const aHand = handStatesByPlayer[out.aId]?.[out.handIndex] || null;
-    const bHand = handStatesByPlayer[out.bId]?.[out.handIndex] || null;
-    const aTotal = handMeta(aHand?.cards || []).total || 0;
-    const bTotal = handMeta(bHand?.cards || []).total || 0;
-    const closeMargin = Math.abs(aTotal - bTotal) <= 2;
-    const naturalSwing = Boolean(aHand?.naturalBlackjack || bHand?.naturalBlackjack);
-    if (closeMargin || naturalSwing) highVarianceHits += 1;
+function clamp01(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.min(1, numeric));
+}
+
+function lerp(start, end, t) {
+  return start + ((end - start) * clamp01(t));
+}
+
+function rankedVarianceScore(outcomes = [], handStatesByPlayer = {}, p1Id, p2Id) {
+  if (!Array.isArray(outcomes) || outcomes.length === 0 || !p1Id || !p2Id) {
+    return {
+      score: 0,
+      naturals: 0,
+      bustEvents: 0,
+      pushCount: 0,
+      closeMargins: 0,
+      splitOutcomes: 0,
+      handCount: 0
+    };
   }
-  return highVarianceHits > 0 ? 0.6 : 1;
+  let naturals = 0;
+  let bustEvents = 0;
+  let pushCount = 0;
+  let closeMargins = 0;
+  let splitOutcomes = 0;
+  let handCount = 0;
+
+  for (const out of outcomes) {
+    if (!out || typeof out !== 'object') continue;
+    const handIndex = Math.max(0, Math.floor(Number(out.handIndex) || 0));
+    const p1Hand = handStatesByPlayer[p1Id]?.[handIndex] || handStatesByPlayer[p1Id]?.[0] || null;
+    const p2Hand = handStatesByPlayer[p2Id]?.[handIndex] || handStatesByPlayer[p2Id]?.[0] || null;
+    const p1Meta = handMeta(p1Hand?.cards || []);
+    const p2Meta = handMeta(p2Hand?.cards || []);
+
+    if (p1Hand?.naturalBlackjack) naturals += 1;
+    if (p2Hand?.naturalBlackjack) naturals += 1;
+    if (p1Hand?.bust || p1Meta.isBust) bustEvents += 1;
+    if (p2Hand?.bust || p2Meta.isBust) bustEvents += 1;
+    if (!out.winner && !out.loser) pushCount += 1;
+    if (p1Hand?.wasSplitHand || p2Hand?.wasSplitHand || out.winnerHandWasSplit) splitOutcomes += 1;
+    if (!p1Meta.isBust && !p2Meta.isBust) {
+      const margin = Math.abs((p1Meta.total || 0) - (p2Meta.total || 0));
+      if (margin <= 1) closeMargins += 1;
+      else if (margin === 2) closeMargins += 0.75;
+      else if (margin <= 4) closeMargins += 0.35;
+    }
+    handCount += 1;
+  }
+
+  const safeHands = Math.max(1, handCount);
+  const naturalRate = naturals / (safeHands * 2);
+  const bustRate = bustEvents / (safeHands * 2);
+  const pushRate = pushCount / safeHands;
+  const closeRate = closeMargins / safeHands;
+  const splitRate = splitOutcomes / safeHands;
+  const score = clamp01(
+    (naturalRate * 0.24) +
+    (bustRate * 0.18) +
+    (pushRate * 0.2) +
+    (closeRate * 0.24) +
+    (splitRate * 0.14)
+  );
+
+  return {
+    score,
+    naturals,
+    bustEvents,
+    pushCount,
+    closeMargins,
+    splitOutcomes,
+    handCount: safeHands
+  };
 }
 
 function rankedExpectedScore(eloA, eloB) {
@@ -1813,41 +2065,265 @@ function rankedExpectedScore(eloA, eloB) {
   return 1 / (1 + (10 ** (diff / 400)));
 }
 
-function applyRankedEloResult(match, winnerId, loserId, outcomes = []) {
-  if (!match || String(match.matchType || '').toUpperCase() !== 'RANKED') return;
-  const winner = getUserById(winnerId);
-  const loser = getUserById(loserId);
-  if (!winner || !loser) return;
-  ensureRankedState(winner);
-  ensureRankedState(loser);
-  const winnerBefore = normalizeRankedElo(winner.rankedElo);
-  const loserBefore = normalizeRankedElo(loser.rankedElo);
-  const expectedWinner = rankedExpectedScore(winnerBefore, loserBefore);
-  const expectedLoser = rankedExpectedScore(loserBefore, winnerBefore);
-  const handStatesByPlayer = {
-    [winnerId]: match.round?.players?.[winnerId]?.hands || [],
-    [loserId]: match.round?.players?.[loserId]?.hands || []
-  };
-  const normalizedOutcomes = outcomes.map((out) => ({ ...out, aId: winnerId, bId: loserId }));
-  const dampener = rankedVarianceDampener(normalizedOutcomes, handStatesByPlayer);
-  const k = Math.max(8, Math.round(RANKED_K_BASE * dampener));
-  const rawWinnerGain = Math.round(k * (1 - expectedWinner));
-  const rawLoserLoss = -Math.round(k * (1 - expectedLoser));
-  const winnerGain = Math.max(1, Math.min(RANKED_MAX_GAIN, rawWinnerGain));
-  const lossStreak = Math.max(0, Math.floor(Number(loser.rankedLossStreak) || 0));
-  const antiTiltBonus = lossStreak >= 3 ? 2 : 0;
-  const loserLoss = Math.min(-1, Math.max(RANKED_MIN_LOSS + antiTiltBonus, rawLoserLoss));
+function rankedTierByKey(rankKey) {
+  const safe = String(rankKey || '').trim().toUpperCase();
+  return RANKED_TIERS.find((tier) => tier.key === safe) || null;
+}
 
-  winner.rankedElo = Math.max(0, winnerBefore + winnerGain);
-  loser.rankedElo = Math.max(0, loserBefore + loserLoss);
-  winner.rankedWins = Math.max(0, Math.floor(Number(winner.rankedWins) || 0) + 1);
-  loser.rankedLosses = Math.max(0, Math.floor(Number(loser.rankedLosses) || 0) + 1);
-  winner.rankedGames = Math.max(0, Math.floor(Number(winner.rankedGames) || 0) + 1);
-  loser.rankedGames = Math.max(0, Math.floor(Number(loser.rankedGames) || 0) + 1);
-  winner.rankedLossStreak = 0;
-  loser.rankedLossStreak = Math.max(0, Math.floor(Number(loser.rankedLossStreak) || 0) + 1);
-  ensureRankedState(winner);
-  ensureRankedState(loser);
+function createRankedSeries(match) {
+  if (!match || !Array.isArray(match.playerIds) || match.playerIds.length !== 2) return null;
+  if (!Array.isArray(db.data.rankedSeries)) db.data.rankedSeries = [];
+  const [p1, p2] = match.playerIds;
+  const p1Meta = rankedMetaForUser(getUserById(p1));
+  const seriesId = nanoid(12);
+  const betAmount = Math.max(1, Math.floor(Number(match.rankedBet || p1Meta?.bets?.min) || 50));
+  const rankAtStart = p1Meta?.tierKey || rankedTierFromElo(RANKED_BASE_ELO).key;
+  const series = {
+    id: seriesId,
+    seriesId,
+    series_id: seriesId,
+    matchId: match.id,
+    p1,
+    p2,
+    rankAtStart,
+    rank_at_start: rankAtStart,
+    betAmount,
+    bet_amount: betAmount,
+    gameIndex: 1,
+    game_index: 1,
+    tiebreakerCount: 0,
+    p1ChipDelta: 0,
+    p2ChipDelta: 0,
+    games: [],
+    status: 'active',
+    winnerId: null,
+    loserId: null,
+    createdAt: nowIso(),
+    completedAt: null
+  };
+  db.data.rankedSeries.push(series);
+  db.data.rankedSeries = db.data.rankedSeries.slice(-1500);
+  match.rankedSeriesId = seriesId;
+  return series;
+}
+
+function getRankedSeriesById(seriesId) {
+  if (!seriesId || !Array.isArray(db.data.rankedSeries)) return null;
+  return db.data.rankedSeries.find((series) => series.id === seriesId || series.seriesId === seriesId || series.series_id === seriesId) || null;
+}
+
+function activeRankedSeriesForUser(userId) {
+  if (!userId || !Array.isArray(db.data.rankedSeries)) return null;
+  for (let i = db.data.rankedSeries.length - 1; i >= 0; i -= 1) {
+    const series = db.data.rankedSeries[i];
+    if (!series || series.status !== 'active') continue;
+    if (series.p1 === userId || series.p2 === userId) return series;
+  }
+  return null;
+}
+
+function ensureRankedSeriesForMatch(match) {
+  if (!match || String(match.matchType || '').toUpperCase() !== 'RANKED') return null;
+  let series = match.rankedSeriesId ? getRankedSeriesById(match.rankedSeriesId) : null;
+  if (!series || series.status !== 'active') {
+    series = createRankedSeries(match);
+  } else if (!match.rankedSeriesId) {
+    match.rankedSeriesId = series.id;
+  }
+  return series;
+}
+
+function rankedSeriesSummaryForUser(series, userId) {
+  if (!series || !userId) return null;
+  const userIsP1 = series.p1 === userId;
+  if (!userIsP1 && series.p2 !== userId) return null;
+  const targetGames = RANKED_SERIES_TARGET_GAMES;
+  const games = Array.isArray(series.games) ? series.games : [];
+  const completedMainGames = Math.min(targetGames, games.length);
+  const tiebreakerRoundsPlayed = Math.max(0, games.length - targetGames);
+  const inTiebreaker = series.status === 'active' && completedMainGames >= targetGames && (Number(series.p1ChipDelta) === Number(series.p2ChipDelta));
+  const yourChipDelta = userIsP1 ? Number(series.p1ChipDelta || 0) : Number(series.p2ChipDelta || 0);
+  const oppChipDelta = userIsP1 ? Number(series.p2ChipDelta || 0) : Number(series.p1ChipDelta || 0);
+  const markers = games.map((game) => ({
+    gameIndex: Math.max(1, Math.floor(Number(game.gameIndex) || 1)),
+    result: userIsP1 ? game.resultP1 : game.resultP2,
+    tiebreakerRound: Math.max(0, Math.floor(Number(game.tiebreakerRound) || 0)),
+    runningChipDelta: userIsP1 ? Number(game.runningP1ChipDelta || 0) : Number(game.runningP2ChipDelta || 0),
+    eloDelta: userIsP1 ? Number(game.eloDeltaP1 || 0) : Number(game.eloDeltaP2 || 0)
+  }));
+  return {
+    seriesId: series.id,
+    status: series.status,
+    rankTierKey: String(series.rankAtStart || series.rank_at_start || '').toUpperCase(),
+    rankTier: rankedTierByKey(series.rankAtStart || series.rank_at_start)?.label || 'Bronze',
+    fixedBet: Math.max(1, Math.floor(Number(series.betAmount || series.bet_amount) || 50)),
+    targetGames,
+    completedMainGames,
+    tiebreakerRoundsPlayed,
+    inTiebreaker,
+    nextTiebreakerRound: inTiebreaker ? (tiebreakerRoundsPlayed + 1) : 0,
+    yourChipDelta,
+    opponentChipDelta: oppChipDelta,
+    markers,
+    winnerId: series.winnerId || null,
+    loserId: series.loserId || null,
+    complete: series.status === 'complete',
+    createdAt: series.createdAt,
+    completedAt: series.completedAt || null
+  };
+}
+
+function recordRankedSeriesGame(match, {
+  winnerId = null,
+  loserId = null,
+  netByPlayer = {},
+  eloResult = null
+} = {}) {
+  const series = ensureRankedSeriesForMatch(match);
+  if (!series) return null;
+  const [p1, p2] = [series.p1, series.p2];
+  const deltaP1 = Math.floor(Number(netByPlayer?.[p1]) || 0);
+  const deltaP2 = Math.floor(Number(netByPlayer?.[p2]) || 0);
+  const gameIndex = (Array.isArray(series.games) ? series.games.length : 0) + 1;
+  const tiebreakerRound = gameIndex > RANKED_SERIES_TARGET_GAMES ? (gameIndex - RANKED_SERIES_TARGET_GAMES) : 0;
+  if (!Array.isArray(series.games)) series.games = [];
+  series.p1ChipDelta = Math.floor(Number(series.p1ChipDelta) || 0) + deltaP1;
+  series.p2ChipDelta = Math.floor(Number(series.p2ChipDelta) || 0) + deltaP2;
+  series.gameIndex = gameIndex + 1;
+  series.game_index = series.gameIndex;
+  if (tiebreakerRound > 0) {
+    series.tiebreakerCount = Math.max(Math.floor(Number(series.tiebreakerCount) || 0), tiebreakerRound);
+  }
+  const resultP1 = winnerId === p1 ? 'W' : loserId === p1 ? 'L' : 'P';
+  const resultP2 = winnerId === p2 ? 'W' : loserId === p2 ? 'L' : 'P';
+  const gameEntry = {
+    gameIndex,
+    roundNumber: Math.max(1, Math.floor(Number(match.roundNumber) || gameIndex)),
+    timestamp: nowIso(),
+    tiebreakerRound,
+    winnerId,
+    loserId,
+    resultP1,
+    resultP2,
+    chipDeltaP1: deltaP1,
+    chipDeltaP2: deltaP2,
+    runningP1ChipDelta: series.p1ChipDelta,
+    runningP2ChipDelta: series.p2ChipDelta,
+    eloDeltaP1: Math.floor(Number(eloResult?.deltaByPlayer?.[p1]) || 0),
+    eloDeltaP2: Math.floor(Number(eloResult?.deltaByPlayer?.[p2]) || 0),
+    varianceScore: Number(Number(eloResult?.varianceScore || 0).toFixed(4)),
+    varianceMultiplier: Number(Number(eloResult?.varianceMultiplier || 1).toFixed(4))
+  };
+  series.games.push(gameEntry);
+
+  let seriesWinner = null;
+  if (gameIndex >= RANKED_SERIES_TARGET_GAMES) {
+    if (tiebreakerRound > 0) {
+      if (deltaP1 !== 0) seriesWinner = deltaP1 > 0 ? p1 : p2;
+    } else if (series.p1ChipDelta !== series.p2ChipDelta) {
+      seriesWinner = series.p1ChipDelta > series.p2ChipDelta ? p1 : p2;
+    }
+  }
+
+  if (seriesWinner) {
+    series.status = 'complete';
+    series.winnerId = seriesWinner;
+    series.loserId = seriesWinner === p1 ? p2 : p1;
+    series.completedAt = nowIso();
+  }
+
+  return {
+    series,
+    gameEntry,
+    complete: series.status === 'complete',
+    winnerId: series.winnerId || null,
+    tiebreakerRound,
+    inTiebreaker: series.status === 'active' && gameIndex >= RANKED_SERIES_TARGET_GAMES && Number(series.p1ChipDelta) === Number(series.p2ChipDelta)
+  };
+}
+
+function finalizeRankedSeriesByForfeit(match, winnerId, loserId) {
+  if (!match || String(match.matchType || '').toUpperCase() !== 'RANKED') return null;
+  const series = ensureRankedSeriesForMatch(match);
+  if (!series || series.status === 'complete') return series;
+  series.status = 'complete';
+  series.winnerId = winnerId || null;
+  series.loserId = loserId || null;
+  series.completedAt = nowIso();
+  return series;
+}
+
+function applyRankedEloResult(match, {
+  winnerId = null,
+  loserId = null,
+  outcomes = [],
+  tiebreakerRound = 0
+} = {}) {
+  if (!match || String(match.matchType || '').toUpperCase() !== 'RANKED') return;
+  const [p1Id, p2Id] = match.playerIds || [];
+  const user1 = getUserById(p1Id);
+  const user2 = getUserById(p2Id);
+  if (!user1 || !user2) return null;
+  ensureRankedState(user1);
+  ensureRankedState(user2);
+
+  const eloBefore1 = normalizeRankedElo(user1.rankedElo);
+  const eloBefore2 = normalizeRankedElo(user2.rankedElo);
+  const expected1 = rankedExpectedScore(eloBefore1, eloBefore2);
+  const expected2 = rankedExpectedScore(eloBefore2, eloBefore1);
+  const handStatesByPlayer = {
+    [p1Id]: match.round?.players?.[p1Id]?.hands || [],
+    [p2Id]: match.round?.players?.[p2Id]?.hands || []
+  };
+  const variance = rankedVarianceScore(outcomes, handStatesByPlayer, p1Id, p2Id);
+  const varianceMultiplier = lerp(1.0, 0.6, variance.score);
+  const k = Math.max(8, Math.round(RANKED_K_BASE * varianceMultiplier));
+
+  const pushGame = !winnerId || !loserId;
+  let delta1 = 0;
+  let delta2 = 0;
+
+  if (pushGame) {
+    const gap = Math.abs(eloBefore1 - eloBefore2);
+    const nudge = gap >= 180 ? RANKED_PUSH_MAX_NUDGE : 0;
+    if (nudge > 0) {
+      if (eloBefore1 > eloBefore2) {
+        delta1 = -nudge;
+        delta2 = nudge;
+      } else if (eloBefore2 > eloBefore1) {
+        delta1 = nudge;
+        delta2 = -nudge;
+      }
+    }
+  } else {
+    const score1 = winnerId === p1Id ? 1 : 0;
+    const score2 = winnerId === p2Id ? 1 : 0;
+    const raw1 = Math.round(k * (score1 - expected1));
+    const raw2 = Math.round(k * (score2 - expected2));
+    delta1 = score1 > 0
+      ? Math.max(RANKED_MIN_WIN_DELTA, Math.min(RANKED_MAX_WIN_DELTA, raw1))
+      : Math.min(-RANKED_MIN_LOSS_DELTA, Math.max(-RANKED_MAX_LOSS_DELTA, raw1));
+    delta2 = score2 > 0
+      ? Math.max(RANKED_MIN_WIN_DELTA, Math.min(RANKED_MAX_WIN_DELTA, raw2))
+      : Math.min(-RANKED_MIN_LOSS_DELTA, Math.max(-RANKED_MAX_LOSS_DELTA, raw2));
+  }
+
+  user1.rankedElo = Math.max(0, eloBefore1 + delta1);
+  user2.rankedElo = Math.max(0, eloBefore2 + delta2);
+  user1.rankedGames = Math.max(0, Math.floor(Number(user1.rankedGames) || 0) + 1);
+  user2.rankedGames = Math.max(0, Math.floor(Number(user2.rankedGames) || 0) + 1);
+
+  if (!pushGame) {
+    const winner = winnerId === p1Id ? user1 : user2;
+    const loser = loserId === p1Id ? user1 : user2;
+    winner.rankedWins = Math.max(0, Math.floor(Number(winner.rankedWins) || 0) + 1);
+    loser.rankedLosses = Math.max(0, Math.floor(Number(loser.rankedLosses) || 0) + 1);
+    winner.rankedLossStreak = 0;
+    loser.rankedLossStreak = Math.max(0, Math.floor(Number(loser.rankedLossStreak) || 0) + 1);
+  }
+
+  ensureRankedState(user1);
+  ensureRankedState(user2);
 
   db.data.rankedHistory.push({
     id: nanoid(10),
@@ -1855,17 +2331,53 @@ function applyRankedEloResult(match, winnerId, loserId, outcomes = []) {
     mode: 'ranked',
     timestamp: nowIso(),
     baseBet: Math.max(0, Math.floor(Number(match.round?.baseBet) || 0)),
-    p1: winnerId,
-    p2: loserId,
-    result: `${winnerId}:win`,
+    p1: p1Id,
+    p2: p2Id,
+    result: pushGame ? 'push' : `${winnerId}:win`,
     winnerId,
     loserId,
-    winnerEloBefore: winnerBefore,
-    winnerEloAfter: winner.rankedElo,
-    loserEloBefore: loserBefore,
-    loserEloAfter: loser.rankedElo
+    p1EloBefore: eloBefore1,
+    p1EloAfter: user1.rankedElo,
+    p2EloBefore: eloBefore2,
+    p2EloAfter: user2.rankedElo,
+    p1EloDelta: delta1,
+    p2EloDelta: delta2,
+    varianceScore: Number(variance.score.toFixed(4)),
+    varianceMultiplier: Number(varianceMultiplier.toFixed(4)),
+    luckContext: {
+      naturals: variance.naturals,
+      bustEvents: variance.bustEvents,
+      pushCount: variance.pushCount,
+      closeMargins: variance.closeMargins,
+      splitOutcomes: variance.splitOutcomes,
+      handCount: variance.handCount
+    },
+    tiebreakerRound: Math.max(0, Math.floor(Number(tiebreakerRound) || 0))
   });
   db.data.rankedHistory = db.data.rankedHistory.slice(-3000);
+
+  return {
+    p1Id,
+    p2Id,
+    winnerId,
+    loserId,
+    push: pushGame,
+    deltaByPlayer: {
+      [p1Id]: delta1,
+      [p2Id]: delta2
+    },
+    beforeByPlayer: {
+      [p1Id]: eloBefore1,
+      [p2Id]: eloBefore2
+    },
+    afterByPlayer: {
+      [p1Id]: user1.rankedElo,
+      [p2Id]: user2.rankedElo
+    },
+    varianceScore: variance.score,
+    varianceMultiplier,
+    luckContext: variance
+  };
 }
 
 function creditUserBankroll(user, rewardChips) {
@@ -2020,6 +2532,9 @@ function buildClientState(match, viewerId) {
   const negotiationEnabled = isBetNegotiationEnabled(match);
   const negotiation = negotiationEnabled ? ensureBetNegotiation(match) : null;
   const fixedTableBet = normalizeQuickPlayBucket(match.quickPlayBucket) || Math.max(0, Math.floor(Number(match.rankedBet) || 0));
+  const rankedSeries = String(match.matchType || '').toUpperCase() === 'RANKED'
+    ? rankedSeriesSummaryForUser(ensureRankedSeriesForMatch(match), viewerId)
+    : null;
   const opponentId = nextPlayerId(match, viewerId);
   const yourProposal = negotiation ? Number(negotiation.proposalsByPlayerId?.[viewerId]) || null : null;
   const opponentProposal = negotiation ? Number(negotiation.proposalsByPlayerId?.[opponentId]) || null : null;
@@ -2078,6 +2593,7 @@ function buildClientState(match, viewerId) {
     isPractice: isPracticeMatch(match),
     highRoller: String(match?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(match?.highRoller),
     quickPlayBucket: normalizeQuickPlayBucket(match.quickPlayBucket),
+    rankedSeries,
     roundNumber: match.roundNumber,
     phase: match.phase,
     playerIds: match.playerIds,
@@ -2875,6 +3391,7 @@ function resolveRound(match) {
   const loserId = netA > 0 ? bId : netA < 0 ? aId : null;
   const winnerUser = winnerId ? getUserById(winnerId) : null;
   const loserUser = loserId ? getUserById(loserId) : null;
+  const rankedRound = String(match.matchType || '').toUpperCase() === 'RANKED' && realMatch;
 
   if (winnerUser) {
     winnerUser.currentMatchWinStreak = Math.max(0, Math.floor(Number(winnerUser.currentMatchWinStreak) || 0) + 1);
@@ -2907,8 +3424,24 @@ function resolveRound(match) {
     }
   }
 
-  if (winnerId && loserId) {
-    applyRankedEloResult(match, winnerId, loserId, outcomes);
+  let rankedSeriesUpdate = null;
+  let rankedEloResult = null;
+  if (rankedRound) {
+    const activeSeries = ensureRankedSeriesForMatch(match);
+    const nextGameIndex = (activeSeries?.games?.length || 0) + 1;
+    const tiebreakerRound = nextGameIndex > RANKED_SERIES_TARGET_GAMES ? (nextGameIndex - RANKED_SERIES_TARGET_GAMES) : 0;
+    rankedEloResult = applyRankedEloResult(match, {
+      winnerId,
+      loserId,
+      outcomes,
+      tiebreakerRound
+    });
+    rankedSeriesUpdate = recordRankedSeriesGame(match, {
+      winnerId,
+      loserId,
+      netByPlayer: chipsDelta,
+      eloResult: rankedEloResult
+    });
   }
 
   if (realMatch) {
@@ -3000,7 +3533,8 @@ function resolveRound(match) {
       deltaChips: chipsDelta[aId],
       previousBankroll: bankrollBefore[aId],
       newBankroll: bankrollAfter[aId],
-      isPractice: isPracticeMatch(match)
+      isPractice: isPracticeMatch(match),
+      rankedSeries: rankedSeriesUpdate ? rankedSeriesSummaryForUser(rankedSeriesUpdate.series, aId) : null
     },
     [bId]: {
       matchId: match.id,
@@ -3010,7 +3544,8 @@ function resolveRound(match) {
       deltaChips: chipsDelta[bId],
       previousBankroll: bankrollBefore[bId],
       newBankroll: bankrollAfter[bId],
-      isPractice: isPracticeMatch(match)
+      isPractice: isPracticeMatch(match),
+      rankedSeries: rankedSeriesUpdate ? rankedSeriesSummaryForUser(rankedSeriesUpdate.series, bId) : null
     }
   };
 
@@ -3024,6 +3559,16 @@ function resolveRound(match) {
     pushMatchState(match);
     emitToUser(aId, 'round:result', match.round.resultByPlayer[aId]);
     emitToUser(bId, 'round:result', match.round.resultByPlayer[bId]);
+    if (rankedSeriesUpdate?.complete) {
+      const seriesWinnerId = rankedSeriesUpdate.winnerId;
+      const seriesWinnerName = match.participants?.[seriesWinnerId]?.username || getUserById(seriesWinnerId)?.username || 'Opponent';
+      setTimeout(() => {
+        if (!matches.has(match.id)) return;
+        emitToUser(aId, 'match:ended', { reason: `Ranked series complete. Winner: ${seriesWinnerName}.` });
+        emitToUser(bId, 'match:ended', { reason: `Ranked series complete. Winner: ${seriesWinnerName}.` });
+        cleanupMatch(match);
+      }, 900);
+    }
     roundPhaseTimers.delete(match.id);
   }, ROUND_REVEAL_MS);
   roundPhaseTimers.set(match.id, revealTimer);
@@ -3975,6 +4520,7 @@ function createMatch(lobby, options = {}) {
     highRoller,
     quickPlayBucket: quickPlayBucket || null,
     rankedBet: rankedBet || null,
+    rankedSeriesId: options.rankedSeriesId || lobby.rankedSeriesId || null,
     participants: buildParticipants(playerIds, options.botDifficultyById || {}),
     playerIds,
     startingPlayerIndex: 0,
@@ -4118,6 +4664,10 @@ function leaveMatchByForfeit(match, leaverId) {
     }
   }
 
+  if (!botMatch && opponentId && String(match.matchType || '').toUpperCase() === 'RANKED') {
+    finalizeRankedSeriesByForfeit(match, opponentId, leaverId);
+  }
+
   const leaverReason = botMatch
     ? preRoundBotExit
       ? 'You left before the next round started.'
@@ -4163,6 +4713,7 @@ function buildNewUser(username) {
     streakCount: 0,
     skillChallenges: [],
     xp: 0,
+    lastLevelRewarded: 0,
     pvpWins: 0,
     pvpLosses: 0,
     currentMatchWinStreak: 0,
@@ -4268,9 +4819,11 @@ app.get('/api/me', authMiddleware, async (req, res) => {
   const friendsData = buildFriendsPayload(req.user);
   const refreshed = refreshChallengesForUser(req.user);
   const refreshedSkills = ensureSkillChallenges(req.user);
-  if (refreshed || refreshedSkills) await db.write();
+  const notificationsState = notificationsForUser(req.user, { limit: 30, markSeen: false });
+  if (refreshed || refreshedSkills || notificationsState.changed) await db.write();
   const freeClaim = freeClaimMeta(req.user);
   const challengeData = buildChallengePayload(req.user);
+  const rankedOverview = rankedOverviewForUser(req.user);
   return res.json({
     user: sanitizeSelfUser(req.user),
     friends: friendsData.friends,
@@ -4282,7 +4835,7 @@ app.get('/api/me', authMiddleware, async (req, res) => {
       incoming: friendsData.incomingChallenges || [],
       outgoing: friendsData.outgoingChallenges || []
     },
-    notifications: (req.user.notifications || []).slice(0, 30),
+    notifications: notificationsState.notifications,
     freeClaimed: !freeClaim.available,
     freeClaimAvailable: freeClaim.available,
     freeClaimNextAt: freeClaim.nextAt,
@@ -4293,6 +4846,7 @@ app.get('/api/me', authMiddleware, async (req, res) => {
       losses: Math.max(0, Math.floor(Number(req.user?.pvpLosses) || 0))
     },
     rankedQueue: rankedQueueStatus(req.user.id),
+    rankedOverview,
     challenges: challengeData.challenges,
     challengeList: challengeData.challengeList,
     challengeResets: challengeData.challengeResets,
@@ -4426,9 +4980,20 @@ function findFriendRequestForRecipient(recipientId, { requestId, username } = {}
 
 function markFriendRequestNotificationResolved(user, requestId) {
   if (!user || !requestId || !Array.isArray(user.notifications)) return;
+  const seenAt = nowIso();
   user.notifications = user.notifications.map((notification) => {
     if (!notification || notification.requestId !== requestId) return notification;
-    return { ...notification, read: true };
+    if (notification.seenAt) {
+      return { ...notification, read: true };
+    }
+    return {
+      ...notification,
+      read: true,
+      seenAt,
+      seen_at: seenAt,
+      expiresAt: notificationExpiryIso(seenAt),
+      expires_at: notificationExpiryIso(seenAt)
+    };
   });
 }
 
@@ -5018,7 +5583,8 @@ app.post('/api/ranked/join', authMiddleware, async (req, res) => {
   const status = rankedQueueStatus(req.user.id);
   return res.json({
     status: 'searching',
-    bet: enqueued.entry.bet,
+    bet: enqueued.entry.fixedBet,
+    fixedBet: enqueued.entry.fixedBet,
     elo: enqueued.entry.elo,
     rankTier: rankedTierFromElo(enqueued.entry.elo).label,
     queuedAt: status.queuedAt
@@ -5037,6 +5603,12 @@ app.get('/api/ranked/status', authMiddleware, async (req, res) => {
     return res.json({ status: 'idle' });
   }
   return res.json(status);
+});
+
+app.get('/api/ranked/overview', authMiddleware, async (req, res) => {
+  compactRankedQueue();
+  const overview = rankedOverviewForUser(req.user);
+  return res.json({ overview });
 });
 
 app.post('/api/free-claim', authMiddleware, async (req, res) => {
@@ -5082,8 +5654,20 @@ app.post('/api/free-claim', authMiddleware, async (req, res) => {
   });
 });
 
-app.get('/api/notifications', authMiddleware, (req, res) => {
-  return res.json({ notifications: (req.user.notifications || []).slice(0, 50) });
+app.get('/api/notifications', authMiddleware, async (req, res) => {
+  const payload = notificationsForUser(req.user, { limit: 50, markSeen: false });
+  if (payload.changed) await db.write();
+  return res.json({ notifications: payload.notifications });
+});
+
+app.post('/api/notifications/seen', authMiddleware, async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
+  const payload = notificationsForUser(req.user, { limit: 50, markSeen: true, ids });
+  if (payload.changed) await db.write();
+  return res.json({
+    notifications: payload.notifications,
+    marked: payload.markedCount || 0
+  });
 });
 
 app.post('/api/notifications/clear', authMiddleware, async (req, res) => {
@@ -5095,8 +5679,9 @@ app.post('/api/notifications/clear', authMiddleware, async (req, res) => {
 app.post('/api/notifications/dismiss', authMiddleware, async (req, res) => {
   const { id } = req.body || {};
   req.user.notifications = (req.user.notifications || []).filter((n) => n.id !== id);
+  cleanupExpiredNotificationsForUser(req.user, { remove: true });
   await db.write();
-  return res.json({ notifications: req.user.notifications });
+  return res.json({ notifications: (req.user.notifications || []).slice(0, 50) });
 });
 
 app.post('/api/daily-claim', authMiddleware, async (req, res) => {
@@ -5216,7 +5801,9 @@ io.on('connection', (socket) => {
   emitPresenceSnapshotToUser(userId);
   emitPresenceUpdateFor(userId);
   // Initial notification sync on connect.
-  socket.emit('notify:list', { notifications: (socket.user.notifications || []).slice(0, 30) });
+  const notificationPayload = notificationsForUser(socket.user, { limit: 30, markSeen: false });
+  if (notificationPayload.changed) db.write();
+  socket.emit('notify:list', { notifications: notificationPayload.notifications });
 
   for (const match of matches.values()) {
     if (match.playerIds.includes(userId)) {
@@ -5494,6 +6081,9 @@ io.on('connection', (socket) => {
         io.to(activeSessions.get(opponentId)).emit('match:ended', {
           reason: 'Opponent disconnected for over 60 seconds'
         });
+        if (opponentId) {
+          finalizeRankedSeriesByForfeit(match, opponentId, userId);
+        }
         cleanupMatch(match);
         disconnectTimers.delete(key);
       }, DISCONNECT_TIMEOUT_MS);
@@ -5539,6 +6129,10 @@ export {
   calculateForfeitLossAmount,
   rankedTierFromElo,
   rankedBetRangeForElo,
+  cleanupExpiredNotificationsForUser,
+  markNotificationsSeenForUser,
+  notificationsForUser,
+  levelRewardForLevel,
   getBotObservation,
   chooseBotActionFromObservation
 };

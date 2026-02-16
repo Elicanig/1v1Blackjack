@@ -459,9 +459,9 @@ test('39 bot difficulty bet ranges are clamped server-side', () => {
 
 test('39b ranked tiers map elo to expected ranges', () => {
   assert.equal(rankedTierFromElo(1000).label, 'Bronze');
-  assert.equal(rankedTierFromElo(1250).label, 'Gold');
-  assert.equal(rankedTierFromElo(1700).label, 'Master');
-  assert.deepEqual(rankedBetRangeForElo(1850), { min: 1000, max: 5000 });
+  assert.equal(rankedTierFromElo(1250).label, 'Silver');
+  assert.equal(rankedTierFromElo(1700).label, 'Diamond');
+  assert.deepEqual(rankedBetRangeForElo(1850), { min: 1000, max: 1000 });
 });
 
 test('39c double is blocked when pressure would exceed table max for opponent', () => {

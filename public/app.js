@@ -34,6 +34,14 @@ const BOT_BET_RANGES = {
 const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000, 5000];
 const HIGH_ROLLER_MIN_BET = 2500;
 const LEADERBOARD_LIMIT = 25;
+const RANKED_TIER_META = Object.freeze({
+  BRONZE: { label: 'Bronze', icon: '◈', minElo: 0, fixedBet: 50 },
+  SILVER: { label: 'Silver', icon: '✦', minElo: 1200, fixedBet: 100 },
+  GOLD: { label: 'Gold', icon: '⬢', minElo: 1400, fixedBet: 250 },
+  DIAMOND: { label: 'Diamond', icon: '◆', minElo: 1600, fixedBet: 500 },
+  LEGENDARY: { label: 'Legendary', icon: '♛', minElo: 1850, fixedBet: 1000 }
+});
+const RANKED_TIER_ORDER = ['LEGENDARY', 'DIAMOND', 'GOLD', 'SILVER', 'BRONZE'];
 const TITLE_DEFS = Object.freeze([
   { key: '', label: 'None', unlockHint: 'No title equipped' },
   { key: 'HIGH_ROLLER', label: 'High Roller', unlockHint: 'Play 10 real matches with bets >= 2,500.' },
@@ -46,6 +54,7 @@ function initialViewFromPath() {
   if (pathname === '/profile') return 'profile';
   if (pathname === '/friends') return 'friends';
   if (pathname === '/lobbies' || pathname === '/lobby') return 'lobbies';
+  if (pathname === '/ranked') return 'ranked';
   if (pathname === '/challenges') return 'challenges';
   if (pathname === '/notifications') return 'notifications';
   if (pathname === '/rules') return 'rules';
@@ -277,6 +286,13 @@ const state = {
     opponentName: '',
     connected: false
   },
+  rankedOverview: null,
+  homeSections: {
+    highRoller: false,
+    practice: false,
+    betHistory: false
+  },
+  betHistoryModalOpen: false,
   network: {
     offlineMode: !navigator.onLine,
     lastCheckedAt: 0,
@@ -530,22 +546,39 @@ function formatQuickPlayBucket(bucket) {
   return (normalized || 250).toLocaleString();
 }
 
+function rankTierKeyFromElo(eloRaw) {
+  const elo = Math.floor(Number(eloRaw) || 0);
+  for (const key of RANKED_TIER_ORDER) {
+    const tier = RANKED_TIER_META[key];
+    if (elo >= tier.minElo) return key;
+  }
+  return 'BRONZE';
+}
+
 function rankTierLabelFromUser(user = {}) {
+  const key = rankTierKeyFromUser(user);
+  if (RANKED_TIER_META[key]) return RANKED_TIER_META[key].label;
   if (user.rankTier) return String(user.rankTier);
   const elo = Math.floor(Number(user.rankedElo) || 0);
-  if (elo >= 1850) return 'Grandmaster';
-  if (elo >= 1700) return 'Master';
-  if (elo >= 1550) return 'Diamond';
-  if (elo >= 1400) return 'Platinum';
-  if (elo >= 1250) return 'Gold';
-  if (elo >= 1100) return 'Silver';
-  return 'Bronze';
+  return RANKED_TIER_META[rankTierKeyFromElo(elo)]?.label || 'Bronze';
 }
 
 function rankTierKeyFromUser(user = {}) {
   const key = String(user.rankTierKey || '').trim().toUpperCase();
   if (key) return key;
-  return rankTierLabelFromUser(user).replace(/\s+/g, '_').toUpperCase();
+  const rankTier = String(user.rankTier || '').trim().toUpperCase();
+  if (rankTier && RANKED_TIER_META[rankTier]) return rankTier;
+  return rankTierKeyFromElo(user.rankedElo);
+}
+
+function rankTierMetaFromUser(user = {}) {
+  const key = rankTierKeyFromUser(user);
+  return {
+    key,
+    label: RANKED_TIER_META[key]?.label || rankTierLabelFromUser(user),
+    icon: RANKED_TIER_META[key]?.icon || '◆',
+    fixedBet: Math.max(1, Math.floor(Number(RANKED_TIER_META[key]?.fixedBet) || Number(user.rankedFixedBet) || 50))
+  };
 }
 
 function formatLastSeen(lastSeenAt) {
@@ -620,10 +653,16 @@ function renderBadgePill(badge, extraClass = '') {
 }
 
 function renderRankTierBadge(userLike = {}, extraClass = '') {
-  const label = rankTierLabelFromUser(userLike);
-  const key = rankTierKeyFromUser(userLike);
+  const hasRankSignal = Boolean(
+    userLike &&
+    (userLike.rankTierKey || userLike.rankTier || Number.isFinite(Number(userLike.rankedElo)))
+  );
+  if (!hasRankSignal) return '';
+  const meta = rankTierMetaFromUser(userLike);
+  const label = meta.label;
+  const key = meta.key;
   if (!label) return '';
-  return `<span class="rank-tier-badge ${extraClass}" data-rank-tier="${key}">${label}</span>`;
+  return `<span class="rank-tier-badge ${extraClass}" data-rank-tier="${key}"><span class="rank-tier-icon" aria-hidden="true">${meta.icon}</span><span>${label}</span></span>`;
 }
 
 function renderPlayerMeta(participant = {}) {
@@ -716,11 +755,12 @@ function rankedQueueIsActive() {
 }
 
 function resetRankedQueueState() {
+  const fixedBet = Math.max(1, Math.floor(Number(state.me?.rankedFixedBet || state.me?.rankedBetMin) || 50));
   state.rankedQueue = {
     status: 'idle',
     searching: false,
     queuedAt: null,
-    bet: Math.max(50, Math.floor(Number(state.me?.rankedBetMin) || 100)),
+    bet: fixedBet,
     pendingMatch: null,
     opponentName: '',
     connected: false
@@ -739,6 +779,7 @@ function beginRankedConnectedState(payload = {}) {
   setTimeout(() => {
     const match = state.rankedQueue.pendingMatch;
     resetRankedQueueState();
+    loadRankedOverview({ silent: true });
     if (!match) return;
     state.currentMatch = match;
     goToView('match');
@@ -1292,7 +1333,7 @@ function connectSocket() {
             state.rankedQueue.status = 'searching';
             state.rankedQueue.searching = true;
             if (data?.queuedAt) state.rankedQueue.queuedAt = data.queuedAt;
-            if (Number.isFinite(Number(data?.requestedBet))) state.rankedQueue.bet = Math.floor(Number(data.requestedBet));
+            if (Number.isFinite(Number(data?.fixedBet || data?.requestedBet))) state.rankedQueue.bet = Math.floor(Number(data.fixedBet || data.requestedBet));
           } else {
             resetRankedQueueState();
           }
@@ -1487,12 +1528,18 @@ function connectSocket() {
     if (Number.isFinite(previousBankroll) && Number.isFinite(newBankroll)) {
       tweenBankroll(previousBankroll, newBankroll, 950);
     }
+    if (String(state.currentMatch?.matchType || '').toUpperCase() === 'RANKED') {
+      loadRankedOverview({ silent: true });
+    }
     render();
   });
   state.socket.on('user:update', ({ user }) => {
     if (!user || !state.me || user.id !== state.me.id) return;
     state.me = { ...state.me, ...user };
     loadLeaderboard({ silent: true });
+    if (state.view === 'ranked' || state.view === 'home') {
+      loadRankedOverview({ silent: true });
+    }
     render();
   });
   state.socket.on('match:ended', ({ reason }) => {
@@ -1519,8 +1566,9 @@ async function loadMe() {
     if (!auth?.ok) throw new Error('Invalid auth');
     const data = await api('/api/me');
     state.me = data.user;
+    state.rankedOverview = data.rankedOverview || null;
     if (!rankedQueueIsActive()) {
-      state.rankedQueue.bet = Math.max(1, Math.floor(Number(data.user?.rankedBetMin) || state.rankedQueue.bet || 100));
+      state.rankedQueue.bet = Math.max(1, Math.floor(Number(data.user?.rankedFixedBet || data.user?.rankedBetMin || state.rankedQueue.bet || 50)));
     }
     state.bankrollDisplay = data.user?.chips ?? 0;
     state.authUsername = data.user.username;
@@ -1555,8 +1603,8 @@ async function loadMe() {
       state.rankedQueue.searching = true;
       state.rankedQueue.status = 'searching';
       state.rankedQueue.queuedAt = data.rankedQueue.queuedAt || null;
-      if (Number.isFinite(Number(data.rankedQueue.requestedBet))) {
-        state.rankedQueue.bet = Math.floor(Number(data.rankedQueue.requestedBet));
+      if (Number.isFinite(Number(data.rankedQueue.fixedBet || data.rankedQueue.requestedBet))) {
+        state.rankedQueue.bet = Math.floor(Number(data.rankedQueue.fixedBet || data.rankedQueue.requestedBet));
       }
     }
     updateFreeClaimCountdown();
@@ -1586,6 +1634,7 @@ async function loadMe() {
     await loadPatchNotes();
     await loadVersion();
     await loadLeaderboard({ silent: true });
+    await loadRankedOverview({ silent: true });
     render();
   } catch (e) {
     const msg = String(e?.message || '');
@@ -1626,6 +1675,7 @@ async function loadMe() {
     state.patchNotesDeploy = null;
     state.appVersion = 'dev';
     state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
+    state.rankedOverview = null;
     render();
   }
 }
@@ -1637,11 +1687,15 @@ function clearQuery() {
 function goToView(view) {
   state.view = view;
   state.error = '';
+  if (view === 'notifications') {
+    markNotificationsSeen();
+  }
   const routes = {
     home: '/',
     profile: '/profile',
     friends: '/friends',
     lobbies: '/lobbies',
+    ranked: '/ranked',
     challenges: '/challenges',
     notifications: '/notifications',
     rules: '/rules',
@@ -1701,12 +1755,14 @@ function navigateWithMatchSafety(view) {
   if (!state.currentMatch || !state.me || view === 'match') {
     goToView(view);
     if (view === 'friends') loadFriendsData();
+    if (view === 'ranked') loadRankedOverview({ silent: true });
     render();
     return;
   }
   if (!isBotMatchActive()) {
     goToView(view);
     if (view === 'friends') loadFriendsData();
+    if (view === 'ranked') loadRankedOverview({ silent: true });
     render();
     return;
   }
@@ -1716,6 +1772,7 @@ function navigateWithMatchSafety(view) {
     state.leaveMatchModal = false;
     goToView(view);
     if (view === 'friends') loadFriendsData();
+    if (view === 'ranked') loadRankedOverview({ silent: true });
     render();
     return;
   }
@@ -1730,6 +1787,7 @@ function navigateWithMatchSafety(view) {
     state.leaveMatchModal = false;
     goToView(target);
     if (target === 'friends') loadFriendsData();
+    if (target === 'ranked') loadRankedOverview({ silent: true });
     render();
   }, 800);
 }
@@ -1813,6 +1871,16 @@ function playerName(id) {
   const friend = state.friends.find((f) => f.id === id);
   if (friend) return friend.username;
   return id.slice(0, 6);
+}
+
+function userLikeById(id) {
+  if (!id) return null;
+  if (state.me?.id === id) return state.me;
+  const friend = (state.friends || []).find((entry) => entry.id === id);
+  if (friend) return friend;
+  const leaderboardRow = (state.leaderboard?.rows || []).find((row) => row.userId === id);
+  if (leaderboardRow) return leaderboardRow;
+  return null;
 }
 
 function emitAction(action) {
@@ -2342,6 +2410,24 @@ async function refreshNotifications() {
   }
 }
 
+async function markNotificationsSeen(ids = null) {
+  if (!state.token) return;
+  try {
+    const payload = Array.isArray(ids) && ids.length ? { ids } : {};
+    const data = await api('/api/notifications/seen', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    state.notifications = data.notifications || [];
+    const activeIds = new Set(state.notifications.map((item) => item.id));
+    state.notificationFriendRequestStatus = Object.fromEntries(
+      Object.entries(state.notificationFriendRequestStatus).filter(([notifId]) => activeIds.has(notifId))
+    );
+  } catch (e) {
+    console.warn('Failed to mark notifications seen:', e);
+  }
+}
+
 function getNotificationRequestId(notification) {
   if (!notification || notification.type !== 'friend_request') return '';
   if (notification.requestId) return String(notification.requestId);
@@ -2578,9 +2664,13 @@ async function joinRankedQueue() {
     return setError('Cancel Quick Play first.');
   }
   if (rankedQueueIsActive()) return;
-  const min = Math.max(1, Math.floor(Number(state.me.rankedBetMin) || 50));
-  const max = Math.max(min, Math.floor(Number(state.me.rankedBetMax) || 5000));
-  const selected = Math.max(min, Math.min(max, Math.floor(Number(state.rankedQueue.bet) || min)));
+  const selected = Math.max(
+    1,
+    Math.floor(Number(state.rankedOverview?.fixedBet || state.me.rankedFixedBet || state.me.rankedBetMin || 50))
+  );
+  if (Math.floor(Number(state.me?.chips) || 0) < selected) {
+    return setError(`Need at least ${selected.toLocaleString()} chips to queue ranked.`);
+  }
   state.rankedQueue.searching = true;
   state.rankedQueue.connected = false;
   state.rankedQueue.status = 'searching';
@@ -2600,7 +2690,8 @@ async function joinRankedQueue() {
     state.rankedQueue.searching = true;
     state.rankedQueue.status = 'searching';
     state.rankedQueue.queuedAt = data?.queuedAt || state.rankedQueue.queuedAt;
-    state.rankedQueue.bet = Number.isFinite(Number(data?.bet)) ? Math.floor(Number(data.bet)) : selected;
+    state.rankedQueue.bet = Number.isFinite(Number(data?.fixedBet || data?.bet)) ? Math.floor(Number(data.fixedBet || data.bet)) : selected;
+    await loadRankedOverview({ silent: true });
     setStatus('Searching for ranked opponent...');
     render();
   } catch (e) {
@@ -2617,6 +2708,7 @@ async function cancelRankedQueue({ silent = false } = {}) {
     // best effort
   }
   resetRankedQueueState();
+  loadRankedOverview({ silent: true });
   if (!silent) setStatus('Stopped ranked matchmaking.');
   else render();
 }
@@ -2704,6 +2796,28 @@ async function claimChallenge(id) {
   }
 }
 
+async function loadRankedOverview({ silent = false } = {}) {
+  if (!state.token) return null;
+  try {
+    const data = await api('/api/ranked/overview');
+    state.rankedOverview = data?.overview || null;
+    const queue = state.rankedOverview?.queueStatus;
+    if (queue?.status === 'searching') {
+      state.rankedQueue.searching = true;
+      state.rankedQueue.connected = false;
+      state.rankedQueue.status = 'searching';
+      state.rankedQueue.queuedAt = queue.queuedAt || state.rankedQueue.queuedAt;
+      state.rankedQueue.bet = Math.max(1, Math.floor(Number(queue.fixedBet || queue.requestedBet || state.rankedQueue.bet || 50)));
+    } else if (!rankedQueueIsActive()) {
+      state.rankedQueue.bet = Math.max(1, Math.floor(Number(state.rankedOverview?.fixedBet || state.rankedQueue.bet || 50)));
+    }
+    return state.rankedOverview;
+  } catch (e) {
+    if (!silent) setError(e.message);
+    return null;
+  }
+}
+
 function logout() {
   resetQuickPlayState();
   resetRankedQueueState();
@@ -2722,6 +2836,8 @@ function logout() {
   state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
   state.challengeResetRefreshInFlight = false;
   state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
+  state.rankedOverview = null;
+  state.betHistoryModalOpen = false;
   state.presenceByUser = {};
   state.statsMoreOpen = false;
   state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -2749,8 +2865,11 @@ function renderNotificationBell() {
 function bindNotificationUI() {
   const bell = document.getElementById('notifBell');
   if (bell) {
-    bell.onclick = () => {
+    bell.onclick = async () => {
       state.notificationsOpen = !state.notificationsOpen;
+      if (state.notificationsOpen) {
+        await markNotificationsSeen();
+      }
       render();
     };
   }
@@ -2924,15 +3043,17 @@ function syncRoundResultModal() {
   const headline = result.outcome === 'win' ? 'WIN' : result.outcome === 'lose' ? 'LOSE' : 'PUSH';
   const subtitle = result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push');
   const alreadySelected = Boolean(meId && match?.resultChoiceByPlayer?.[meId]);
-  const busy = state.roundResultChoicePending || alreadySelected;
+  const seriesComplete = Boolean(result?.rankedSeries?.complete);
+  const busy = state.roundResultChoicePending || alreadySelected || seriesComplete;
   const opponentId = match?.playerIds?.find((id) => id !== meId);
   const botRound = Boolean(opponentId && match?.participants?.[opponentId]?.isBot);
+  const rankedRound = String(match?.matchType || '').toUpperCase() === 'RANKED';
   const pvpRound = Boolean(opponentId && !botRound);
   const doubledBet = Math.max(1, Math.floor(Number(match?.baseBet) || 0) * 2);
   const opponentBankroll = Math.max(0, Math.floor(Number(match?.players?.[opponentId]?.bankroll) || 0));
   const maxBetCap = Math.max(1, Math.floor(Number(match?.maxBetCap) || doubledBet));
   const minBet = Math.max(1, Math.floor(Number(match?.minBet) || 1));
-  const canDoubleOrNothing = (botRound || pvpRound) &&
+  const canDoubleOrNothing = !rankedRound && (botRound || pvpRound) &&
     doubledBet >= minBet &&
     doubledBet <= maxBetCap &&
     (result.isPractice || (bankroll >= doubledBet && opponentBankroll >= doubledBet));
@@ -2945,8 +3066,8 @@ function syncRoundResultModal() {
         <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
         <div class="result-actions">
           <div class="result-actions-top">
-            <button id="roundResultNextBtn" class="primary" ${busy ? 'disabled' : ''}>Next Round</button>
-            <button id="roundResultChangeBetBtn" class="ghost" ${busy ? 'disabled' : ''}>Change Bet</button>
+            <button id="roundResultNextBtn" class="primary" ${busy ? 'disabled' : ''}>${seriesComplete ? 'Series Complete' : (rankedRound ? 'Continue Series' : 'Next Round')}</button>
+            <button id="roundResultChangeBetBtn" class="ghost" ${busy || rankedRound ? 'disabled' : ''}>${rankedRound ? 'Bet Locked' : 'Change Bet'}</button>
           </div>
           <div class="result-actions-mid">
             <button id="roundResultDoubleBtn" class="gold result-double-btn" ${busy || !canDoubleOrNothing ? 'disabled' : ''}>
@@ -2955,7 +3076,7 @@ function syncRoundResultModal() {
           </div>
           <div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">${botRound ? 'Leave to Lobby' : 'Leave to Home'}</button></div>
         </div>
-        ${busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : ''}
+        ${seriesComplete ? '<div class="muted" style="margin-top:8px">Series complete. Returning to lobby...</div>' : (busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : '')}
       </div>
     </div>
   `;
@@ -3013,6 +3134,7 @@ function renderTopbar(title = 'Blackjack Battle') {
         <button data-go="profile" class="nav-pill ${state.view === 'profile' ? 'nav-active' : ''}">Profile</button>
         <button data-go="friends" class="nav-pill ${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
         <button data-go="lobbies" class="nav-pill ${state.view === 'lobbies' ? 'nav-active' : ''}">Lobbies</button>
+        <button data-go="ranked" class="nav-pill ${state.view === 'ranked' ? 'nav-active' : ''}">Ranked</button>
         <button data-go="challenges" class="nav-pill nav-pill-challenges ${state.view === 'challenges' ? 'nav-active' : ''}">
           <span>Challenges</span>${challengeBadge}
         </button>
@@ -3110,31 +3232,40 @@ function renderAuth() {
 function renderHome() {
   const me = state.me;
   const notes = state.patchNotes?.length ? state.patchNotes : FALLBACK_PATCH_NOTES;
-  const latest = notes[0];
   const quickPlaySearching = state.quickPlay.status === 'searching';
   const quickPlayConnected = state.quickPlay.status === 'connected';
   const quickPlayLabel = quickPlayConnected ? 'Connecting...' : quickPlaySearching ? 'Searching...' : 'Quick Play';
   const expandedStats = deriveExpandedStats(me);
   const leaderboardRows = Array.isArray(state.leaderboard?.rows) ? state.leaderboard.rows : [];
-  const myRank = Number.isFinite(Number(state.leaderboard?.currentUserRank)) ? Number(state.leaderboard.currentUserRank) : null;
-  const meInTopRows = leaderboardRows.some((row) => row.userId === me.id);
+  const leaderboardTop = leaderboardRows.slice(0, 5);
   const dailyWinStreak = Math.max(0, Math.floor(Number(me.dailyWinStreakCount) || 0));
   const pvpWins = Math.max(0, Math.floor(Number(me.pvpWins) || 0));
   const pvpLosses = Math.max(0, Math.floor(Number(me.pvpLosses) || 0));
-  const rankedTier = rankTierLabelFromUser(me);
+  const rankedTier = rankTierMetaFromUser(me);
   const rankedElo = Math.max(0, Math.floor(Number(me.rankedElo) || 0));
-  const rankedWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
-  const rankedLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
   const rankedSearching = rankedQueueIsActive();
+  const rankedOverview = state.rankedOverview || null;
+  const rankedSeries = rankedOverview?.activeSeries || null;
+  const rankedFixedBet = Math.max(1, Math.floor(Number(rankedOverview?.fixedBet || me.rankedFixedBet || me.rankedBetMin) || rankedTier.fixedBet));
+  const rankedCanQueue = Math.floor(Number(me.chips) || 0) >= rankedFixedBet;
+  const rankedDisabledReason = rankedCanQueue
+    ? ''
+    : (rankedOverview?.disabledReason || `Need ${rankedFixedBet.toLocaleString()} chips for ranked.`);
+  const betHistoryPreview = (me.betHistory || []).slice(0, 6);
+  const betHistoryAll = (me.betHistory || []).slice(0, 15);
+  const homeSections = state.homeSections || { highRoller: false, practice: false, betHistory: false };
+  const latest = notes[0];
+  const rankWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
+  const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
     <main class="view-stack dashboard">
       <p class="muted view-subtitle">${me.username}</p>
-      <div class="dashboard-grid">
-        <section class="col card section reveal-panel glow-follow glow-follow--panel play-panel">
+      <div class="dashboard-grid home-grid">
+        <section class="col card section reveal-panel glow-follow glow-follow--panel play-panel home-play-col">
           <h2>Play</h2>
-          <p class="muted play-intro">Jump into PvP instantly, or host a private table with friends.</p>
+          <p class="muted play-intro">Quick Play and Lobbies are the fastest path to a table.</p>
           <div class="pvp-hero-grid" role="group" aria-label="PvP actions">
             <button
               class="pvp-cta pvp-cta-primary"
@@ -3150,134 +3281,161 @@ function renderHome() {
               <span class="pvp-cta-sub">Create or join private matches</span>
             </button>
           </div>
-          <div class="ranked-card card">
-            <div class="ranked-head">
-              <strong>Ranked</strong>
-              ${renderRankTierBadge(me)}
+          <div class="ranked-summary-card card">
+            <div class="ranked-summary-head">
+              <div class="ranked-summary-title">
+                <strong>Ranked Summary</strong>
+                ${renderRankTierBadge(me)}
+              </div>
+              <button id="goRankedHomeBtn" class="gold" ${!rankedCanQueue && !rankedSearching ? 'disabled' : ''}>Go Ranked</button>
             </div>
-            <div class="muted">Elo ${rankedElo} • W-L ${rankedWins}-${rankedLosses}</div>
-            <div class="muted">Tier bet range: ${Math.max(1, Math.floor(Number(me.rankedBetMin) || 50)).toLocaleString()}-${Math.max(1, Math.floor(Number(me.rankedBetMax) || 5000)).toLocaleString()}</div>
-            <div class="ranked-actions">
-              <input id="rankedBetInput" type="number" min="${Math.max(1, Math.floor(Number(me.rankedBetMin) || 50))}" max="${Math.max(1, Math.floor(Number(me.rankedBetMax) || 5000))}" value="${Math.max(1, Math.floor(Number(state.rankedQueue.bet) || Math.floor(Number(me.rankedBetMin) || 50)))}" ${rankedSearching || offlineModeEnabled() ? 'disabled' : ''} />
-              <button id="rankedQueueBtn" class="gold" ${offlineModeEnabled() ? 'disabled' : ''}>${rankedSearching ? 'Searching...' : 'Find Ranked Match'}</button>
-              ${rankedSearching ? '<button id="rankedCancelBtn" class="ghost">Cancel</button>' : ''}
-            </div>
-          </div>
-          <div class="high-roller-entry card">
-            <div>
-              <strong>High Roller</strong>
-              <div class="muted">Minimum bet ${HIGH_ROLLER_MIN_BET.toLocaleString()} • no table max (bankroll limited)</div>
-            </div>
-            <div class="high-roller-actions">
-              <button class="gold" id="highRollerPvpBtn" type="button">High Roller PvP</button>
-              <button class="ghost" id="highRollerBotBtn" type="button">High Roller Bot</button>
-            </div>
+            <div class="muted">Elo ${rankedElo} • W-L ${rankWins}-${rankLosses} • Fixed bet ${rankedFixedBet.toLocaleString()}</div>
+            ${
+              rankedSeries
+                ? `<div class="muted">Series: ${rankedSeries.completedMainGames}/${rankedSeries.targetGames} games • Chips ${rankedSeries.yourChipDelta >= 0 ? '+' : ''}${rankedSeries.yourChipDelta.toLocaleString()}${rankedSeries.inTiebreaker ? ` • Tiebreaker Round #${rankedSeries.nextTiebreakerRound}` : ''}</div>`
+                : '<div class="muted">No active ranked series.</div>'
+            }
+            ${!rankedCanQueue && !rankedSearching ? `<div class="muted ranked-disabled-note">${rankedDisabledReason}</div>` : ''}
           </div>
 
-          <section class="practice-panel" aria-label="Practice vs bot">
-            <div class="practice-head">
-              <h3>Practice vs Bot</h3>
-              <p class="muted">Train with difficulty presets and controlled bet ranges.</p>
-            </div>
-            <div class="practice-controls">
-              <div class="bot-difficulty-grid" id="botDifficultyGrid" role="radiogroup" aria-label="Bot difficulty">
-                <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'easy'}" data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">
-                  <span class="bot-diff-label">Easy</span>
-                  <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.easy.min}-${BOT_BET_RANGES.easy.max}</span>
-                </button>
-                <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'medium'}" data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">
-                  <span class="bot-diff-label">Medium</span>
-                  <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.medium.min}-${BOT_BET_RANGES.medium.max}</span>
-                </button>
-                <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'normal'}" data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">
-                  <span class="bot-diff-label">Normal</span>
-                  <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.normal.min}-${BOT_BET_RANGES.normal.max}</span>
-                </button>
-              </div>
-              <div class="bot-segmented bot-slider stake-slider" id="botStakeSlider" data-stake-slider>
-                <div class="bot-slider-indicator" style="transform:translateX(${state.botStakeType === 'REAL' ? 0 : 100}%);"></div>
-                <button type="button" data-stake="REAL" class="${state.botStakeType === 'REAL' ? 'is-selected' : ''}">Real Chips</button>
-                <button type="button" data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
-              </div>
-              <div class="muted practice-note">Practice uses fake chips and won&apos;t affect your account.</div>
-              <div class="muted practice-note">Offline bankroll: ${Math.max(0, Math.floor(Number(state.offlineProfile?.bankroll) || OFFLINE_STARTING_BANKROLL)).toLocaleString()} • W-L-P ${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.wins) || 0))}-${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.losses) || 0))}-${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.pushes) || 0))}</div>
-              <button class="ghost bot-play-btn" id="playBotBtn">Play Bot</button>
-              <button class="gold bot-play-btn" id="playOfflineBotBtn">Play Bot (Offline)</button>
-            </div>
+          <section class="home-accordion card">
+            <button class="home-accordion-toggle" data-home-toggle="highRoller" type="button">
+              <span>High Roller</span>
+              <span class="muted">${homeSections.highRoller ? 'Hide' : 'Show'}</span>
+            </button>
+            ${
+              homeSections.highRoller
+                ? `<div class="home-accordion-body">
+                    <div class="high-roller-premium">
+                      <div class="high-roller-badge" aria-hidden="true">♕</div>
+                      <div class="high-roller-copy">
+                        <strong>High Roller</strong>
+                        <div class="muted">Min bet 2,500 • no max (bankroll limited)</div>
+                      </div>
+                      <div class="high-roller-actions">
+                        <button class="gold" id="highRollerPvpBtn" type="button">High Roller PvP</button>
+                        <button class="ghost" id="highRollerBotBtn" type="button">High Roller Bot</button>
+                      </div>
+                    </div>
+                  </div>`
+                : ''
+            }
           </section>
-          <section class="leaderboard-card" aria-label="Global leaderboard">
-            <div class="leaderboard-head">
-              <h3>Global Chips Leaderboard</h3>
-              <span class="muted">Top ${LEADERBOARD_LIMIT}</span>
+
+          <section class="home-accordion card">
+            <button class="home-accordion-toggle" data-home-toggle="practice" type="button">
+              <span>Practice vs Bot</span>
+              <span class="muted">${homeSections.practice ? 'Hide' : 'Show'}</span>
+            </button>
+            ${
+              homeSections.practice
+                ? `<div class="home-accordion-body">
+                    <section class="practice-panel" aria-label="Practice vs bot">
+                      <div class="practice-head">
+                        <h3>Practice vs Bot</h3>
+                        <p class="muted">Train with presets and risk-free practice mode.</p>
+                      </div>
+                      <div class="practice-controls">
+                        <div class="bot-difficulty-grid" id="botDifficultyGrid" role="radiogroup" aria-label="Bot difficulty">
+                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'easy'}" data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">
+                            <span class="bot-diff-label">Easy</span>
+                            <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.easy.min}-${BOT_BET_RANGES.easy.max}</span>
+                          </button>
+                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'medium'}" data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">
+                            <span class="bot-diff-label">Medium</span>
+                            <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.medium.min}-${BOT_BET_RANGES.medium.max}</span>
+                          </button>
+                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'normal'}" data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">
+                            <span class="bot-diff-label">Normal</span>
+                            <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.normal.min}-${BOT_BET_RANGES.normal.max}</span>
+                          </button>
+                        </div>
+                        <div class="bot-segmented bot-slider stake-slider" id="botStakeSlider" data-stake-slider>
+                          <div class="bot-slider-indicator" style="transform:translateX(${state.botStakeType === 'REAL' ? 0 : 100}%);"></div>
+                          <button type="button" data-stake="REAL" class="${state.botStakeType === 'REAL' ? 'is-selected' : ''}">Real Chips</button>
+                          <button type="button" data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
+                        </div>
+                        <div class="muted practice-note">Practice uses fake chips and won&apos;t affect your account.</div>
+                        <div class="muted practice-note">Offline bankroll: ${Math.max(0, Math.floor(Number(state.offlineProfile?.bankroll) || OFFLINE_STARTING_BANKROLL)).toLocaleString()} • W-L-P ${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.wins) || 0))}-${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.losses) || 0))}-${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.pushes) || 0))}</div>
+                        <div class="home-inline-actions">
+                          <button class="ghost bot-play-btn" id="playBotBtn">Play Bot</button>
+                          <button class="gold bot-play-btn" id="playOfflineBotBtn">Play Bot (Offline)</button>
+                        </div>
+                      </div>
+                    </section>
+                  </div>`
+                : ''
+            }
+          </section>
+        </section>
+
+        <section class="col card section reveal-panel glow-follow glow-follow--panel home-stats-col">
+          <div class="stats-head">
+            <h2>Stats</h2>
+            <button id="openStatsMoreBtn" class="ghost stats-more-btn" type="button">View more</button>
+          </div>
+          <div class="kpis compact-kpis">
+            <div class="kpi"><div class="muted">Total Matches</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
+            <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon}</strong></div>
+            <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost}</strong></div>
+            <div class="kpi"><div class="muted">Blackjacks</div><strong>${me.stats.blackjacks || 0}</strong></div>
+          </div>
+          <div class="free-claim-card">
+            <div>
+              <strong>Daily Streak</strong>
+              <div class="muted">Daily wins: ${dailyWinStreak} day${dailyWinStreak === 1 ? '' : 's'} • PvP ${pvpWins}-${pvpLosses}</div>
+              <div class="muted">Claim streak: ${me.streakCount || 0} • Next reward +${me.nextStreakReward || 50}</div>
+              <div class="muted" id="freeClaimCountdown">${state.freeClaimRemainingMs > 0 ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now'}</div>
             </div>
-            <div class="leaderboard-list">
+            <button class="gold" id="claimFreeBtn" ${state.freeClaimRemainingMs > 0 ? 'disabled' : ''}>${state.freeClaimRemainingMs > 0 ? 'On cooldown' : 'Claim +100'}</button>
+          </div>
+
+          <section class="recent-activity-card card">
+            <div class="recent-activity-head">
+              <h3>Recent Activity</h3>
+              <button class="ghost" data-home-toggle="betHistory">${homeSections.betHistory ? 'Hide' : 'Show'}</button>
+            </div>
+            ${
+              homeSections.betHistory
+                ? `<div class="bet-history-preview">
+                    ${
+                      betHistoryPreview.length
+                        ? betHistoryPreview
+                          .map(
+                            (h) => `<div class="history-row compact">
+                              <span>${new Date(h.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                              <span>${h.mode}</span>
+                              <span class="${h.net >= 0 ? 'gain' : 'loss'}">${h.net >= 0 ? '+' : ''}${h.net}</span>
+                            </div>`
+                          )
+                          .join('')
+                        : '<div class="muted">No real-chip hand history yet.</div>'
+                    }
+                    <div><button class="ghost" id="openBetHistoryModalBtn" ${betHistoryAll.length ? '' : 'disabled'}>View more</button></div>
+                  </div>`
+                : '<div class="muted">Bet history hidden.</div>'
+            }
+          </section>
+
+          <section class="leaderboard-card compact" aria-label="Global leaderboard">
+            <div class="leaderboard-head"><h3>Leaderboard Snapshot</h3><span class="muted">Top 5</span></div>
+            <div class="leaderboard-list compact">
               ${
-                leaderboardRows.length
-                  ? leaderboardRows.map((row) => `
+                leaderboardTop.length
+                  ? leaderboardTop.map((row) => `
                     <div class="leaderboard-row ${row.userId === me.id ? 'is-me' : ''}">
                       <span class="leaderboard-rank">#${row.rank}</span>
                       <span class="leaderboard-name">${row.username}</span>
                       ${renderRankTierBadge(row)}
-                      ${renderBadgePill(row.dynamicBadge)}
-                      <span class="leaderboard-level">Lv ${Math.max(1, Number(row.level) || 1)}</span>
                       <span class="leaderboard-chips">${Number(row.chips || 0).toLocaleString()}</span>
                     </div>
                   `).join('')
                   : `<div class="muted">${state.leaderboard.loading ? 'Loading leaderboard...' : 'No leaderboard data yet.'}</div>`
               }
             </div>
-            ${
-              myRank && !meInTopRows
-                ? `<div class="leaderboard-you">You: #${myRank}</div>`
-                : ''
-            }
           </section>
         </section>
-        <section class="col card section reveal-panel glow-follow glow-follow--panel">
-        <div class="stats-head">
-          <h2>Stats</h2>
-          <button id="openStatsMoreBtn" class="ghost stats-more-btn" type="button">View more</button>
-        </div>
-        <div class="kpis">
-          <div class="kpi"><div class="muted">Total Matches</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
-          <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon}</strong></div>
-          <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost}</strong></div>
-          <div class="kpi"><div class="muted">Pushes</div><strong>${me.stats.pushes || me.stats.handsPush || 0}</strong></div>
-          <div class="kpi"><div class="muted">Blackjacks</div><strong>${me.stats.blackjacks || 0}</strong></div>
-          <div class="kpi"><div class="muted">6 7's dealt</div><strong>${me.stats.sixSevenDealt || 0}</strong></div>
-        </div>
-        <div class="free-claim-card">
-          <div>
-            <strong>Daily Streak</strong>
-            <div class="muted">Daily win streak: ${dailyWinStreak} day${dailyWinStreak === 1 ? '' : 's'} • PvP record ${pvpWins}-${pvpLosses}</div>
-            <div class="muted">Claim streak: ${me.streakCount || 0} day${(me.streakCount || 0) === 1 ? '' : 's'} • Next reward +${me.nextStreakReward || 50}</div>
-            <div class="muted" id="freeClaimCountdown">${state.freeClaimRemainingMs > 0 ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now'}</div>
-          </div>
-          <button class="gold" id="claimFreeBtn" ${state.freeClaimRemainingMs > 0 ? 'disabled' : ''}>${state.freeClaimRemainingMs > 0 ? 'On cooldown' : 'Claim +100'}</button>
-        </div>
-        <div class="bet-history">
-          <h4>Bet History (Last 10)</h4>
-          ${
-            (me.betHistory || []).length
-              ? `<div class="history-list">
-                  ${(me.betHistory || [])
-                    .slice(0, 10)
-                    .map(
-                      (h) => `<div class="history-row">
-                        <span>${new Date(h.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                        <span>${h.mode}</span>
-                        <span>Bet ${h.bet}</span>
-                        <span>${h.result}</span>
-                        <span class="${h.net >= 0 ? 'gain' : 'loss'}">${h.net >= 0 ? '+' : ''}${h.net}</span>
-                      </div>`
-                    )
-                    .join('')}
-                 </div>`
-              : '<div class="muted">No real-chip hand history yet.</div>'
-          }
-        </div>
-        </section>
-        <section class="card section patch-card">
+        <section class="card section patch-card home-patch-card">
           <h2>Patch Notes</h2>
           ${
             latest
@@ -3308,7 +3466,7 @@ function renderHome() {
       }
       <button id="togglePatchNotesBtn" class="ghost">${state.showMorePatchNotes ? 'View less' : 'View more'}</button>
         </section>
-        <section class="card section patch-card rules-strip">
+        <section class="card section patch-card rules-strip home-rules-strip">
           <div>
             <strong>Rules:</strong> Blackjack 3:2 • 1 deck • reshuffle each round • surrender available
           </div>
@@ -3376,6 +3534,31 @@ function renderHome() {
           </div>`
         : ''
     }
+    ${
+      state.betHistoryModalOpen
+        ? `<div class="modal" id="betHistoryModal">
+            <div class="modal-panel card bet-history-modal-panel" role="dialog" aria-modal="true" aria-label="Bet history">
+              <div class="stats-more-head">
+                <h3>Bet History (Last 15)</h3>
+                <button id="closeBetHistoryModalBtn" class="ghost" type="button">Close</button>
+              </div>
+              <div class="history-list history-list-full">
+                ${
+                  betHistoryAll.length
+                    ? betHistoryAll.map((h) => `<div class="history-row">
+                        <span>${new Date(h.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                        <span>${h.mode}</span>
+                        <span>Bet ${h.bet}</span>
+                        <span>${h.result}</span>
+                        <span class="${h.net >= 0 ? 'gain' : 'loss'}">${h.net >= 0 ? '+' : ''}${h.net}</span>
+                      </div>`).join('')
+                    : '<div class="muted">No bet history yet.</div>'
+                }
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
   `;
 
   bindShellNav();
@@ -3390,6 +3573,22 @@ function renderHome() {
     goToView('lobbies');
     render();
   };
+  const goRankedHomeBtn = document.getElementById('goRankedHomeBtn');
+  if (goRankedHomeBtn) {
+    goRankedHomeBtn.onclick = () => {
+      goToView('ranked');
+      loadRankedOverview({ silent: true });
+      render();
+    };
+  }
+  app.querySelectorAll('[data-home-toggle]').forEach((btn) => {
+    btn.onclick = () => {
+      const key = btn.dataset.homeToggle;
+      if (!key) return;
+      state.homeSections[key] = !state.homeSections[key];
+      render();
+    };
+  });
   const highRollerPvpBtn = document.getElementById('highRollerPvpBtn');
   if (highRollerPvpBtn) {
     highRollerPvpBtn.onclick = () => {
@@ -3461,19 +3660,6 @@ function renderHome() {
       startOfflineBotMatch();
     };
   }
-  const rankedBetInput = document.getElementById('rankedBetInput');
-  if (rankedBetInput) {
-    rankedBetInput.oninput = () => {
-      const min = Math.max(1, Math.floor(Number(me.rankedBetMin) || 50));
-      const max = Math.max(min, Math.floor(Number(me.rankedBetMax) || 5000));
-      const value = Math.floor(Number(rankedBetInput.value) || min);
-      state.rankedQueue.bet = Math.max(min, Math.min(max, value));
-    };
-  }
-  const rankedQueueBtn = document.getElementById('rankedQueueBtn');
-  if (rankedQueueBtn) rankedQueueBtn.onclick = () => joinRankedQueue();
-  const rankedCancelBtn = document.getElementById('rankedCancelBtn');
-  if (rankedCancelBtn) rankedCancelBtn.onclick = () => cancelRankedQueue();
   const openStatsMoreBtn = document.getElementById('openStatsMoreBtn');
   if (openStatsMoreBtn) {
     openStatsMoreBtn.onclick = () => {
@@ -3502,6 +3688,31 @@ function renderHome() {
 
   const claimBtn = document.getElementById('claimFreeBtn');
   if (claimBtn) claimBtn.onclick = claimFree100;
+  const openBetHistoryModalBtn = document.getElementById('openBetHistoryModalBtn');
+  if (openBetHistoryModalBtn) {
+    openBetHistoryModalBtn.onclick = () => {
+      state.betHistoryModalOpen = true;
+      render();
+    };
+  }
+  const betHistoryModal = document.getElementById('betHistoryModal');
+  if (betHistoryModal) {
+    betHistoryModal.onclick = () => {
+      state.betHistoryModalOpen = false;
+      render();
+    };
+  }
+  const closeBetHistoryModalBtn = document.getElementById('closeBetHistoryModalBtn');
+  if (closeBetHistoryModalBtn) {
+    closeBetHistoryModalBtn.onclick = () => {
+      state.betHistoryModalOpen = false;
+      render();
+    };
+  }
+  const betHistoryModalPanel = app.querySelector('.bet-history-modal-panel');
+  if (betHistoryModalPanel) {
+    betHistoryModalPanel.onclick = (event) => event.stopPropagation();
+  }
   const openRulesBtn = document.getElementById('openRulesBtn');
   if (openRulesBtn) {
     openRulesBtn.onclick = () => {
@@ -3936,8 +4147,8 @@ function renderLobby() {
         <div class="lobby">
           <div>
             <div><strong>Code:</strong> ${lobby.id}</div>
-            <div class="muted">Owner: ${playerName(lobby.ownerId)}</div>
-            <div class="muted">Opponent: ${lobby.opponentId ? playerName(lobby.opponentId) : 'Waiting...'}</div>
+            <div class="muted">Owner: ${playerName(lobby.ownerId)} ${renderRankTierBadge(userLikeById(lobby.ownerId) || {})}</div>
+            <div class="muted">Opponent: ${lobby.opponentId ? `${playerName(lobby.opponentId)} ${renderRankTierBadge(userLikeById(lobby.opponentId) || {})}` : 'Waiting...'}</div>
             <div class="muted">Mode: ${String(lobby.matchType || '').toUpperCase() === 'HIGH_ROLLER' ? 'High Roller' : (lobby.stakeType === 'REAL' ? 'Challenge' : 'Friendly')}</div>
           </div>
           <div class="row">
@@ -3979,6 +4190,113 @@ function renderLobby() {
   const cancelBtn = document.getElementById('cancelLobbyBtn');
   if (cancelBtn && lobby) {
     cancelBtn.onclick = () => cancelLobby(lobby.id);
+  }
+}
+
+function renderRanked() {
+  const me = state.me;
+  if (!state.rankedOverview) {
+    loadRankedOverview({ silent: true });
+  }
+  const overview = state.rankedOverview || {};
+  const tier = rankTierMetaFromUser({
+    rankTierKey: overview.rankTierKey || me.rankTierKey,
+    rankTier: overview.rankTier || me.rankTier,
+    rankedElo: overview.elo || me.rankedElo
+  });
+  const fixedBet = Math.max(1, Math.floor(Number(overview.fixedBet || me.rankedFixedBet || me.rankedBetMin || tier.fixedBet) || 50));
+  const rankedElo = Math.max(0, Math.floor(Number(overview.elo || me.rankedElo) || 0));
+  const rankedWins = Math.max(0, Math.floor(Number(overview.rankedWins || me.rankedWins) || 0));
+  const rankedLosses = Math.max(0, Math.floor(Number(overview.rankedLosses || me.rankedLosses) || 0));
+  const canQueue = Boolean(overview.canQueue ?? (Math.floor(Number(me.chips) || 0) >= fixedBet));
+  const queueDisabledReason = overview.disabledReason || `Need at least ${fixedBet.toLocaleString()} chips for this rank.`;
+  const activeSeries = overview.activeSeries || null;
+  const markers = Array.isArray(activeSeries?.markers) ? activeSeries.markers : [];
+  const mainMarkers = Array.from({ length: 9 }, (_, idx) => {
+    const entry = markers.find((marker) => marker.gameIndex === idx + 1) || null;
+    return {
+      result: entry?.result || '',
+      runningChipDelta: Number.isFinite(Number(entry?.runningChipDelta)) ? Number(entry.runningChipDelta) : null
+    };
+  });
+  const tiebreakerMarkers = markers.filter((marker) => Number(marker.tiebreakerRound) > 0);
+  const currentRankedMatch = Boolean(state.currentMatch && String(state.currentMatch?.matchType || '').toUpperCase() === 'RANKED');
+  const searching = rankedQueueIsActive();
+  const canContinue = currentRankedMatch || (Boolean(activeSeries) && canQueue);
+  const actionLabel = currentRankedMatch || activeSeries ? 'Continue Series' : 'Start Ranked Series';
+  const actionDisabled = (!canQueue && !canContinue) || offlineModeEnabled();
+
+  app.innerHTML = `
+    ${renderTopbar('Ranked')}
+    <main class="view-stack ranked-view">
+      <section class="card section ranked-hero-card">
+        <div class="ranked-hero-head">
+          <div class="ranked-hero-badge">${renderRankTierBadge({ rankTierKey: tier.key, rankTier: tier.label, rankedElo })}</div>
+          <div>
+            <h2>${tier.label} Tier</h2>
+            <div class="muted">Elo ${rankedElo} • Ranked W-L ${rankedWins}-${rankedLosses}</div>
+            <div class="muted">Fixed rank bet: ${fixedBet.toLocaleString()} chips</div>
+          </div>
+        </div>
+        <div class="ranked-hero-actions">
+          <button id="rankedSeriesActionBtn" class="gold" ${actionDisabled || searching ? 'disabled' : ''}>${searching ? 'Searching...' : actionLabel}</button>
+          ${searching ? '<button id="rankedSeriesCancelBtn" class="ghost">Cancel Search</button>' : ''}
+        </div>
+        ${actionDisabled && !searching ? `<p class="muted ranked-disabled-note">${queueDisabledReason}</p>` : ''}
+      </section>
+
+      <section class="card section ranked-series-card">
+        <div class="ranked-series-head">
+          <h3>Series Tracker</h3>
+          <span class="muted">Best chip total after 9 games</span>
+        </div>
+        ${
+          activeSeries
+            ? `<div class="muted">Games: ${activeSeries.completedMainGames}/${activeSeries.targetGames} • Chips: ${activeSeries.yourChipDelta >= 0 ? '+' : ''}${Number(activeSeries.yourChipDelta).toLocaleString()}</div>`
+            : '<div class="muted">No active ranked series. Start one to begin tracking.</div>'
+        }
+        <div class="ranked-series-grid">
+          ${mainMarkers.map((entry, idx) => `<div class="ranked-game-marker ${entry.result ? `is-${entry.result.toLowerCase()}` : 'is-empty'}"><span>G${idx + 1}</span><strong>${entry.result || '•'}</strong>${entry.runningChipDelta === null ? '' : `<small>${entry.runningChipDelta >= 0 ? '+' : ''}${entry.runningChipDelta}</small>`}</div>`).join('')}
+        </div>
+        ${
+          activeSeries?.inTiebreaker
+            ? `<div class="ranked-tiebreaker-banner">Tiebreaker Round #${activeSeries.nextTiebreakerRound}</div>`
+            : ''
+        }
+        ${
+          tiebreakerMarkers.length
+            ? `<div class="ranked-tiebreaker-list">${tiebreakerMarkers.map((entry) => `<span class="ranked-tiebreaker-pill ${entry.result ? `is-${String(entry.result).toLowerCase()}` : ''}">TB${entry.tiebreakerRound}: ${entry.result || 'P'}</span>`).join('')}</div>`
+            : ''
+        }
+      </section>
+
+      <section class="card section ranked-rules-card">
+        <h3>Ranked Rules</h3>
+        <ul class="patch-list">
+          <li class="muted">Ranked is locked to your tier&apos;s fixed bet amount.</li>
+          <li class="muted">A series runs for 9 games and winner is decided by net chips.</li>
+          <li class="muted">If chips tie after 9, tiebreaker rounds continue until a non-push chip result.</li>
+          <li class="muted">Elo adjusts each game with a luck/variance multiplier.</li>
+        </ul>
+      </section>
+    </main>
+  `;
+
+  bindShellNav();
+  const rankedSeriesActionBtn = document.getElementById('rankedSeriesActionBtn');
+  if (rankedSeriesActionBtn) {
+    rankedSeriesActionBtn.onclick = () => {
+      if (currentRankedMatch) {
+        goToView('match');
+        render();
+        return;
+      }
+      joinRankedQueue();
+    };
+  }
+  const rankedSeriesCancelBtn = document.getElementById('rankedSeriesCancelBtn');
+  if (rankedSeriesCancelBtn) {
+    rankedSeriesCancelBtn.onclick = () => cancelRankedQueue();
   }
 }
 
@@ -4890,7 +5208,7 @@ function syncRankedOverlay() {
         ${isConnected ? 'Connected' : 'Searching'}
       </div>
       <h3>${isConnected ? 'Ranked opponent found' : 'Finding ranked match...'}</h3>
-      <p class="muted">${isConnected ? `Connected with ${state.rankedQueue.opponentName || 'opponent'}.` : 'Matching by Elo and tier bet range.'}</p>
+      <p class="muted">${isConnected ? `Connected with ${state.rankedQueue.opponentName || 'opponent'}.` : 'Matching by Elo and current rank tier.'}</p>
       <div class="muted quickplay-bucket-note">${tier} • Elo ${elo} • Bet ${Number(state.rankedQueue.bet || 0).toLocaleString()}</div>
       ${
         !isConnected
@@ -4994,6 +5312,8 @@ function render() {
       renderFriends();
     } else if (state.view === 'lobbies') {
       renderLobby();
+    } else if (state.view === 'ranked') {
+      renderRanked();
     } else if (state.view === 'challenges') {
       renderChallenges();
     } else if (state.view === 'notifications') {
