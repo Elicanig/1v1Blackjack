@@ -620,6 +620,23 @@ button:disabled {
   box-shadow: none;
 }
 
+button.is-locked {
+  opacity: 0.56;
+  cursor: not-allowed;
+  filter: saturate(0.6);
+}
+
+button.is-locked:hover,
+button.is-locked:active {
+  transform: none;
+  box-shadow: none;
+}
+
+.high-roller-lock-note {
+  margin-top: 4px;
+  color: #e3c792;
+}
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {

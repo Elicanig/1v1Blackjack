@@ -21,6 +21,8 @@ import {
   calculateForfeitLossAmount,
   rankedTierFromElo,
   rankedBetRangeForElo,
+  rankedKFactorForElo,
+  rankedEloDeltaForGame,
   getBotObservation,
   chooseBotActionFromObservation
 } from '../server.js';
@@ -470,6 +472,71 @@ test('39b ranked tiers map elo to expected ranges', () => {
   assert.equal(rankedTierFromElo(1250).label, 'Silver');
   assert.equal(rankedTierFromElo(1700).label, 'Diamond');
   assert.deepEqual(rankedBetRangeForElo(1850), { min: 1000, max: 1000 });
+});
+
+test('39ba ranked K-factor decreases at higher Elo', () => {
+  assert.equal(rankedKFactorForElo(1000), 32);
+  assert.equal(rankedKFactorForElo(1300), 24);
+  assert.equal(rankedKFactorForElo(1700), 16);
+  assert.equal(rankedKFactorForElo(1950), 12);
+});
+
+test('39bb losing 2 of 3 vs similar Elo is net negative', () => {
+  let playerElo = 1500;
+  let opponentElo = 1500;
+  let net = 0;
+  const outcomes = [0, 0, 1];
+  for (const actualScore of outcomes) {
+    const playerCalc = rankedEloDeltaForGame({
+      playerElo,
+      opponentElo,
+      actualScore,
+      varianceMultiplier: 1,
+      marginMultiplier: 1
+    });
+    const opponentCalc = rankedEloDeltaForGame({
+      playerElo: opponentElo,
+      opponentElo: playerElo,
+      actualScore: 1 - actualScore,
+      varianceMultiplier: 1,
+      marginMultiplier: 1
+    });
+    playerElo += playerCalc.finalDelta;
+    opponentElo += opponentCalc.finalDelta;
+    net += playerCalc.finalDelta;
+  }
+  assert.equal(net < 0, true);
+});
+
+test('39bc high Elo win over low Elo yields small gain', () => {
+  const result = rankedEloDeltaForGame({
+    playerElo: 1900,
+    opponentElo: 1200,
+    actualScore: 1,
+    varianceMultiplier: 1,
+    marginMultiplier: 1
+  });
+  assert.equal(result.finalDelta >= 1, true);
+  assert.equal(result.finalDelta <= 5, true);
+});
+
+test('39bd low Elo upset win is bigger but still clamped', () => {
+  const highFav = rankedEloDeltaForGame({
+    playerElo: 1900,
+    opponentElo: 1200,
+    actualScore: 1,
+    varianceMultiplier: 1,
+    marginMultiplier: 1
+  });
+  const upset = rankedEloDeltaForGame({
+    playerElo: 1200,
+    opponentElo: 1900,
+    actualScore: 1,
+    varianceMultiplier: 1,
+    marginMultiplier: 1
+  });
+  assert.equal(upset.finalDelta > highFav.finalDelta, true);
+  assert.equal(Math.abs(upset.finalDelta) <= 35, true);
 });
 
 test('39c double is blocked when pressure would exceed table max for opponent', () => {

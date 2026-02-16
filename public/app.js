@@ -33,6 +33,8 @@ const BOT_BET_RANGES = {
 };
 const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000, 5000];
 const HIGH_ROLLER_MIN_BET = 2500;
+const HIGH_ROLLER_UNLOCK_CHIPS = 10000;
+const HIGH_ROLLER_UNLOCK_MESSAGE = `High Roller unlocks at ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips.`;
 const LEADERBOARD_LIMIT = 25;
 const RANKED_TIER_META = Object.freeze({
   BRONZE: { label: 'Bronze', icon: '◈', minElo: 0, fixedBet: 50 },
@@ -787,6 +789,17 @@ function rankTimelineData(user = {}) {
     eloToNext,
     progressPercent: Math.round(progress * 100)
   };
+}
+
+function hasHighRollerAccess(user = state.me) {
+  const chips = Math.max(0, Math.floor(Number(user?.chips) || 0));
+  return chips >= HIGH_ROLLER_UNLOCK_CHIPS;
+}
+
+function guardHighRollerAccess() {
+  if (hasHighRollerAccess()) return true;
+  pushToast(HIGH_ROLLER_UNLOCK_MESSAGE);
+  return false;
 }
 
 function formatLastSeen(lastSeenAt) {
@@ -2528,6 +2541,7 @@ async function createLobby() {
 }
 
 async function createHighRollerLobby() {
+  if (!guardHighRollerAccess()) return;
   try {
     const data = await api('/api/lobbies/create', {
       method: 'POST',
@@ -2539,6 +2553,9 @@ async function createHighRollerLobby() {
     state.socket?.emit('lobby:watch', data.lobby.id);
     render();
   } catch (e) {
+    if (/high roller unlocks at/i.test(String(e?.message || ''))) {
+      pushToast(HIGH_ROLLER_UNLOCK_MESSAGE);
+    }
     setError(e.message);
   }
 }
@@ -3017,6 +3034,7 @@ async function startBotMatch(options = {}) {
   }
   const highRoller = Boolean(options.highRoller);
   const stakeType = options.stakeType || (highRoller ? 'REAL' : state.botStakeType);
+  if (highRoller && !guardHighRollerAccess()) return;
   try {
     const data = await api('/api/lobbies/bot', {
       method: 'POST',
@@ -3032,6 +3050,9 @@ async function startBotMatch(options = {}) {
     goToView('match');
     setStatus(`${stakeType === 'REAL' ? 'Real-chip' : 'Practice'} bot match started (${state.selectedBotDifficulty})${highRoller ? ' • High Roller' : ''}.`);
   } catch (e) {
+    if (/high roller unlocks at/i.test(String(e?.message || ''))) {
+      pushToast(HIGH_ROLLER_UNLOCK_MESSAGE);
+    }
     setError(e.message);
   }
 }
@@ -3596,6 +3617,7 @@ function renderHome() {
   const latest = notes[0];
   const rankWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
   const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
+  const highRollerUnlocked = hasHighRollerAccess(me);
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -3653,10 +3675,21 @@ function renderHome() {
                       <div class="high-roller-copy">
                         <strong>High Roller</strong>
                         <div class="muted">Min bet 2,500 • no max (bankroll limited)</div>
+                        ${!highRollerUnlocked ? `<div class="muted high-roller-lock-note">Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips</div>` : ''}
                       </div>
                       <div class="high-roller-actions">
-                        <button class="gold" id="highRollerPvpBtn" type="button">High Roller PvP</button>
-                        <button class="ghost" id="highRollerBotBtn" type="button">High Roller Bot</button>
+                        <button
+                          class="gold ${highRollerUnlocked ? '' : 'is-locked'}"
+                          id="highRollerPvpBtn"
+                          type="button"
+                          ${highRollerUnlocked ? '' : `aria-disabled="true" title="Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips"`}
+                        >High Roller PvP</button>
+                        <button
+                          class="ghost ${highRollerUnlocked ? '' : 'is-locked'}"
+                          id="highRollerBotBtn"
+                          type="button"
+                          ${highRollerUnlocked ? '' : `aria-disabled="true" title="Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips"`}
+                        >High Roller Bot</button>
                       </div>
                     </div>
                   </div>`
@@ -3950,12 +3983,14 @@ function renderHome() {
   const highRollerPvpBtn = document.getElementById('highRollerPvpBtn');
   if (highRollerPvpBtn) {
     highRollerPvpBtn.onclick = () => {
+      if (!guardHighRollerAccess()) return;
       createHighRollerLobby();
     };
   }
   const highRollerBotBtn = document.getElementById('highRollerBotBtn');
   if (highRollerBotBtn) {
     highRollerBotBtn.onclick = () => {
+      if (!guardHighRollerAccess()) return;
       startBotMatch({ highRoller: true, stakeType: 'REAL' });
     };
   }
@@ -4584,6 +4619,7 @@ function renderLobby() {
   const lobby = state.currentLobby;
   const canCancelLobby = Boolean(lobby && state.me && lobby.ownerId === state.me.id && lobby.status === 'waiting');
   const hasPrefilledCode = Boolean((state.lobbyJoinInput || '').trim());
+  const highRollerUnlocked = hasHighRollerAccess(state.me);
   app.innerHTML = `
     ${renderTopbar('Lobbies')}
     <main class="view-stack">
@@ -4593,8 +4629,13 @@ function renderLobby() {
       <p class="muted">Create only when you want to host a private 1v1 room.</p>
       <div class="row">
         <button class="primary" id="createLobbyBtn">Create Lobby</button>
-        <button class="gold" id="createHighRollerLobbyBtn">High Roller</button>
+        <button
+          class="gold ${highRollerUnlocked ? '' : 'is-locked'}"
+          id="createHighRollerLobbyBtn"
+          ${highRollerUnlocked ? '' : `aria-disabled="true" title="Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips"`}
+        >High Roller</button>
       </div>
+      ${highRollerUnlocked ? '' : `<div class="muted high-roller-lock-note">Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips</div>`}
         </section>
         <section class="col card section">
           <h3>Join Existing Lobby</h3>
@@ -4635,7 +4676,12 @@ function renderLobby() {
   const createBtn = document.getElementById('createLobbyBtn');
   if (createBtn) createBtn.onclick = createLobby;
   const highRollerCreateBtn = document.getElementById('createHighRollerLobbyBtn');
-  if (highRollerCreateBtn) highRollerCreateBtn.onclick = createHighRollerLobby;
+  if (highRollerCreateBtn) {
+    highRollerCreateBtn.onclick = () => {
+      if (!guardHighRollerAccess()) return;
+      createHighRollerLobby();
+    };
+  }
 
   document.getElementById('joinLobbyForm').onsubmit = (e) => {
     e.preventDefault();

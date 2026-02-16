@@ -43,12 +43,9 @@ const BOT_BET_LIMITS = {
 };
 const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000, 5000];
 const RANKED_BASE_ELO = 1000;
-const RANKED_K_BASE = 24;
-const RANKED_MIN_WIN_DELTA = 4;
-const RANKED_MAX_WIN_DELTA = 20;
-const RANKED_MIN_LOSS_DELTA = 4;
-const RANKED_MAX_LOSS_DELTA = 20;
-const RANKED_PUSH_MAX_NUDGE = 1;
+const RANKED_ELO_DELTA_CLAMP = 35;
+const RANKED_PUSH_DELTA_SCALE = 0.25;
+const RANKED_PUSH_DELTA_CAP = 3;
 const RANKED_MATCH_MAX_ELO_GAP = 220;
 const RANKED_QUEUE_TIMEOUT_MS = 60_000;
 const RANKED_SERIES_TARGET_GAMES = 9;
@@ -84,6 +81,7 @@ const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000;
 const LEADERBOARD_CACHE_MS = 30_000;
 const LEADERBOARD_MAX_LIMIT = 50;
 const LEADERBOARD_DEFAULT_LIMIT = 25;
+const HIGH_ROLLER_UNLOCK_CHIPS = 10_000;
 const HIGH_ROLLER_MIN_BET = 2500;
 const MAX_BET_HARD_CAP = 10_000_000;
 const XP_REWARDS = Object.freeze({
@@ -698,6 +696,15 @@ function getMatchBetLimits(match) {
   if (!botId) return { min: MIN_BET, max: MAX_BET_CAP };
   const difficulty = getBotDifficulty(match, botId);
   return getBetLimitsForDifficulty(difficulty);
+}
+
+function highRollerUnlockError() {
+  return `High Roller unlocks at ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips.`;
+}
+
+function hasHighRollerAccess(user) {
+  const chips = Math.max(0, Math.floor(Number(user?.chips) || 0));
+  return chips >= HIGH_ROLLER_UNLOCK_CHIPS;
 }
 
 function isBotPlayer(playerId) {
@@ -2112,6 +2119,65 @@ function rankedExpectedScore(eloA, eloB) {
   return 1 / (1 + (10 ** (diff / 400)));
 }
 
+function rankedKFactorForElo(elo) {
+  const rating = normalizeRankedElo(elo);
+  if (rating < 1200) return 32;
+  if (rating < 1600) return 24;
+  if (rating < 1850) return 16;
+  return 12;
+}
+
+function rankedClampDelta(delta, clampLimit = RANKED_ELO_DELTA_CLAMP) {
+  const safeLimit = Math.max(1, Math.floor(Number(clampLimit) || RANKED_ELO_DELTA_CLAMP));
+  const numeric = Math.round(Number(delta) || 0);
+  return Math.max(-safeLimit, Math.min(safeLimit, numeric));
+}
+
+function rankedMarginMultiplierForGame(match, winnerId, loserId, netByPlayer = {}) {
+  if (!winnerId || !loserId) return 1;
+  const winnerNet = Math.abs(Math.floor(Number(netByPlayer?.[winnerId]) || 0));
+  const baseBet = Math.max(1, Math.floor(Number(match?.round?.baseBet) || 1));
+  const t = clamp01((winnerNet / baseBet) / 4);
+  return lerp(0.9, 1.1, t);
+}
+
+function rankedEloDeltaForGame({
+  playerElo,
+  opponentElo,
+  actualScore,
+  varianceMultiplier = 1,
+  marginMultiplier = 1
+} = {}) {
+  const safePlayerElo = normalizeRankedElo(playerElo);
+  const safeOpponentElo = normalizeRankedElo(opponentElo);
+  const expectedScore = rankedExpectedScore(safePlayerElo, safeOpponentElo);
+  const safeActualScore = clamp01(actualScore);
+  const isPush = Math.abs(safeActualScore - 0.5) < 1e-9;
+  const safeVariance = clamp01(varianceMultiplier);
+  const safeMargin = Math.max(0.9, Math.min(1.1, Number(marginMultiplier) || 1));
+  const baseK = rankedKFactorForElo(safePlayerElo);
+  const effectiveK = Math.max(4, baseK * safeVariance * safeMargin);
+  const unclampedRaw = effectiveK * (safeActualScore - expectedScore);
+  const scaledRaw = isPush ? (unclampedRaw * RANKED_PUSH_DELTA_SCALE) : unclampedRaw;
+  const clampLimit = isPush ? RANKED_PUSH_DELTA_CAP : RANKED_ELO_DELTA_CLAMP;
+  let finalDelta = rankedClampDelta(scaledRaw, clampLimit);
+  if (!isPush && finalDelta === 0) {
+    finalDelta = safeActualScore > expectedScore ? 1 : -1;
+  }
+  return {
+    expectedScore,
+    actualScore: safeActualScore,
+    baseK,
+    effectiveK,
+    rawDelta: scaledRaw,
+    finalDelta,
+    clamped: finalDelta !== Math.round(scaledRaw),
+    clampLimit,
+    varianceMultiplier: safeVariance,
+    marginMultiplier: safeMargin
+  };
+}
+
 function rankedTierByKey(rankKey) {
   const safe = String(rankKey || '').trim().toUpperCase();
   return RANKED_TIERS.find((tier) => tier.key === safe) || null;
@@ -2306,7 +2372,8 @@ function applyRankedEloResult(match, {
   winnerId = null,
   loserId = null,
   outcomes = [],
-  tiebreakerRound = 0
+  tiebreakerRound = 0,
+  netByPlayer = {}
 } = {}) {
   if (!match || String(match.matchType || '').toUpperCase() !== 'RANKED') return;
   const [p1Id, p2Id] = match.playerIds || [];
@@ -2318,44 +2385,33 @@ function applyRankedEloResult(match, {
 
   const eloBefore1 = normalizeRankedElo(user1.rankedElo);
   const eloBefore2 = normalizeRankedElo(user2.rankedElo);
-  const expected1 = rankedExpectedScore(eloBefore1, eloBefore2);
-  const expected2 = rankedExpectedScore(eloBefore2, eloBefore1);
   const handStatesByPlayer = {
     [p1Id]: match.round?.players?.[p1Id]?.hands || [],
     [p2Id]: match.round?.players?.[p2Id]?.hands || []
   };
   const variance = rankedVarianceScore(outcomes, handStatesByPlayer, p1Id, p2Id);
   const varianceMultiplier = lerp(1.0, 0.6, variance.score);
-  const k = Math.max(8, Math.round(RANKED_K_BASE * varianceMultiplier));
+  const marginMultiplier = rankedMarginMultiplierForGame(match, winnerId, loserId, netByPlayer);
 
   const pushGame = !winnerId || !loserId;
-  let delta1 = 0;
-  let delta2 = 0;
-
-  if (pushGame) {
-    const gap = Math.abs(eloBefore1 - eloBefore2);
-    const nudge = gap >= 180 ? RANKED_PUSH_MAX_NUDGE : 0;
-    if (nudge > 0) {
-      if (eloBefore1 > eloBefore2) {
-        delta1 = -nudge;
-        delta2 = nudge;
-      } else if (eloBefore2 > eloBefore1) {
-        delta1 = nudge;
-        delta2 = -nudge;
-      }
-    }
-  } else {
-    const score1 = winnerId === p1Id ? 1 : 0;
-    const score2 = winnerId === p2Id ? 1 : 0;
-    const raw1 = Math.round(k * (score1 - expected1));
-    const raw2 = Math.round(k * (score2 - expected2));
-    delta1 = score1 > 0
-      ? Math.max(RANKED_MIN_WIN_DELTA, Math.min(RANKED_MAX_WIN_DELTA, raw1))
-      : Math.min(-RANKED_MIN_LOSS_DELTA, Math.max(-RANKED_MAX_LOSS_DELTA, raw1));
-    delta2 = score2 > 0
-      ? Math.max(RANKED_MIN_WIN_DELTA, Math.min(RANKED_MAX_WIN_DELTA, raw2))
-      : Math.min(-RANKED_MIN_LOSS_DELTA, Math.max(-RANKED_MAX_LOSS_DELTA, raw2));
-  }
+  const score1 = pushGame ? 0.5 : (winnerId === p1Id ? 1 : 0);
+  const score2 = pushGame ? 0.5 : (winnerId === p2Id ? 1 : 0);
+  const deltaCalc1 = rankedEloDeltaForGame({
+    playerElo: eloBefore1,
+    opponentElo: eloBefore2,
+    actualScore: score1,
+    varianceMultiplier,
+    marginMultiplier: pushGame ? 1 : marginMultiplier
+  });
+  const deltaCalc2 = rankedEloDeltaForGame({
+    playerElo: eloBefore2,
+    opponentElo: eloBefore1,
+    actualScore: score2,
+    varianceMultiplier,
+    marginMultiplier: pushGame ? 1 : marginMultiplier
+  });
+  const delta1 = deltaCalc1.finalDelta;
+  const delta2 = deltaCalc2.finalDelta;
 
   user1.rankedElo = Math.max(0, eloBefore1 + delta1);
   user2.rankedElo = Math.max(0, eloBefore2 + delta2);
@@ -2373,6 +2429,47 @@ function applyRankedEloResult(match, {
 
   ensureRankedState(user1);
   ensureRankedState(user2);
+
+  const eloCalc = {
+    [p1Id]: {
+      preElo: eloBefore1,
+      oppElo: eloBefore2,
+      expected: Number(deltaCalc1.expectedScore.toFixed(4)),
+      actual: score1,
+      baseK: deltaCalc1.baseK,
+      effectiveK: Number(deltaCalc1.effectiveK.toFixed(4)),
+      rawDelta: Number(deltaCalc1.rawDelta.toFixed(4)),
+      finalDelta: delta1,
+      postElo: user1.rankedElo,
+      clamped: deltaCalc1.clamped
+    },
+    [p2Id]: {
+      preElo: eloBefore2,
+      oppElo: eloBefore1,
+      expected: Number(deltaCalc2.expectedScore.toFixed(4)),
+      actual: score2,
+      baseK: deltaCalc2.baseK,
+      effectiveK: Number(deltaCalc2.effectiveK.toFixed(4)),
+      rawDelta: Number(deltaCalc2.rawDelta.toFixed(4)),
+      finalDelta: delta2,
+      postElo: user2.rankedElo,
+      clamped: deltaCalc2.clamped
+    }
+  };
+
+  if (process.env.NODE_ENV !== 'test') {
+    // Ranked Elo update audit logging for sanity checks and abuse/debug visibility.
+    // eslint-disable-next-line no-console
+    console.log('[ranked-elo]', JSON.stringify({
+      matchId: match.id,
+      roundNumber: Math.max(1, Math.floor(Number(match.roundNumber) || 1)),
+      tiebreakerRound: Math.max(0, Math.floor(Number(tiebreakerRound) || 0)),
+      varianceScore: Number(variance.score.toFixed(4)),
+      varianceMultiplier: Number(varianceMultiplier.toFixed(4)),
+      marginMultiplier: Number((pushGame ? 1 : marginMultiplier).toFixed(4)),
+      players: eloCalc
+    }));
+  }
 
   db.data.rankedHistory.push({
     id: nanoid(10),
@@ -2393,6 +2490,7 @@ function applyRankedEloResult(match, {
     p2EloDelta: delta2,
     varianceScore: Number(variance.score.toFixed(4)),
     varianceMultiplier: Number(varianceMultiplier.toFixed(4)),
+    marginMultiplier: Number((pushGame ? 1 : marginMultiplier).toFixed(4)),
     luckContext: {
       naturals: variance.naturals,
       bustEvents: variance.bustEvents,
@@ -2401,6 +2499,7 @@ function applyRankedEloResult(match, {
       splitOutcomes: variance.splitOutcomes,
       handCount: variance.handCount
     },
+    eloCalc,
     tiebreakerRound: Math.max(0, Math.floor(Number(tiebreakerRound) || 0))
   });
   db.data.rankedHistory = db.data.rankedHistory.slice(-3000);
@@ -2425,6 +2524,7 @@ function applyRankedEloResult(match, {
     },
     varianceScore: variance.score,
     varianceMultiplier,
+    marginMultiplier: pushGame ? 1 : marginMultiplier,
     luckContext: variance
   };
 }
@@ -3483,7 +3583,8 @@ function resolveRound(match) {
       winnerId,
       loserId,
       outcomes,
-      tiebreakerRound
+      tiebreakerRound,
+      netByPlayer: chipsDelta
     });
     rankedSeriesUpdate = recordRankedSeriesGame(match, {
       winnerId,
@@ -4729,7 +4830,8 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
       winnerId: opponentId,
       loserId: leaverId,
       outcomes: [],
-      tiebreakerRound
+      tiebreakerRound,
+      netByPlayer
     });
     recordRankedSeriesGame(match, {
       winnerId: opponentId,
@@ -5392,8 +5494,8 @@ app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
   const highRoller = requestedMatchType === 'HIGH_ROLLER';
   const hasStakeTypeInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'stakeType');
   const resolvedStakeType = highRoller ? 'REAL' : (hasStakeTypeInput ? resolveStakeType(req.body?.stakeType) : 'FAKE');
-  if (highRoller && Math.floor(Number(req.user?.chips) || 0) < HIGH_ROLLER_MIN_BET) {
-    return res.status(400).json({ error: `Need at least ${HIGH_ROLLER_MIN_BET} chips for High Roller lobbies` });
+  if (highRoller && !hasHighRollerAccess(req.user)) {
+    return res.status(400).json({ error: highRollerUnlockError() });
   }
   const existing = db.data.lobbies.find(
     (l) =>
@@ -5463,8 +5565,8 @@ app.post('/api/lobbies/join', authMiddleware, async (req, res) => {
   if (!lobby || lobby.status === 'cancelled' || lobby.status === 'closed') {
     return res.status(410).json({ error: 'Lobby no longer exists' });
   }
-  if (String(lobby.matchType || '').toUpperCase() === 'HIGH_ROLLER' && Math.floor(Number(req.user?.chips) || 0) < HIGH_ROLLER_MIN_BET) {
-    return res.status(400).json({ error: `Need at least ${HIGH_ROLLER_MIN_BET} chips to join this High Roller lobby` });
+  if (String(lobby.matchType || '').toUpperCase() === 'HIGH_ROLLER' && !hasHighRollerAccess(req.user)) {
+    return res.status(400).json({ error: highRollerUnlockError() });
   }
   if (lobby.ownerId === req.user.id) return res.status(400).json({ error: 'Cannot join your own lobby' });
   if (lobby.status !== 'waiting') return res.status(409).json({ error: 'Lobby full' });
@@ -5505,8 +5607,8 @@ app.post('/api/lobbies/invite', authMiddleware, async (req, res) => {
   const highRoller = requestedMatchType === 'HIGH_ROLLER';
   const hasStakeTypeInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'stakeType');
   const resolvedStakeType = highRoller ? 'REAL' : (hasStakeTypeInput ? resolveStakeType(req.body?.stakeType) : 'FAKE');
-  if (highRoller && Math.floor(Number(req.user?.chips) || 0) < HIGH_ROLLER_MIN_BET) {
-    return res.status(400).json({ error: `Need at least ${HIGH_ROLLER_MIN_BET} chips for High Roller invites` });
+  if (highRoller && !hasHighRollerAccess(req.user)) {
+    return res.status(400).json({ error: highRollerUnlockError() });
   }
   const friend = getUserByUsername(username || '');
   if (!friend) return res.status(404).json({ error: 'Friend not found' });
@@ -5557,8 +5659,8 @@ async function createBotPracticeLobby(req, res) {
     return res.status(400).json({ error: 'Difficulty must be easy, medium, or normal' });
   }
   const resolvedStake = highRoller ? 'REAL' : resolveStakeType(stakeType);
-  if (highRoller && Math.floor(Number(req.user?.chips) || 0) < HIGH_ROLLER_MIN_BET) {
-    return res.status(400).json({ error: `Need at least ${HIGH_ROLLER_MIN_BET} chips for High Roller mode` });
+  if (highRoller && !hasHighRollerAccess(req.user)) {
+    return res.status(400).json({ error: highRollerUnlockError() });
   }
 
   const botId = `bot:${difficulty}:${nanoid(6)}`;
@@ -6205,6 +6307,8 @@ export {
   calculateForfeitLossAmount,
   rankedTierFromElo,
   rankedBetRangeForElo,
+  rankedKFactorForElo,
+  rankedEloDeltaForGame,
   cleanupExpiredNotificationsForUser,
   markNotificationsSeenForUser,
   notificationsForUser,
