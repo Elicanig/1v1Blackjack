@@ -481,6 +481,10 @@ const state = {
   favoriteStatFilter: '',
   rankTimelineModalOpen: false,
   rankedForfeitModalOpen: false,
+  pendingSeriesResult: null,
+  rankedSeriesResultModal: null,
+  rankedSeriesResultAnimKey: '',
+  rankedSeriesResultAnimRaf: null,
   network: {
     offlineMode: !navigator.onLine,
     lastCheckedAt: 0,
@@ -797,6 +801,56 @@ function rankTimelineData(user = {}) {
     nextTier,
     eloToNext,
     progressPercent: Math.round(progress * 100)
+  };
+}
+
+function rankKeyMeta(rankKeyOrLabel = '') {
+  const normalized = String(rankKeyOrLabel || '').trim().toUpperCase();
+  if (normalized && RANKED_TIER_META[normalized]) {
+    return { key: normalized, ...RANKED_TIER_META[normalized] };
+  }
+  const fromLabel = RANKED_TIER_ORDER.find((key) => String(RANKED_TIER_META[key]?.label || '').toUpperCase() === normalized);
+  if (fromLabel) {
+    return { key: fromLabel, ...RANKED_TIER_META[fromLabel] };
+  }
+  const fallback = rankTierKeyFromElo(0);
+  return { key: fallback, ...RANKED_TIER_META[fallback] };
+}
+
+function eloTrackPercent(eloRaw) {
+  const elo = Math.max(0, Math.floor(Number(eloRaw) || 0));
+  const topMin = Math.floor(Number(RANKED_TIER_META.LEGENDARY?.minElo) || 1850);
+  const scaleMax = topMin + 300;
+  const progress = scaleMax > 0 ? elo / scaleMax : 0;
+  return Math.max(0, Math.min(1, progress));
+}
+
+function normalizeSeriesResultPayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const outcomeRaw = String(payload.outcome || '').toLowerCase();
+  const outcome = outcomeRaw === 'win' || outcomeRaw === 'loss' || outcomeRaw === 'forfeit'
+    ? outcomeRaw
+    : null;
+  if (!outcome) return null;
+  const eloBefore = Math.max(0, Math.floor(Number(payload.eloBefore) || 0));
+  const eloAfter = Math.max(0, Math.floor(Number(payload.eloAfter) || 0));
+  let eloDelta = Number(payload.eloDelta);
+  if (!Number.isFinite(eloDelta)) eloDelta = eloAfter - eloBefore;
+  eloDelta = Math.floor(eloDelta);
+  const rankBeforeMeta = rankKeyMeta(payload.rankBeforeKey || payload.rankBefore || rankTierKeyFromElo(eloBefore));
+  const rankAfterMeta = rankKeyMeta(payload.rankAfterKey || payload.rankAfter || rankTierKeyFromElo(eloAfter));
+  return {
+    seriesId: payload.seriesId || '',
+    status: String(payload.status || '').toUpperCase() || null,
+    outcome,
+    eloDelta,
+    eloBefore,
+    eloAfter,
+    rankBefore: rankBeforeMeta.label,
+    rankBeforeKey: rankBeforeMeta.key,
+    rankAfter: rankAfterMeta.label,
+    rankAfterKey: rankAfterMeta.key,
+    finalizedAt: payload.finalizedAt || null
   };
 }
 
@@ -1801,7 +1855,7 @@ function connectSocket() {
     render();
   });
   state.socket.on('match:error', ({ error }) => setError(error));
-  state.socket.on('round:result', ({ matchId, roundNumber, outcome, deltaChips, title, previousBankroll, newBankroll, isPractice, rankedSeries }) => {
+  state.socket.on('round:result', ({ matchId, roundNumber, outcome, deltaChips, title, previousBankroll, newBankroll, isPractice, rankedSeries, seriesResult }) => {
     // One-shot inline result banner trigger keyed by match+round.
     const key = `${matchId}:${roundNumber}`;
     if (state.lastRoundResultKey === key) return;
@@ -1814,10 +1868,15 @@ function connectSocket() {
       title: title || (outcome === 'win' ? 'You Win' : outcome === 'lose' ? 'You Lose' : 'Push'),
       deltaChips: deltaChips || 0,
       isPractice: Boolean(isPractice),
-      rankedSeries: rankedSeries || null
+      rankedSeries: rankedSeries || null,
+      seriesResult: seriesResult || null
     };
     if (Number.isFinite(previousBankroll) && Number.isFinite(newBankroll)) {
       tweenBankroll(previousBankroll, newBankroll, 950);
+    }
+    const normalizedSeriesResult = normalizeSeriesResultPayload(seriesResult);
+    if (normalizedSeriesResult) {
+      state.pendingSeriesResult = normalizedSeriesResult;
     }
     if (String(state.currentMatch?.matchType || '').toUpperCase() === 'RANKED') {
       if (rankedSeries?.complete && state.rankedOverview?.activeSeries?.seriesId === rankedSeries.seriesId) {
@@ -1836,8 +1895,14 @@ function connectSocket() {
     }
     render();
   });
-  state.socket.on('match:ended', ({ reason }) => {
+  state.socket.on('match:ended', ({ reason, seriesResult }) => {
     setStatus(reason);
+    const resolvedSeriesResult = normalizeSeriesResultPayload(seriesResult) || state.pendingSeriesResult;
+    state.pendingSeriesResult = null;
+    if (resolvedSeriesResult) {
+      state.rankedSeriesResultModal = resolvedSeriesResult;
+      state.rankedSeriesResultAnimKey = '';
+    }
     resetQuickPlayState();
     resetRankedQueueState();
     state.matchChatDraft = '';
@@ -1851,6 +1916,7 @@ function connectSocket() {
     state.pendingNavAfterLeave = null;
     goToView(target);
     loadMe();
+    if (resolvedSeriesResult) loadRankedOverview({ silent: true });
   });
 }
 
@@ -1978,6 +2044,11 @@ async function loadMe() {
     state.favoriteStatFilter = '';
     state.rankTimelineModalOpen = false;
     state.rankedForfeitModalOpen = false;
+    state.pendingSeriesResult = null;
+    state.rankedSeriesResultModal = null;
+    state.rankedSeriesResultAnimKey = '';
+    if (Number.isFinite(state.rankedSeriesResultAnimRaf)) cancelAnimationFrame(state.rankedSeriesResultAnimRaf);
+    state.rankedSeriesResultAnimRaf = null;
     render();
   }
 }
@@ -3195,6 +3266,11 @@ function logout() {
   state.favoriteStatFilter = '';
   state.rankTimelineModalOpen = false;
   state.rankedForfeitModalOpen = false;
+  state.pendingSeriesResult = null;
+  state.rankedSeriesResultModal = null;
+  state.rankedSeriesResultAnimKey = '';
+  if (Number.isFinite(state.rankedSeriesResultAnimRaf)) cancelAnimationFrame(state.rankedSeriesResultAnimRaf);
+  state.rankedSeriesResultAnimRaf = null;
   state.presenceByUser = {};
   state.statsMoreOpen = false;
   state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -3524,6 +3600,122 @@ function syncRoundResultModal() {
       emitDoubleOrNothing();
       render();
     };
+  }
+}
+
+function closeRankedSeriesResultModal(nextView = null) {
+  if (Number.isFinite(state.rankedSeriesResultAnimRaf)) {
+    cancelAnimationFrame(state.rankedSeriesResultAnimRaf);
+  }
+  state.rankedSeriesResultAnimRaf = null;
+  state.rankedSeriesResultAnimKey = '';
+  state.rankedSeriesResultModal = null;
+  if (nextView) {
+    goToView(nextView);
+    if (nextView === 'ranked') loadRankedOverview({ silent: true });
+  }
+  render();
+}
+
+function syncRankedSeriesResultModal() {
+  let mount = document.getElementById('rankedSeriesResultMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'rankedSeriesResultMount';
+    document.body.appendChild(mount);
+  }
+  const result = state.rankedSeriesResultModal;
+  if (!result) {
+    if (Number.isFinite(state.rankedSeriesResultAnimRaf)) {
+      cancelAnimationFrame(state.rankedSeriesResultAnimRaf);
+      state.rankedSeriesResultAnimRaf = null;
+    }
+    state.rankedSeriesResultAnimKey = '';
+    mount.innerHTML = '';
+    return;
+  }
+  const outcome = String(result.outcome || '').toLowerCase();
+  const title = outcome === 'win'
+    ? 'SERIES WON'
+    : outcome === 'forfeit'
+      ? 'FORFEIT'
+      : 'SERIES LOST';
+  const delta = Math.floor(Number(result.eloDelta) || 0);
+  const deltaSign = delta >= 0 ? '+' : '';
+  const before = Math.max(0, Math.floor(Number(result.eloBefore) || 0));
+  const after = Math.max(0, Math.floor(Number(result.eloAfter) || 0));
+  const beforeMeta = rankKeyMeta(result.rankBeforeKey || result.rankBefore);
+  const afterMeta = rankKeyMeta(result.rankAfterKey || result.rankAfter);
+  const startPct = Math.round(eloTrackPercent(before) * 1000) / 10;
+  const endPct = Math.round(eloTrackPercent(after) * 1000) / 10;
+  const tierIndex = RANKED_TIER_ORDER.indexOf(afterMeta.key);
+  const nextTierKey = tierIndex > 0 ? RANKED_TIER_ORDER[tierIndex - 1] : null;
+  const nextTierMeta = nextTierKey ? RANKED_TIER_META[nextTierKey] : null;
+  const eloToNext = nextTierMeta ? Math.max(0, Math.floor(Number(nextTierMeta.minElo) - after)) : 0;
+  const rankChange = beforeMeta.key === afterMeta.key
+    ? `${beforeMeta.icon} ${beforeMeta.label}`
+    : `${beforeMeta.icon} ${beforeMeta.label} → ${afterMeta.icon} ${afterMeta.label}`;
+  mount.innerHTML = `
+    <div class="round-result-wrap ranked-series-result-wrap">
+      <div class="round-result-popup result-modal ranked-series-result-modal card">
+        <h3 class="result-title">${title}</h3>
+        <div class="muted">${rankChange}</div>
+        <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${deltaSign}${Math.abs(delta)} Elo</div>
+        <div class="muted"><span id="rankedSeriesResultEloText">${before.toLocaleString()}</span> → ${after.toLocaleString()}</div>
+        <div class="ranked-series-elo-track">
+          <div class="ranked-series-elo-fill" id="rankedSeriesEloFill" style="width:${startPct}%"></div>
+        </div>
+        <div class="ranked-series-elo-meta">
+          <span>${beforeMeta.label}</span>
+          <span>${afterMeta.label}</span>
+        </div>
+        <div class="muted ranked-series-next-line">${nextTierMeta ? `${eloToNext.toLocaleString()} Elo to ${nextTierMeta.label}` : 'Top rank reached'}</div>
+        <div class="result-actions">
+          <div class="result-actions-top">
+            <button id="rankedSeriesBackBtn" class="primary">Back to Ranked</button>
+            <button id="rankedSeriesHomeBtn" class="ghost">Home</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const animKey = `${result.seriesId || 'series'}:${before}:${after}:${delta}`;
+  if (state.rankedSeriesResultAnimKey !== animKey) {
+    state.rankedSeriesResultAnimKey = animKey;
+    const fill = document.getElementById('rankedSeriesEloFill');
+    const eloText = document.getElementById('rankedSeriesResultEloText');
+    if (fill) {
+      requestAnimationFrame(() => {
+        fill.style.width = `${endPct}%`;
+      });
+    }
+    const startMs = performance.now();
+    const durationMs = 1100;
+    const tick = (now) => {
+      const t = Math.max(0, Math.min(1, (now - startMs) / durationMs));
+      const eased = 1 - ((1 - t) ** 3);
+      const current = Math.round(before + ((after - before) * eased));
+      if (eloText) eloText.textContent = current.toLocaleString();
+      if (t < 1) {
+        state.rankedSeriesResultAnimRaf = requestAnimationFrame(tick);
+      } else {
+        state.rankedSeriesResultAnimRaf = null;
+      }
+    };
+    if (Number.isFinite(state.rankedSeriesResultAnimRaf)) {
+      cancelAnimationFrame(state.rankedSeriesResultAnimRaf);
+    }
+    state.rankedSeriesResultAnimRaf = requestAnimationFrame(tick);
+  }
+
+  const rankedSeriesBackBtn = document.getElementById('rankedSeriesBackBtn');
+  if (rankedSeriesBackBtn) {
+    rankedSeriesBackBtn.onclick = () => closeRankedSeriesResultModal('ranked');
+  }
+  const rankedSeriesHomeBtn = document.getElementById('rankedSeriesHomeBtn');
+  if (rankedSeriesHomeBtn) {
+    rankedSeriesHomeBtn.onclick = () => closeRankedSeriesResultModal('home');
   }
 }
 
@@ -6123,6 +6315,7 @@ function render() {
   syncNotificationOverlay();
   syncChallengePromptOverlay();
   syncRoundResultModal();
+  syncRankedSeriesResultModal();
   syncPressureOverlay();
   syncQuickPlayBucketModal();
   syncQuickPlayOverlay();

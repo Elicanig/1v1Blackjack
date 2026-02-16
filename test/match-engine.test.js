@@ -337,7 +337,7 @@ test('30 base bet cannot change current round after first action', () => {
   assert.equal(res.error, 'Bet can only be changed before cards are dealt');
 });
 
-test('31 pressure match rejected when it would exceed table max', () => {
+test('31 bot pressure matching stays legal with dynamic in-round cap', () => {
   const m = makeMatch({ deck: [card('3')] });
   const botId = 'bot:easy:test';
   m.playerIds = ['p1', botId];
@@ -348,7 +348,8 @@ test('31 pressure match rejected when it would exceed table max', () => {
   m.round.players.p1.hands[0].bet = 125;
   applyAction(m, 'p1', 'double');
   const res = applyPressureDecision(m, botId, 'match');
-  assert.equal(res.error, 'Bet cannot exceed 250 for this table');
+  assert.equal(res.ok, true);
+  assert.equal(m.round.players[botId].hands[0].bet, 375);
 });
 
 test('32 deal blocked until both players confirm', () => {

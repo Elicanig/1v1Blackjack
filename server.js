@@ -732,7 +732,22 @@ function getMatchBetLimits(match) {
   const botId = match?.playerIds?.find((id) => isBotPlayer(id));
   if (!botId) return { min: MIN_BET, max: MAX_BET_CAP };
   const difficulty = getBotDifficulty(match, botId);
-  return getBetLimitsForDifficulty(difficulty);
+  const difficultyLimits = getBetLimitsForDifficulty(difficulty);
+  const liveHandPeakBet = Math.max(
+    Math.floor(Number(match?.round?.baseBet) || 0),
+    ...Object.values(match?.round?.players || {})
+      .flatMap((playerState) => Array.isArray(playerState?.hands) ? playerState.hands : [])
+      .map((hand) => Math.floor(Number(hand?.bet) || 0))
+  );
+  // Keep entry bet ranges by difficulty, but avoid bot stalls on legal double/split pressure flow.
+  const dynamicMax = Math.max(
+    Math.floor(Number(difficultyLimits.max) || 0),
+    liveHandPeakBet * RULES.MAX_HANDS_PER_PLAYER
+  );
+  return {
+    min: Math.max(1, Math.floor(Number(difficultyLimits.min) || MIN_BET)),
+    max: Math.max(1, Math.min(MAX_BET_HARD_CAP, Math.floor(dynamicMax || difficultyLimits.max || MAX_BET_CAP)))
+  };
 }
 
 function highRollerUnlockError() {
@@ -2341,6 +2356,43 @@ function rankedSeriesDeltaForOutcome({
   };
 }
 
+function rankedSeriesResultForUser(series, userId) {
+  if (!series || !userId) return null;
+  const status = normalizeRankedSeriesStatus(series.status);
+  const isP1 = series.p1 === userId;
+  if (!isP1 && series.p2 !== userId) return null;
+  const seriesElo = series.seriesElo && typeof series.seriesElo === 'object' ? series.seriesElo : null;
+  if (!seriesElo) return null;
+  const playerStats = isP1 ? seriesElo.p1 : seriesElo.p2;
+  if (!playerStats) return null;
+  const winnerId = series.winnerId || seriesElo.winnerId || null;
+  const loserId = series.loserId || seriesElo.loserId || null;
+  const won = winnerId === userId;
+  const lost = loserId === userId;
+  const outcome = status === RANKED_SERIES_STATUS.FORFEITED && lost
+    ? 'forfeit'
+    : won
+      ? 'win'
+      : 'loss';
+  const eloBefore = normalizeRankedElo(playerStats.startElo);
+  const eloAfter = normalizeRankedElo(playerStats.endElo);
+  const rankBeforeMeta = rankedTierFromElo(eloBefore);
+  const rankAfterMeta = rankedTierFromElo(eloAfter);
+  return {
+    seriesId: series.id,
+    status,
+    outcome,
+    eloDelta: Math.floor(Number(playerStats.finalDelta) || 0),
+    eloBefore,
+    eloAfter,
+    rankBefore: rankBeforeMeta.label,
+    rankBeforeKey: rankBeforeMeta.key,
+    rankAfter: rankAfterMeta.label,
+    rankAfterKey: rankAfterMeta.key,
+    finalizedAt: seriesElo.finalizedAt || series.eloFinalizedAt || null
+  };
+}
+
 function rankedTierByKey(rankKey) {
   const safe = String(rankKey || '').trim().toUpperCase();
   return RANKED_TIERS.find((tier) => tier.key === safe) || null;
@@ -3876,6 +3928,7 @@ function resolveRound(match) {
   }
 
   let rankedSeriesUpdate = null;
+  let rankedSeriesResultByPlayer = null;
   if (rankedRound) {
     ensureRankedSeriesForMatch(match, { createIfMissing: true });
     rankedSeriesUpdate = recordRankedSeriesGame(match, {
@@ -3889,6 +3942,10 @@ function resolveRound(match) {
         loserId: rankedSeriesUpdate.series?.loserId || loserId,
         reason: 'series_complete'
       });
+      rankedSeriesResultByPlayer = {
+        [aId]: rankedSeriesResultForUser(rankedSeriesUpdate.series, aId),
+        [bId]: rankedSeriesResultForUser(rankedSeriesUpdate.series, bId)
+      };
     }
   }
 
@@ -3982,7 +4039,8 @@ function resolveRound(match) {
       previousBankroll: bankrollBefore[aId],
       newBankroll: bankrollAfter[aId],
       isPractice: isPracticeMatch(match),
-      rankedSeries: rankedSeriesUpdate ? rankedSeriesSummaryForUser(rankedSeriesUpdate.series, aId) : null
+      rankedSeries: rankedSeriesUpdate ? rankedSeriesSummaryForUser(rankedSeriesUpdate.series, aId) : null,
+      seriesResult: rankedSeriesResultByPlayer?.[aId] || null
     },
     [bId]: {
       matchId: match.id,
@@ -3993,7 +4051,8 @@ function resolveRound(match) {
       previousBankroll: bankrollBefore[bId],
       newBankroll: bankrollAfter[bId],
       isPractice: isPracticeMatch(match),
-      rankedSeries: rankedSeriesUpdate ? rankedSeriesSummaryForUser(rankedSeriesUpdate.series, bId) : null
+      rankedSeries: rankedSeriesUpdate ? rankedSeriesSummaryForUser(rankedSeriesUpdate.series, bId) : null,
+      seriesResult: rankedSeriesResultByPlayer?.[bId] || null
     }
   };
 
@@ -4012,8 +4071,14 @@ function resolveRound(match) {
       const seriesWinnerName = match.participants?.[seriesWinnerId]?.username || getUserById(seriesWinnerId)?.username || 'Opponent';
       setTimeout(() => {
         if (!matches.has(match.id)) return;
-        emitToUser(aId, 'match:ended', { reason: `Ranked series complete. Winner: ${seriesWinnerName}.` });
-        emitToUser(bId, 'match:ended', { reason: `Ranked series complete. Winner: ${seriesWinnerName}.` });
+        emitToUser(aId, 'match:ended', {
+          reason: `Ranked series complete. Winner: ${seriesWinnerName}.`,
+          seriesResult: rankedSeriesResultByPlayer?.[aId] || null
+        });
+        emitToUser(bId, 'match:ended', {
+          reason: `Ranked series complete. Winner: ${seriesWinnerName}.`,
+          seriesResult: rankedSeriesResultByPlayer?.[bId] || null
+        });
         cleanupMatch(match);
       }, 900);
     }
@@ -4287,12 +4352,17 @@ function getBotObservation(match, botId) {
       ? pressure.affectedHandIndices
       : [activeHandIndex];
     const required = pressure.delta * affectedHandIndices.length;
+    const betLimits = getMatchBetLimits(match);
+    const canStayWithinTableMax = affectedHandIndices.every((idx) => {
+      const hand = botState.hands?.[idx] || botState.hands?.[0];
+      return Boolean(hand) && ((Number(hand.bet) || 0) + pressure.delta) <= betLimits.max;
+    });
     observation.pressure = {
       type: pressure.type,
       delta: pressure.delta,
       affectedHandIndices,
       required,
-      canMatch: canAffordIncrement(match, botId, required),
+      canMatch: canAffordIncrement(match, botId, required) && canStayWithinTableMax,
       allowedDecisions: ['match', 'surrender']
     };
   }
@@ -4429,11 +4499,40 @@ function scheduleBotTurn(match) {
     ) {
       const observation = getBotObservation(match, botId);
       const decision = chooseBotPressureDecisionFromObservation(observation, getBotDifficulty(match, botId));
-      const result = applyPressureDecision(match, botId, decision);
+      let appliedDecision = decision;
+      let result = applyPressureDecision(match, botId, appliedDecision);
+      if (result.error && appliedDecision !== 'surrender') {
+        appliedDecision = 'surrender';
+        result = applyPressureDecision(match, botId, appliedDecision);
+      }
       if (!result.error) {
+        if (process.env.NODE_ENV !== 'test') {
+          // eslint-disable-next-line no-console
+          console.log('[bot-action]', JSON.stringify({
+            matchId: match.id,
+            phase: match.phase,
+            action: `pressure:${appliedDecision}`,
+            handTotals: (observation?.bot?.hands || []).map((h) => h.total)
+          }));
+        }
         markBotActionCompleted(match, botId);
         pushMatchState(match);
         db.write();
+        scheduleBotTurn(match);
+      } else if (process.env.NODE_ENV !== 'test') {
+        // eslint-disable-next-line no-console
+        console.log('[bot-action-error]', JSON.stringify({
+          matchId: match.id,
+          phase: match.phase,
+          action: `pressure:${appliedDecision}`,
+          error: result.error
+        }));
+      }
+      if (
+        match.phase === PHASES.PRESSURE_RESPONSE &&
+        match.round.pendingPressure &&
+        match.round.pendingPressure.opponentId === botId
+      ) {
         scheduleBotTurn(match);
       }
       return;
@@ -4449,6 +4548,24 @@ function scheduleBotTurn(match) {
     if (result.error) {
       const fallback = applyAction(match, botId, 'stand');
       if (fallback.error) return;
+      if (process.env.NODE_ENV !== 'test') {
+        // eslint-disable-next-line no-console
+        console.log('[bot-action]', JSON.stringify({
+          matchId: match.id,
+          phase: match.phase,
+          action: 'stand',
+          fallbackFrom: action,
+          handTotals: (observation?.bot?.hands || []).map((h) => h.total)
+        }));
+      }
+    } else if (process.env.NODE_ENV !== 'test') {
+      // eslint-disable-next-line no-console
+      console.log('[bot-action]', JSON.stringify({
+        matchId: match.id,
+        phase: match.phase,
+        action,
+        handTotals: (observation?.bot?.hands || []).map((h) => h.total)
+      }));
     }
     markBotActionCompleted(match, botId);
 
@@ -5072,6 +5189,7 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
   let charged = false;
   let chargedAmount = 0;
   let wrote = false;
+  let rankedSeriesResultByPlayer = null;
 
   if (leaverUser && isRealMatch(match)) {
     const modeLabel = matchHistoryModeLabel(match);
@@ -5144,6 +5262,10 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
       loserId: leaverId,
       reason: source === 'disconnect_timeout' ? 'disconnect_forfeit' : 'forfeit'
     });
+    rankedSeriesResultByPlayer = {
+      [leaverId]: rankedSeriesResultForUser(finalizedSeries, leaverId),
+      [opponentId]: rankedSeriesResultForUser(finalizedSeries, opponentId)
+    };
     emitUserUpdate(leaverUser.id);
     emitUserUpdate(opponentUser.id);
     wrote = true;
@@ -5170,8 +5292,8 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
       : 'Opponent forfeited the ranked series.';
   }
 
-  emitToUser(leaverId, 'match:ended', { reason: leaverReason });
-  if (opponentId) emitToUser(opponentId, 'match:ended', { reason: opponentReason });
+  emitToUser(leaverId, 'match:ended', { reason: leaverReason, seriesResult: rankedSeriesResultByPlayer?.[leaverId] || null });
+  if (opponentId) emitToUser(opponentId, 'match:ended', { reason: opponentReason, seriesResult: rankedSeriesResultByPlayer?.[opponentId] || null });
   cleanupMatch(match);
   return { ok: true, forfeited, charged, chargedAmount, preRoundExit: preRoundBotExit };
 }

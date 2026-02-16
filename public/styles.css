@@ -3506,6 +3506,44 @@ select:focus-visible {
   width: min(220px, 100%);
 }
 
+.ranked-series-result-wrap {
+  z-index: 1400;
+}
+
+.ranked-series-result-modal {
+  width: min(520px, calc(100vw - 28px));
+  text-align: center;
+}
+
+.ranked-series-elo-track {
+  margin: 14px 2px 8px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(225, 235, 223, 0.2);
+  background: rgba(14, 29, 24, 0.88);
+  overflow: hidden;
+}
+
+.ranked-series-elo-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, rgba(205, 167, 100, 0.85), rgba(127, 226, 185, 0.92));
+  box-shadow: 0 0 18px rgba(205, 167, 100, 0.34);
+  transition: width 1.1s cubic-bezier(.2, .8, .2, 1);
+}
+
+.ranked-series-elo-meta {
+  display: flex;
+  justify-content: space-between;
+  margin: 0 2px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.ranked-series-next-line {
+  margin-top: 8px;
+}
+
 .emote-row {
   margin-top: 0;
   position: relative;
