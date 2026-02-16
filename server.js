@@ -98,6 +98,36 @@ const TITLE_DEFS = Object.freeze({
   GIANT_KILLER: { key: 'GIANT_KILLER', label: 'Giant Killer' },
   STREAK_LORD: { key: 'STREAK_LORD', label: 'Streak Lord' }
 });
+const FAVORITE_STAT_KEYS = Object.freeze([
+  'TOTAL_MATCHES',
+  'HANDS_WON',
+  'HANDS_LOST',
+  'PUSHES',
+  'BLACKJACKS',
+  'SPLITS_ATTEMPTED',
+  'DOUBLES_ATTEMPTED',
+  'SURRENDERS',
+  'BUSTS',
+  'LONGEST_WIN_STREAK',
+  'LONGEST_LOSS_STREAK',
+  'RANKED_ELO',
+  'RANKED_WINS',
+  'RANKED_LOSSES',
+  'PVP_WINS',
+  'PVP_LOSSES',
+  'NET_CHIPS',
+  'TOTAL_CHIPS_WON',
+  'TOTAL_CHIPS_LOST',
+  'BIGGEST_HAND_WIN',
+  'BIGGEST_HAND_LOSS',
+  'AVERAGE_BET',
+  'BOT_PRACTICE_HANDS',
+  'BOT_REAL_HANDS',
+  'PVP_REAL_HANDS',
+  'PVP_FRIENDLY_HANDS',
+  'DAILY_STREAK'
+]);
+const FAVORITE_STAT_DEFAULT = FAVORITE_STAT_KEYS[0];
 const DYNAMIC_BADGES = Object.freeze({
   TOP_1: { key: 'TOP_1', label: 'Top 1', short: '#1' },
   TOP_5: { key: 'TOP_5', label: 'Top 5', short: 'Top 5' },
@@ -339,6 +369,10 @@ for (const user of db.data.users) {
     user.customStatText = '';
     dbTouched = true;
   }
+  if (typeof user.favoriteStatKey !== 'string') {
+    user.favoriteStatKey = FAVORITE_STAT_DEFAULT;
+    dbTouched = true;
+  }
   if (!Number.isFinite(Number(user.xp))) {
     user.xp = 0;
     dbTouched = true;
@@ -426,6 +460,11 @@ for (const user of db.data.users) {
   const cleanCustomStat = sanitizeCustomStatText(user.customStatText || '');
   if (cleanCustomStat !== user.customStatText) {
     user.customStatText = cleanCustomStat;
+    dbTouched = true;
+  }
+  const cleanFavoriteStat = sanitizeFavoriteStatKey(user.favoriteStatKey);
+  if (cleanFavoriteStat !== user.favoriteStatKey) {
+    user.favoriteStatKey = cleanFavoriteStat;
     dbTouched = true;
   }
 }
@@ -864,6 +903,11 @@ function sanitizeCustomStatText(value) {
   return compact.slice(0, 60);
 }
 
+function sanitizeFavoriteStatKey(value) {
+  const key = String(value || '').trim().toUpperCase();
+  return FAVORITE_STAT_KEYS.includes(key) ? key : FAVORITE_STAT_DEFAULT;
+}
+
 function invalidateLeaderboardCache() {
   leaderboardCache = {
     at: 0,
@@ -1233,6 +1277,7 @@ function sanitizeUser(user) {
   const selectedTitleKey = normalizeTitleKey(user?.selectedTitle);
   const selectedTitle = selectedTitleKey ? TITLE_DEFS[selectedTitleKey]?.label || '' : '';
   const customStatText = sanitizeCustomStatText(user?.customStatText || '');
+  const favoriteStatKey = sanitizeFavoriteStatKey(user?.favoriteStatKey);
   return {
     id: user.id,
     username: user.username,
@@ -1279,7 +1324,8 @@ function sanitizeUser(user) {
     unlockedTitles,
     selectedTitleKey,
     selectedTitle,
-    customStatText
+    customStatText,
+    favoriteStatKey
   };
 }
 
@@ -4732,6 +4778,7 @@ function buildNewUser(username) {
     unlockedTitles: [],
     selectedTitle: '',
     customStatText: '',
+    favoriteStatKey: FAVORITE_STAT_DEFAULT,
     headToHead: {}
   };
   refreshChallengesForUser(user, true);
@@ -4923,12 +4970,11 @@ app.get('/api/leaderboard/chips', authMiddleware, async (req, res) => {
 });
 
 app.put('/api/profile', authMiddleware, async (req, res) => {
-  const { avatar, avatarStyle, avatarSeed, bio } = req.body || {};
+  const { avatar, avatarStyle, avatarSeed } = req.body || {};
   if (typeof avatarStyle === 'string') req.user.avatarStyle = avatarStyle.slice(0, 80);
   if (typeof avatarSeed === 'string') req.user.avatarSeed = avatarSeed.slice(0, 120);
   if (typeof avatar === 'string' && !avatarStyle && !avatarSeed) req.user.avatar = avatar.slice(0, 300);
   req.user.avatar = avatarUrl(req.user.avatarStyle, req.user.avatarSeed || req.user.username);
-  if (typeof bio === 'string') req.user.bio = bio.slice(0, 300);
   await db.write();
   return res.json({ user: sanitizeSelfUser(req.user) });
 });
@@ -4943,6 +4989,14 @@ app.patch('/api/profile/custom-stat', authMiddleware, async (req, res) => {
   invalidateLeaderboardCache();
   await db.write();
   return res.json({ ok: true, customStatText, user: sanitizeSelfUser(req.user) });
+});
+
+app.patch('/api/profile/favorite-stat', authMiddleware, async (req, res) => {
+  const favoriteStatKey = sanitizeFavoriteStatKey(req.body?.favoriteStatKey || req.body?.key || '');
+  req.user.favoriteStatKey = favoriteStatKey;
+  invalidateLeaderboardCache();
+  await db.write();
+  return res.json({ ok: true, favoriteStatKey, user: sanitizeSelfUser(req.user) });
 });
 
 app.patch('/api/profile/title', authMiddleware, async (req, res) => {

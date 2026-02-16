@@ -48,6 +48,173 @@ const TITLE_DEFS = Object.freeze([
   { key: 'GIANT_KILLER', label: 'Giant Killer', unlockHint: 'Beat a player with higher level or bankroll.' },
   { key: 'STREAK_LORD', label: 'Streak Lord', unlockHint: 'Reach a 10-match win streak.' }
 ]);
+const FAVORITE_STAT_DEFS = Object.freeze([
+  {
+    key: 'TOTAL_MATCHES',
+    label: 'Total Matches',
+    description: 'All completed matches across modes.',
+    read: (me) => Number(me?.stats?.matchesPlayed) || 0
+  },
+  {
+    key: 'HANDS_WON',
+    label: 'Hands Won',
+    description: 'Total blackjack hands won.',
+    read: (me) => Number(me?.stats?.handsWon) || 0
+  },
+  {
+    key: 'HANDS_LOST',
+    label: 'Hands Lost',
+    description: 'Total blackjack hands lost.',
+    read: (me) => Number(me?.stats?.handsLost) || 0
+  },
+  {
+    key: 'PUSHES',
+    label: 'Pushes',
+    description: 'Hands ending in a tie.',
+    read: (me) => Number(me?.stats?.pushes) || 0
+  },
+  {
+    key: 'BLACKJACKS',
+    label: 'Blackjacks',
+    description: 'Natural 21 count.',
+    read: (me) => Number(me?.stats?.blackjacks) || 0
+  },
+  {
+    key: 'SPLITS_ATTEMPTED',
+    label: 'Splits Attempted',
+    description: 'Times you split a pair.',
+    read: (_me, expanded) => Number(expanded?.splitsAttempted) || 0
+  },
+  {
+    key: 'DOUBLES_ATTEMPTED',
+    label: 'Doubles Attempted',
+    description: 'Times you doubled down.',
+    read: (_me, expanded) => Number(expanded?.doublesAttempted) || 0
+  },
+  {
+    key: 'SURRENDERS',
+    label: 'Surrenders',
+    description: 'Hands surrendered.',
+    read: (_me, expanded) => Number(expanded?.surrenders) || 0
+  },
+  {
+    key: 'BUSTS',
+    label: 'Busts',
+    description: 'Hands busted over 21.',
+    read: (_me, expanded) => Number(expanded?.busts) || 0
+  },
+  {
+    key: 'LONGEST_WIN_STREAK',
+    label: 'Longest Win Streak',
+    description: 'Best hand streak without losing.',
+    read: (_me, expanded) => Number(expanded?.longestWinStreak) || 0
+  },
+  {
+    key: 'LONGEST_LOSS_STREAK',
+    label: 'Longest Loss Streak',
+    description: 'Longest rough streak.',
+    read: (_me, expanded) => Number(expanded?.longestLossStreak) || 0
+  },
+  {
+    key: 'RANKED_ELO',
+    label: 'Ranked Elo',
+    description: 'Current ranked rating.',
+    read: (me) => Number(me?.rankedElo) || 0
+  },
+  {
+    key: 'RANKED_WINS',
+    label: 'Ranked Wins',
+    description: 'Total ranked game wins.',
+    read: (me) => Number(me?.rankedWins) || 0
+  },
+  {
+    key: 'RANKED_LOSSES',
+    label: 'Ranked Losses',
+    description: 'Total ranked game losses.',
+    read: (me) => Number(me?.rankedLosses) || 0
+  },
+  {
+    key: 'PVP_WINS',
+    label: 'PvP Wins',
+    description: 'Head-to-head match wins.',
+    read: (me) => Number(me?.pvpWins) || 0
+  },
+  {
+    key: 'PVP_LOSSES',
+    label: 'PvP Losses',
+    description: 'Head-to-head match losses.',
+    read: (me) => Number(me?.pvpLosses) || 0
+  },
+  {
+    key: 'NET_CHIPS',
+    label: 'Net Chips',
+    description: 'Real-chip wins minus losses.',
+    read: (_me, expanded) => Number(expanded?.netChips) || 0,
+    format: (value) => `${value >= 0 ? '+' : ''}${Math.floor(value).toLocaleString()}`
+  },
+  {
+    key: 'TOTAL_CHIPS_WON',
+    label: 'Total Chips Won',
+    description: 'Real chips won across tracked hands.',
+    read: (_me, expanded) => Number(expanded?.totalChipsWon) || 0
+  },
+  {
+    key: 'TOTAL_CHIPS_LOST',
+    label: 'Total Chips Lost',
+    description: 'Real chips lost across tracked hands.',
+    read: (_me, expanded) => Number(expanded?.totalChipsLost) || 0
+  },
+  {
+    key: 'BIGGEST_HAND_WIN',
+    label: 'Biggest Hand Win',
+    description: 'Largest single-hand chip gain.',
+    read: (_me, expanded) => Number(expanded?.biggestHandWin) || 0
+  },
+  {
+    key: 'BIGGEST_HAND_LOSS',
+    label: 'Biggest Hand Loss',
+    description: 'Largest single-hand chip drop.',
+    read: (_me, expanded) => Number(expanded?.biggestHandLoss) || 0
+  },
+  {
+    key: 'AVERAGE_BET',
+    label: 'Average Bet',
+    description: 'Average real-chip bet size.',
+    read: (_me, expanded) => Number(expanded?.averageBet) || 0,
+    format: (value) => value.toFixed(1)
+  },
+  {
+    key: 'BOT_PRACTICE_HANDS',
+    label: 'Bot Hands (Practice)',
+    description: 'Hands played versus bot in practice mode.',
+    read: (_me, expanded) => Number(expanded?.handsPlayedBotPractice) || 0
+  },
+  {
+    key: 'BOT_REAL_HANDS',
+    label: 'Bot Hands (Real)',
+    description: 'Hands played versus bot for real chips.',
+    read: (_me, expanded) => Number(expanded?.handsPlayedBotReal) || 0
+  },
+  {
+    key: 'PVP_REAL_HANDS',
+    label: 'PvP Hands (Real)',
+    description: 'Hands played in real-chip PvP.',
+    read: (_me, expanded) => Number(expanded?.handsPlayedPvpReal) || 0
+  },
+  {
+    key: 'PVP_FRIENDLY_HANDS',
+    label: 'PvP Hands (Friendly)',
+    description: 'Hands played in friendly PvP.',
+    read: (_me, expanded) => Number(expanded?.handsPlayedPvpFriendly) || 0
+  },
+  {
+    key: 'DAILY_STREAK',
+    label: 'Daily Win Streak',
+    description: 'Current consecutive daily wins.',
+    read: (me) => Number(me?.dailyWinStreakCount) || 0,
+    format: (value) => `${Math.floor(value)} day${Math.floor(value) === 1 ? '' : 's'}`
+  }
+]);
 
 function initialViewFromPath() {
   const pathname = window.location.pathname.toLowerCase();
@@ -290,9 +457,11 @@ const state = {
   homeSections: {
     highRoller: false,
     practice: false,
-    betHistory: false
+    betHistory: true
   },
+  leaderboardExpanded: false,
   betHistoryModalOpen: false,
+  favoriteStatModalOpen: false,
   network: {
     offlineMode: !navigator.onLine,
     lastCheckedAt: 0,
@@ -362,6 +531,7 @@ function ensureOfflineIdentity() {
     selectedTitle: '',
     selectedTitleKey: '',
     customStatText: '',
+    favoriteStatKey: 'TOTAL_MATCHES',
     pvpWins: 0,
     pvpLosses: 0,
     dailyWinStreakCount: 0
@@ -963,6 +1133,24 @@ function deriveExpandedStats(me) {
     handsPlayedPvpReal: Number(stats.handsPlayedPvpReal) || 0,
     handsPlayedPvpFriendly: Number(stats.handsPlayedPvpFriendly) || 0
   };
+}
+
+function normalizeFavoriteStatKey(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return FAVORITE_STAT_DEFS.some((entry) => entry.key === normalized) ? normalized : FAVORITE_STAT_DEFS[0].key;
+}
+
+function favoriteStatOptionsForUser(me) {
+  const expandedStats = deriveExpandedStats(me || {});
+  return FAVORITE_STAT_DEFS.map((entry) => {
+    const raw = Number(entry.read(me, expandedStats));
+    const value = Number.isFinite(raw) ? Math.floor(raw) : 0;
+    return {
+      ...entry,
+      value,
+      valueText: typeof entry.format === 'function' ? entry.format(value) : value.toLocaleString()
+    };
+  });
 }
 
 function updateChallengeResetCountdowns() {
@@ -1674,8 +1862,11 @@ async function loadMe() {
     state.patchNotes = FALLBACK_PATCH_NOTES;
     state.patchNotesDeploy = null;
     state.appVersion = 'dev';
+    state.homeSections = { highRoller: false, practice: false, betHistory: true };
     state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
+    state.leaderboardExpanded = false;
     state.rankedOverview = null;
+    state.favoriteStatModalOpen = false;
     render();
   }
 }
@@ -2142,13 +2333,13 @@ async function handleAuth(mode, form) {
 async function saveProfile(form) {
   const avatarStyle = form.querySelector('[name="avatar_style"]').value.trim();
   const avatarSeed = form.querySelector('[name="avatar_seed"]').value.trim();
-  const bio = form.querySelector('[name="bio"]').value.trim();
   const customStatText = String(form.querySelector('[name="custom_stat_text"]')?.value || '').slice(0, 120);
   const selectedTitle = String(form.querySelector('[name="selected_title"]')?.value || '').trim();
+  const favoriteStatKey = normalizeFavoriteStatKey(String(form.querySelector('[name="favorite_stat_key"]')?.value || ''));
   try {
     const profileData = await api('/api/profile', {
       method: 'PUT',
-      body: JSON.stringify({ avatarStyle, avatarSeed, bio })
+      body: JSON.stringify({ avatarStyle, avatarSeed })
     });
     await api('/api/profile/custom-stat', {
       method: 'PATCH',
@@ -2158,8 +2349,13 @@ async function saveProfile(form) {
       method: 'PATCH',
       body: JSON.stringify({ selectedTitle })
     });
+    await api('/api/profile/favorite-stat', {
+      method: 'PATCH',
+      body: JSON.stringify({ favoriteStatKey })
+    });
     const meData = await api('/api/me');
     state.me = meData.user || profileData.user;
+    state.favoriteStatModalOpen = false;
     setStatus('Profile saved.');
     loadLeaderboard({ silent: true });
   } catch (e) {
@@ -2835,9 +3031,12 @@ function logout() {
   state.challengeResets = { hourly: null, daily: null, weekly: null };
   state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
   state.challengeResetRefreshInFlight = false;
+  state.homeSections = { highRoller: false, practice: false, betHistory: true };
   state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
+  state.leaderboardExpanded = false;
   state.rankedOverview = null;
   state.betHistoryModalOpen = false;
+  state.favoriteStatModalOpen = false;
   state.presenceByUser = {};
   state.statsMoreOpen = false;
   state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -3237,7 +3436,8 @@ function renderHome() {
   const quickPlayLabel = quickPlayConnected ? 'Connecting...' : quickPlaySearching ? 'Searching...' : 'Quick Play';
   const expandedStats = deriveExpandedStats(me);
   const leaderboardRows = Array.isArray(state.leaderboard?.rows) ? state.leaderboard.rows : [];
-  const leaderboardTop = leaderboardRows.slice(0, 5);
+  const leaderboardExpanded = Boolean(state.leaderboardExpanded);
+  const leaderboardVisibleRows = leaderboardExpanded ? leaderboardRows : leaderboardRows.slice(0, 5);
   const dailyWinStreak = Math.max(0, Math.floor(Number(me.dailyWinStreakCount) || 0));
   const pvpWins = Math.max(0, Math.floor(Number(me.pvpWins) || 0));
   const pvpLosses = Math.max(0, Math.floor(Number(me.pvpLosses) || 0));
@@ -3253,7 +3453,7 @@ function renderHome() {
     : (rankedOverview?.disabledReason || `Need ${rankedFixedBet.toLocaleString()} chips for ranked.`);
   const betHistoryPreview = (me.betHistory || []).slice(0, 6);
   const betHistoryAll = (me.betHistory || []).slice(0, 15);
-  const homeSections = state.homeSections || { highRoller: false, practice: false, betHistory: false };
+  const homeSections = state.homeSections || { highRoller: false, practice: false, betHistory: true };
   const latest = notes[0];
   const rankWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
   const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
@@ -3287,7 +3487,7 @@ function renderHome() {
                 <strong>Ranked Summary</strong>
                 ${renderRankTierBadge(me)}
               </div>
-              <button id="goRankedHomeBtn" class="gold" ${!rankedCanQueue && !rankedSearching ? 'disabled' : ''}>Go Ranked</button>
+              <button id="goRankedHomeBtn" class="gold" ${!rankedCanQueue && !rankedSearching ? 'disabled' : ''}>Go to Ranked</button>
             </div>
             <div class="muted">Elo ${rankedElo} • W-L ${rankWins}-${rankLosses} • Fixed bet ${rankedFixedBet.toLocaleString()}</div>
             ${
@@ -3418,11 +3618,15 @@ function renderHome() {
           </section>
 
           <section class="leaderboard-card compact" aria-label="Global leaderboard">
-            <div class="leaderboard-head"><h3>Leaderboard Snapshot</h3><span class="muted">Top 5</span></div>
+            <div class="leaderboard-head">
+              <h3>Leaderboard Snapshot</h3>
+              <button class="ghost leaderboard-expand-btn" id="toggleLeaderboardBtn" type="button">${leaderboardExpanded ? 'Collapse' : 'Expand'}</button>
+            </div>
+            <div class="muted leaderboard-subhead">${leaderboardExpanded ? `Showing top ${leaderboardVisibleRows.length}` : 'Top 5'}</div>
             <div class="leaderboard-list compact">
               ${
-                leaderboardTop.length
-                  ? leaderboardTop.map((row) => `
+                leaderboardVisibleRows.length
+                  ? leaderboardVisibleRows.map((row) => `
                     <div class="leaderboard-row ${row.userId === me.id ? 'is-me' : ''}">
                       <span class="leaderboard-rank">#${row.rank}</span>
                       <span class="leaderboard-name">${row.username}</span>
@@ -3581,6 +3785,13 @@ function renderHome() {
       render();
     };
   }
+  const toggleLeaderboardBtn = document.getElementById('toggleLeaderboardBtn');
+  if (toggleLeaderboardBtn) {
+    toggleLeaderboardBtn.onclick = () => {
+      state.leaderboardExpanded = !state.leaderboardExpanded;
+      render();
+    };
+  }
   app.querySelectorAll('[data-home-toggle]').forEach((btn) => {
     btn.onclick = () => {
       const key = btn.dataset.homeToggle;
@@ -3736,6 +3947,9 @@ function renderProfile() {
   const rankElo = Math.max(0, Math.floor(Number(me.rankedElo) || 0));
   const rankWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
   const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
+  const favoriteStats = favoriteStatOptionsForUser(me);
+  const selectedFavoriteKey = normalizeFavoriteStatKey(me.favoriteStatKey);
+  const selectedFavorite = favoriteStats.find((entry) => entry.key === selectedFavoriteKey) || favoriteStats[0];
   app.innerHTML = `
     ${renderTopbar('Profile')}
     <main class="view-stack">
@@ -3776,10 +3990,6 @@ function renderProfile() {
                 </div>
               </div>
             </div>
-            <div>
-              <label>Bio</label>
-              <textarea name="bio" rows="3">${me.bio || ''}</textarea>
-            </div>
           </section>
 
           <section class="profile-group">
@@ -3810,6 +4020,18 @@ function renderProfile() {
                 <label>Custom Stat (public)</label>
                 <input name="custom_stat_text" maxlength="60" value="${me.customStatText || ''}" placeholder="Favorite Bet: 250" />
               </div>
+            </div>
+            <div class="profile-favorite-row">
+              <label>Favorite Stat</label>
+              <input type="hidden" name="favorite_stat_key" value="${selectedFavorite.key}" />
+              <div class="profile-favorite-selected">
+                <div>
+                  <strong>${selectedFavorite.label}</strong>
+                  <div class="muted">${selectedFavorite.description}</div>
+                </div>
+                <div class="profile-favorite-value">${selectedFavorite.valueText}</div>
+              </div>
+              <button id="openFavoriteStatModalBtn" class="ghost" type="button">Choose Favorite Stat</button>
             </div>
             <div class="titles-equip">
               <label>Displayed Title</label>
@@ -3846,6 +4068,31 @@ function renderProfile() {
         <p class="muted">Chip balance: ${me.chips} • Rank ${me.leaderboardRank ? `#${me.leaderboardRank}` : 'Unranked'} • PvP ${me.pvpWins || 0}-${me.pvpLosses || 0}</p>
       </div>
     </main>
+    ${
+      state.favoriteStatModalOpen
+        ? `<div class="modal" id="favoriteStatModal">
+            <div class="modal-panel card favorite-stat-modal" role="dialog" aria-modal="true" aria-label="Choose favorite stat">
+              <div class="stats-more-head">
+                <h3>Pick Favorite Stat</h3>
+                <button id="closeFavoriteStatModalBtn" class="ghost" type="button">Close</button>
+              </div>
+              <div class="favorite-stat-list">
+                ${favoriteStats
+                  .map((entry) => `
+                    <button class="favorite-stat-option ${entry.key === selectedFavorite.key ? 'is-selected' : ''}" type="button" data-favorite-stat-select="${entry.key}">
+                      <div class="favorite-stat-option-head">
+                        <strong>${entry.label}</strong>
+                        <span>${entry.valueText}</span>
+                      </div>
+                      <div class="muted">${entry.description}</div>
+                    </button>
+                  `)
+                  .join('')}
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
   `;
   bindShellNav();
   const togglePinBtn = document.getElementById('togglePinBtn');
@@ -3866,6 +4113,39 @@ function renderProfile() {
     e.preventDefault();
     saveProfile(e.currentTarget);
   };
+  const openFavoriteStatModalBtn = document.getElementById('openFavoriteStatModalBtn');
+  if (openFavoriteStatModalBtn) {
+    openFavoriteStatModalBtn.onclick = () => {
+      state.favoriteStatModalOpen = true;
+      render();
+    };
+  }
+  const favoriteStatModal = document.getElementById('favoriteStatModal');
+  if (favoriteStatModal) {
+    favoriteStatModal.onclick = () => {
+      state.favoriteStatModalOpen = false;
+      render();
+    };
+  }
+  const favoriteStatPanel = app.querySelector('.favorite-stat-modal');
+  if (favoriteStatPanel) {
+    favoriteStatPanel.onclick = (event) => event.stopPropagation();
+  }
+  const closeFavoriteStatModalBtn = document.getElementById('closeFavoriteStatModalBtn');
+  if (closeFavoriteStatModalBtn) {
+    closeFavoriteStatModalBtn.onclick = () => {
+      state.favoriteStatModalOpen = false;
+      render();
+    };
+  }
+  app.querySelectorAll('[data-favorite-stat-select]').forEach((btn) => {
+    btn.onclick = () => {
+      const nextKey = normalizeFavoriteStatKey(btn.dataset.favoriteStatSelect);
+      state.me.favoriteStatKey = nextKey;
+      state.favoriteStatModalOpen = false;
+      render();
+    };
+  });
 }
 
 function renderFriends() {
@@ -4400,18 +4680,87 @@ function renderRules() {
   app.innerHTML = `
     ${renderTopbar('Rules')}
     <main class="view-stack">
-      <div class="card section">
-        <h3>Rules & Fairness</h3>
-        <ul class="patch-list">
-          <li class="muted">Blackjack pays 3:2 for natural blackjack.</li>
-          <li class="muted">Single 52-card deck, reshuffled every round.</li>
-          <li class="muted">Each player sees one opponent upcard; hidden cards reveal at resolution.</li>
-          <li class="muted">Surrender loses 75% of the hand bet.</li>
-          <li class="muted">Split/double pressure requires opponent to match or surrender.</li>
-          <li class="muted">Leaving a PvP match is treated as forfeit.</li>
-        </ul>
+      <section class="card section rules-overview-card">
+        <h2>Rules & Fairness</h2>
+        <p class="muted">Complete gameplay, ranked, and reward rules in one place.</p>
         <div class="muted">Version: ${state.appVersion || 'dev'}</div>
-      </div>
+      </section>
+
+      <section class="card section rules-section-card">
+        <h3>Core Blackjack Table Rules</h3>
+        <div class="rules-grid">
+          <article>
+            <h4>Payouts & Deck</h4>
+            <ul class="rules-list">
+              <li>Natural blackjack pays 3:2.</li>
+              <li>Single 52-card deck is reshuffled every round.</li>
+              <li>Both players start with two cards and one opponent upcard is visible.</li>
+            </ul>
+          </article>
+          <article>
+            <h4>Hand Resolution</h4>
+            <ul class="rules-list">
+              <li>Higher non-bust total wins.</li>
+              <li>Equal totals result in a push.</li>
+              <li>A busted hand loses immediately.</li>
+            </ul>
+          </article>
+          <article>
+            <h4>Player Actions</h4>
+            <ul class="rules-list">
+              <li>Hit, stand, double, split, and surrender are available when legal.</li>
+              <li>Surrender forfeits 75% of that hand bet.</li>
+              <li>Split and double outcomes are tracked as separate hand results.</li>
+            </ul>
+          </article>
+          <article>
+            <h4>Pressure System</h4>
+            <ul class="rules-list">
+              <li>Opponent split/double pressure can require match-or-surrender decisions.</li>
+              <li>Pressure choices can increase chip swings within the same round.</li>
+              <li>Pressure events are recorded in hand and match history.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="card section rules-section-card">
+        <h3>Mode, Ranked, and Economy Rules</h3>
+        <div class="rules-grid">
+          <article>
+            <h4>Quick Play & Lobbies</h4>
+            <ul class="rules-list">
+              <li>Quick Play matches by bet buckets for fast queueing.</li>
+              <li>Lobbies support private code joins and manual bets inside limits.</li>
+              <li>Leaving an active PvP match is treated as forfeit.</li>
+            </ul>
+          </article>
+          <article>
+            <h4>Ranked Series</h4>
+            <ul class="rules-list">
+              <li>Ranked bet amount is fixed by your rank tier.</li>
+              <li>A ranked series is 9 games; winner is highest net chips after game 9.</li>
+              <li>If tied, unlimited tiebreakers continue until chip delta is non-zero.</li>
+            </ul>
+          </article>
+          <article>
+            <h4>Elo & Rank Updates</h4>
+            <ul class="rules-list">
+              <li>Every ranked game updates Elo and can change rank tiers.</li>
+              <li>High-variance rounds are dampened via luck multiplier on Elo delta.</li>
+              <li>Pushes create minimal Elo movement compared with decisive rounds.</li>
+            </ul>
+          </article>
+          <article>
+            <h4>Rewards & Tracking</h4>
+            <ul class="rules-list">
+              <li>Daily streak claims grant cooldown-based chip rewards.</li>
+              <li>Level rewards trigger every 5 levels with scaling amounts.</li>
+              <li>Stats, history, and ranked series records are stored server-side.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
     </main>
   `;
   bindShellNav();
