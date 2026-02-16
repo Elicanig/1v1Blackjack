@@ -1241,8 +1241,10 @@ async function forfeitBotMatch({ showToast = false, refreshOnError = true } = {}
   if (!state.currentMatch || !isBotMatchActive()) return false;
   const matchId = state.currentMatch.id;
   try {
-    await api(`/api/matches/${encodeURIComponent(matchId)}/forfeit`, { method: 'POST' });
-    if (showToast) pushToast('You forfeited the match.');
+    const data = await api(`/api/matches/${encodeURIComponent(matchId)}/forfeit`, { method: 'POST' });
+    if (showToast) {
+      pushToast(data?.forfeited ? 'You forfeited the match.' : 'Returned to lobby.');
+    }
     return true;
   } catch (e) {
     console.error('Bot forfeit request failed:', e);
@@ -2265,6 +2267,8 @@ function syncRoundResultModal() {
   const meId = state.me?.id;
   const alreadySelected = Boolean(meId && match?.resultChoiceByPlayer?.[meId]);
   const busy = state.roundResultChoicePending || alreadySelected;
+  const opponentId = match?.playerIds?.find((id) => id !== meId);
+  const botRound = Boolean(opponentId && match?.participants?.[opponentId]?.isBot);
   mount.innerHTML = `
     <div class="round-result-wrap">
       <div class="round-result-popup result-modal card">
@@ -2275,6 +2279,7 @@ function syncRoundResultModal() {
         <div class="result-actions">
           <button id="roundResultNextBtn" class="primary" ${busy ? 'disabled' : ''}>Next Round</button>
           <button id="roundResultChangeBetBtn" class="ghost" ${busy ? 'disabled' : ''}>Change Bet</button>
+          ${botRound ? '<button id="roundResultLeaveBtn" class="warn">Leave to Lobby</button>' : ''}
         </div>
         ${busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : ''}
       </div>
@@ -2294,6 +2299,13 @@ function syncRoundResultModal() {
       state.roundResultChoicePending = true;
       emitChangeBetChoice();
       render();
+    };
+  }
+  const leaveBtn = document.getElementById('roundResultLeaveBtn');
+  if (leaveBtn) {
+    leaveBtn.onclick = () => {
+      state.pendingNavAfterLeave = 'lobbies';
+      leaveCurrentMatch({ showToast: true, refreshOnError: true });
     };
   }
 }
@@ -3381,6 +3393,12 @@ function renderMatch() {
       : opponentThinking
         ? 'Opponent thinking...'
         : 'Waiting for next turn.';
+  const noPenaltyLeave =
+    isBotOpponent &&
+    (!match.stakesCommitted || match.phase === 'ROUND_INIT' || match.phase === 'RESULT' || match.phase === 'REVEAL');
+  const leaveWarningText = noPenaltyLeave
+    ? 'Leave to lobby. No additional chips are charged until a round starts.'
+    : 'You will forfeit this round and end the match.';
   const pressureMine = waitingPressure ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const pressureOpp = pressure && pressure.opponentId === oppId ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const turnTimerState = getTurnTimerState(match);
@@ -3554,7 +3572,7 @@ function renderMatch() {
                   state.leaveMatchModal
                       ? `<div class="leave-inline">
                         <strong>Leave Match?</strong>
-                        <p class="muted">You will forfeit this round and end the match.</p>
+                        <p class="muted">${leaveWarningText}</p>
                         <div class="pressure-actions">
                           <button id="confirmLeaveMatchBtn" class="warn">Leave Match</button>
                           <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
@@ -3584,7 +3602,7 @@ function renderMatch() {
           isBettingPhase && state.leaveMatchModal
             ? `<div class="leave-inline">
                  <strong>Leave Match?</strong>
-                 <p class="muted">You will forfeit this round and end the match.</p>
+                 <p class="muted">${leaveWarningText}</p>
                  <div class="pressure-actions">
                    <button id="confirmLeaveMatchBtn" class="warn">Leave Match</button>
                    <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
@@ -3711,6 +3729,7 @@ function renderMatch() {
   if (confirmLeaveMatchBtn) {
     confirmLeaveMatchBtn.onclick = () => {
       state.leaveMatchModal = false;
+      if (isBotMatchActive()) state.pendingNavAfterLeave = 'lobbies';
       leaveCurrentMatch({ showToast: true, refreshOnError: true });
     };
   }

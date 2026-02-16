@@ -467,6 +467,24 @@ function isBotPlayer(playerId) {
   return typeof playerId === 'string' && playerId.startsWith('bot:');
 }
 
+function isBotMatch(match) {
+  return Boolean(match?.playerIds?.some((id) => isBotPlayer(id)));
+}
+
+function usesRoundStartStakeCommit(match) {
+  return Boolean(match && isRealMatch(match) && isBotMatch(match));
+}
+
+function isRoundSettledPhase(match) {
+  return Boolean(
+    match &&
+    (match.phase === PHASES.ROUND_RESOLVE ||
+      match.phase === PHASES.REVEAL ||
+      match.phase === PHASES.RESULT ||
+      match.phase === PHASES.NEXT_ROUND)
+  );
+}
+
 function buildParticipants(playerIds, botDifficultyById = {}) {
   return playerIds.reduce((acc, playerId) => {
     if (isBotPlayer(playerId)) {
@@ -1256,6 +1274,8 @@ function buildClientState(match, viewerId) {
     maxHandsPerPlayer: RULES.MAX_HANDS_PER_PLAYER,
     betControllerId: match.betControllerId,
     postedBetByPlayer: round.postedBetByPlayer,
+    stakesCommittedByPlayer: round.stakesCommittedByPlayer || {},
+    stakesCommitted: Boolean(round.stakesCommitted),
     allInPlayers: round.allInPlayers,
     firstActionPlayerId: round.firstActionPlayerId,
     roundResult: round.resultByPlayer?.[viewerId] || null,
@@ -1608,6 +1628,11 @@ function startRound(match) {
       [p1]: 0,
       [p2]: 0
     },
+    stakesCommittedByPlayer: {
+      [p1]: 0,
+      [p2]: 0
+    },
+    stakesCommitted: false,
     allInPlayers: {
       [p1]: false,
       [p2]: false
@@ -1650,6 +1675,34 @@ function startRound(match) {
   scheduleBotTurn(match);
 }
 
+function commitBetAtRoundStart(match) {
+  if (!match?.round) return { ok: false, error: 'Round missing' };
+  if (match.round.stakesCommitted) return { ok: true, alreadyCommitted: true };
+  const commitments = {};
+  for (const pid of match.playerIds) {
+    commitments[pid] = Math.max(0, Math.floor(Number(match.round.postedBetByPlayer?.[pid]) || 0));
+  }
+  match.round.stakesCommittedByPlayer = commitments;
+  match.round.stakesCommitted = true;
+
+  if (!usesRoundStartStakeCommit(match)) {
+    return { ok: true, committed: commitments, deducted: false };
+  }
+
+  for (const pid of match.playerIds) {
+    if (isBotPlayer(pid)) continue;
+    const stake = commitments[pid] || 0;
+    if (stake <= 0) continue;
+    const bankroll = getParticipantChips(match, pid);
+    const deduction = Math.min(Math.max(0, Math.floor(Number(bankroll) || 0)), stake);
+    setParticipantChips(match, pid, bankroll - deduction);
+    commitments[pid] = deduction;
+    emitUserUpdate(pid);
+  }
+  db.write();
+  return { ok: true, committed: commitments, deducted: true };
+}
+
 function beginActionPhase(match) {
   const [p1, p2] = match.playerIds;
   match.phase = PHASES.DEAL;
@@ -1664,6 +1717,7 @@ function beginActionPhase(match) {
   match.round.deck = deck;
   match.round.postedBetByPlayer[p1] = postedP1;
   match.round.postedBetByPlayer[p2] = postedP2;
+  commitBetAtRoundStart(match);
   match.round.allInPlayers[p1] = postedP1 < baseBet;
   match.round.allInPlayers[p2] = postedP2 < baseBet;
   match.round.firstActionPlayerId = match.playerIds[match.startingPlayerIndex % 2];
@@ -1812,8 +1866,11 @@ function resolveRound(match) {
   }
 
   if (realMatch) {
-    setParticipantChips(match, aId, getParticipantChips(match, aId) + chipsDelta[aId]);
-    setParticipantChips(match, bId, getParticipantChips(match, bId) + chipsDelta[bId]);
+    const committed = match.round?.stakesCommittedByPlayer || {};
+    const payoutA = usesRoundStartStakeCommit(match) ? chipsDelta[aId] + (committed[aId] || 0) : chipsDelta[aId];
+    const payoutB = usesRoundStartStakeCommit(match) ? chipsDelta[bId] + (committed[bId] || 0) : chipsDelta[bId];
+    setParticipantChips(match, aId, getParticipantChips(match, aId) + payoutA);
+    setParticipantChips(match, bId, getParticipantChips(match, bId) + payoutB);
   }
   const bankrollAfter = {
     [aId]: getParticipantChips(match, aId),
@@ -2810,39 +2867,79 @@ function calculateForfeitLossAmount(availableChips, exposureBet, baseBet = BASE_
 }
 
 function leaveMatchByForfeit(match, leaverId) {
-  if (!match || !match.playerIds.includes(leaverId)) return;
+  if (!match || !match.playerIds.includes(leaverId)) return { ok: false, error: 'Match not found or unauthorized' };
   const opponentId = match.playerIds.find((id) => id !== leaverId);
-  const botMatch = match.playerIds.some((id) => isBotPlayer(id));
+  const botMatch = isBotMatch(match);
   const leaverUser = !isBotPlayer(leaverId) ? getUserById(leaverId) : null;
   const opponentUser = !isBotPlayer(opponentId) ? getUserById(opponentId) : null;
+  const roundStarted = Boolean(match.round?.stakesCommitted);
+  const preRoundBotExit = botMatch && (!roundStarted || match.phase === PHASES.ROUND_INIT || isRoundSettledPhase(match));
+  let forfeited = false;
+  let charged = false;
+  let chargedAmount = 0;
+
   if (leaverUser && isRealMatch(match)) {
     const modeLabel = matchHistoryModeLabel(match);
-    const leaverExposure = (match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0);
-    const opponentExposure = opponentId
-      ? (match.round?.players?.[opponentId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0)
-      : 0;
-    const exposure = opponentUser ? leaverExposure + opponentExposure : leaverExposure;
-    const award = calculateForfeitLossAmount(leaverUser.chips, exposure, match.round?.baseBet || BASE_BET);
-    leaverUser.chips = Math.max(0, leaverUser.chips - award);
-    appendBetHistory(leaverUser, {
-      mode: modeLabel,
-      bet: award,
-      result: 'Forfeit',
-      net: -award,
-      notes: botMatch ? 'left bot match' : 'left match'
-    });
-    if (opponentUser) {
+    if (botMatch) {
+      if (!preRoundBotExit) {
+        forfeited = true;
+        const committed = Math.max(0, Math.floor(Number(match.round?.stakesCommittedByPlayer?.[leaverId]) || 0));
+        const leaverExposure = Math.max(
+          0,
+          Math.floor(
+            Number((match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0)) || 0
+          )
+        );
+        const expectedLoss = Math.max(committed, leaverExposure || committed || Math.floor(Number(match.round?.baseBet) || BASE_BET));
+        const additionalLoss = Math.max(0, Math.min(Math.floor(Number(leaverUser.chips) || 0), expectedLoss - committed));
+        if (additionalLoss > 0) {
+          leaverUser.chips = Math.max(0, leaverUser.chips - additionalLoss);
+          charged = true;
+          chargedAmount = additionalLoss;
+        }
+        const totalLoss = Math.max(0, committed + additionalLoss);
+        appendBetHistory(leaverUser, {
+          mode: modeLabel,
+          bet: totalLoss,
+          result: 'Forfeit',
+          net: -totalLoss,
+          notes: 'left bot match'
+        });
+        emitUserUpdate(leaverUser.id);
+        db.write();
+      }
+    } else if (opponentUser) {
+      const leaverExposure = (match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0);
+      const opponentExposure = opponentId
+        ? (match.round?.players?.[opponentId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0)
+        : 0;
+      const exposure = leaverExposure + opponentExposure;
+      const award = calculateForfeitLossAmount(leaverUser.chips, exposure, match.round?.baseBet || BASE_BET);
+      leaverUser.chips = Math.max(0, leaverUser.chips - award);
       opponentUser.chips += award;
+      appendBetHistory(leaverUser, { mode: modeLabel, bet: award, result: 'Forfeit', net: -award, notes: 'left match' });
       appendBetHistory(opponentUser, { mode: modeLabel, bet: award, result: 'Win', net: award, notes: 'opponent left' });
+      emitUserUpdate(leaverUser.id);
       emitUserUpdate(opponentUser.id);
+      db.write();
     }
-    emitUserUpdate(leaverUser.id);
-    db.write();
   }
 
-  emitToUser(leaverId, 'match:ended', { reason: botMatch ? 'You forfeited the match.' : 'You left the match.' });
-  if (opponentId) emitToUser(opponentId, 'match:ended', { reason: 'Opponent left — you win by forfeit.' });
+  const leaverReason = botMatch
+    ? preRoundBotExit
+      ? 'You left before the next round started.'
+      : 'You forfeited the match.'
+    : 'You left the match.';
+  const opponentReason = botMatch
+    ? preRoundBotExit
+      ? 'Opponent left before the next round started.'
+      : 'Opponent left — you win by forfeit.'
+    : 'Opponent left — you win by forfeit.';
+
+  emitToUser(leaverId, 'match:ended', { reason: leaverReason });
+  if (opponentId) emitToUser(opponentId, 'match:ended', { reason: opponentReason });
   cleanupMatch(match);
+  return { ok: true, forfeited, charged, chargedAmount, preRoundExit: preRoundBotExit };
 }
 
 function buildNewUser(username) {
@@ -3471,9 +3568,14 @@ async function handleBotForfeit(req, res) {
   if (!isBotMatch) {
     return res.status(400).json({ error: 'Forfeit endpoint is only available for bot matches.' });
   }
-  leaveMatchByForfeit(match, req.user.id);
-  await db.write();
-  return res.json({ ok: true, forfeited: true });
+  const outcome = leaveMatchByForfeit(match, req.user.id) || {};
+  return res.json({
+    ok: true,
+    forfeited: Boolean(outcome.forfeited),
+    charged: Boolean(outcome.charged),
+    chargedAmount: Math.max(0, Math.floor(Number(outcome.chargedAmount) || 0)),
+    preRoundExit: Boolean(outcome.preRoundExit)
+  });
 }
 
 app.post('/api/matches/:matchId/forfeit', authMiddleware, async (req, res) => {
