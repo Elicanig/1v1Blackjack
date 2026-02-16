@@ -23,6 +23,7 @@ import {
   rankedBetRangeForElo,
   rankedKFactorForElo,
   rankedEloDeltaForGame,
+  rankedSeriesDeltaForOutcome,
   getBotObservation,
   chooseBotActionFromObservation
 } from '../server.js';
@@ -539,6 +540,44 @@ test('39bd low Elo upset win is bigger but still clamped', () => {
   assert.equal(Math.abs(upset.finalDelta) <= 35, true);
 });
 
+test('39be series Elo win vs similar Elo lands in target range', () => {
+  const seriesWin = rankedSeriesDeltaForOutcome({
+    playerElo: 1400,
+    opponentElo: 1400,
+    won: true,
+    rankTierKey: 'GOLD'
+  });
+  assert.equal(seriesWin.finalDelta >= 17, true);
+  assert.equal(seriesWin.finalDelta <= 25, true);
+});
+
+test('39bf Bronze loss is softened versus Gold at same Elo', () => {
+  const bronzeLoss = rankedSeriesDeltaForOutcome({
+    playerElo: 1100,
+    opponentElo: 1100,
+    won: false,
+    rankTierKey: 'BRONZE'
+  });
+  const goldLoss = rankedSeriesDeltaForOutcome({
+    playerElo: 1500,
+    opponentElo: 1500,
+    won: false,
+    rankTierKey: 'GOLD'
+  });
+  assert.equal(Math.abs(bronzeLoss.finalDelta) < Math.abs(goldLoss.finalDelta), true);
+});
+
+test('39bg high Elo expected series win stays bounded', () => {
+  const favoredWin = rankedSeriesDeltaForOutcome({
+    playerElo: 1900,
+    opponentElo: 1200,
+    won: true,
+    rankTierKey: 'LEGENDARY'
+  });
+  assert.equal(favoredWin.finalDelta >= 12, true);
+  assert.equal(favoredWin.finalDelta <= 20, true);
+});
+
 test('39c double is blocked when pressure would exceed table max for opponent', () => {
   const p1Hand = newHand([card('9'), card('2')], [false, true], 250, 0);
   const p2Hand = newHand([card('10'), card('7')], [false, true], 500, 0);
@@ -781,6 +820,34 @@ test('41i action identifiers are case-insensitive server-side', () => {
   const res = applyAction(m, 'p1', 'DOUBLE');
   assert.equal(res.ok, true);
   assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+});
+
+test('41j ranked double is allowed under normal legality rules', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('5'), card('6')], [false, true], 50, 0),
+    p2Hand: newHand([card('9'), card('8')], [false, true], 50, 0),
+    deck: [card('3', 'S')]
+  });
+  m.matchType = 'RANKED';
+  m.rankedBet = 50;
+  const res = applyAction(m, 'p1', 'double');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+  assert.equal(m.round.players.p1.hands[0].bet, 100);
+});
+
+test('41k ranked split is allowed under normal legality rules', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('8'), card('8', 'D')], [false, true], 50, 0),
+    p2Hand: newHand([card('10'), card('7')], [false, true], 50, 0),
+    deck: [card('4', 'S'), card('3', 'C')]
+  });
+  m.matchType = 'RANKED';
+  m.rankedBet = 50;
+  const res = applyAction(m, 'p1', 'split');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+  assert.equal(m.round.players.p1.hands.length, 2);
 });
 
 test('42 practice matches do not advance challenge progress, real matches do', () => {

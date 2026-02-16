@@ -1796,7 +1796,7 @@ function connectSocket() {
     render();
   });
   state.socket.on('match:error', ({ error }) => setError(error));
-  state.socket.on('round:result', ({ matchId, roundNumber, outcome, deltaChips, title, previousBankroll, newBankroll, isPractice }) => {
+  state.socket.on('round:result', ({ matchId, roundNumber, outcome, deltaChips, title, previousBankroll, newBankroll, isPractice, rankedSeries }) => {
     // One-shot inline result banner trigger keyed by match+round.
     const key = `${matchId}:${roundNumber}`;
     if (state.lastRoundResultKey === key) return;
@@ -1808,12 +1808,16 @@ function connectSocket() {
       outcome,
       title: title || (outcome === 'win' ? 'You Win' : outcome === 'lose' ? 'You Lose' : 'Push'),
       deltaChips: deltaChips || 0,
-      isPractice: Boolean(isPractice)
+      isPractice: Boolean(isPractice),
+      rankedSeries: rankedSeries || null
     };
     if (Number.isFinite(previousBankroll) && Number.isFinite(newBankroll)) {
       tweenBankroll(previousBankroll, newBankroll, 950);
     }
     if (String(state.currentMatch?.matchType || '').toUpperCase() === 'RANKED') {
+      if (rankedSeries?.complete && state.rankedOverview?.activeSeries?.seriesId === rankedSeries.seriesId) {
+        state.rankedOverview.activeSeries = null;
+      }
       loadRankedOverview({ silent: true });
     }
     render();
@@ -2129,7 +2133,12 @@ function canTriggerAction(action) {
 
 function triggerAction(action) {
   if (!canTriggerAction(action)) return;
-  state.confirmActionModal = null;
+  const myState = state.currentMatch.players[state.me.id];
+  const hand = myState.hands[myState.activeHandIndex || 0];
+  if (action === 'double' || action === 'split') {
+    openActionConfirm(action, hand);
+    return;
+  }
   emitAction(action);
 }
 
@@ -2976,7 +2985,7 @@ async function cancelQuickPlayQueue({ silent = false } = {}) {
   }
 }
 
-async function joinRankedQueue() {
+async function joinRankedQueue({ continueSeries = false } = {}) {
   if (!state.token || !state.me) return;
   if (offlineModeEnabled()) {
     return setError('Ranked requires an online connection.');
@@ -3004,7 +3013,7 @@ async function joinRankedQueue() {
   try {
     const data = await api('/api/ranked/join', {
       method: 'POST',
-      body: JSON.stringify({ bet: selected })
+      body: JSON.stringify({ bet: selected, continueSeries: Boolean(continueSeries) })
     });
     if (data?.status === 'found') {
       beginRankedConnectedState(data);
@@ -3020,6 +3029,7 @@ async function joinRankedQueue() {
     render();
   } catch (e) {
     resetRankedQueueState();
+    loadRankedOverview({ silent: true });
     setError(e.message);
   }
 }
@@ -3379,10 +3389,15 @@ function syncRoundResultModal() {
   const subtitle = result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push');
   const alreadySelected = Boolean(meId && match?.resultChoiceByPlayer?.[meId]);
   const seriesComplete = Boolean(result?.rankedSeries?.complete);
-  const busy = state.roundResultChoicePending || alreadySelected || seriesComplete;
   const opponentId = match?.playerIds?.find((id) => id !== meId);
   const botRound = Boolean(opponentId && match?.participants?.[opponentId]?.isBot);
   const rankedRound = String(match?.matchType || '').toUpperCase() === 'RANKED';
+  const rankedSeriesActive = Boolean(rankedRound && !seriesComplete);
+  const busy = state.roundResultChoicePending || alreadySelected;
+  const nextDisabled = seriesComplete ? false : busy;
+  const nextLabel = seriesComplete
+    ? (rankedRound ? 'Return to Ranked' : 'Series Complete')
+    : (rankedRound ? 'Continue Series' : 'Next Round');
   const pvpRound = Boolean(opponentId && !botRound);
   const doubledBet = Math.max(1, Math.floor(Number(match?.baseBet) || 0) * 2);
   const opponentBankroll = Math.max(0, Math.floor(Number(match?.players?.[opponentId]?.bankroll) || 0));
@@ -3392,7 +3407,9 @@ function syncRoundResultModal() {
     doubledBet >= minBet &&
     doubledBet <= maxBetCap &&
     (result.isPractice || (bankroll >= doubledBet && opponentBankroll >= doubledBet));
-  const leaveLabel = rankedRound ? 'Forfeit Series' : (botRound ? 'Leave to Lobby' : 'Leave to Home');
+  const leaveLabel = rankedRound
+    ? (rankedSeriesActive ? 'Forfeit Series' : 'Return to Ranked')
+    : (botRound ? 'Leave to Lobby' : 'Leave to Home');
   mount.innerHTML = `
     <div class="round-result-wrap">
       <div class="round-result-popup result-modal card">
@@ -3402,18 +3419,22 @@ function syncRoundResultModal() {
         <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
         <div class="result-actions">
           <div class="result-actions-top">
-            <button id="roundResultNextBtn" class="primary" ${busy ? 'disabled' : ''}>${seriesComplete ? 'Series Complete' : (rankedRound ? 'Continue Series' : 'Next Round')}</button>
-            <button id="roundResultChangeBetBtn" class="ghost" ${busy || rankedRound ? 'disabled' : ''}>${rankedRound ? 'Bet Locked' : 'Change Bet'}</button>
+            <button id="roundResultNextBtn" class="primary" ${nextDisabled ? 'disabled' : ''}>${nextLabel}</button>
+            ${rankedRound ? '' : `<button id="roundResultChangeBetBtn" class="ghost" ${busy ? 'disabled' : ''}>Change Bet</button>`}
           </div>
-          <div class="result-actions-mid">
-            <button id="roundResultDoubleBtn" class="gold result-double-btn" ${busy || !canDoubleOrNothing ? 'disabled' : ''}>
-              Double or Nothing (${doubledBet.toLocaleString()})${pvpRound ? ' • both must accept' : ''}
-            </button>
-          </div>
-          <div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">${leaveLabel}</button></div>
+          ${
+            rankedRound
+              ? ''
+              : `<div class="result-actions-mid">
+                   <button id="roundResultDoubleBtn" class="gold result-double-btn" ${busy || !canDoubleOrNothing ? 'disabled' : ''}>
+                     Double or Nothing (${doubledBet.toLocaleString()})${pvpRound ? ' • both must accept' : ''}
+                   </button>
+                 </div>`
+          }
+          ${rankedRound && seriesComplete ? '' : `<div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">${leaveLabel}</button></div>`}
         </div>
         ${
-          rankedRound && state.rankedForfeitModalOpen
+          rankedSeriesActive && state.rankedForfeitModalOpen
             ? `<div class="round-result-forfeit-confirm">
                  <strong>Forfeit Ranked Series?</strong>
                  <p class="muted">This counts as an automatic loss and ends the series now.</p>
@@ -3424,13 +3445,20 @@ function syncRoundResultModal() {
                </div>`
             : ''
         }
-        ${seriesComplete ? '<div class="muted" style="margin-top:8px">Series complete. Returning to lobby...</div>' : (busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : '')}
+        ${seriesComplete ? '<div class="muted" style="margin-top:8px">Series complete. Elo finalized for this series.</div>' : (busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : '')}
       </div>
     </div>
   `;
   const nextBtn = document.getElementById('roundResultNextBtn');
   if (nextBtn) {
     nextBtn.onclick = () => {
+      if (seriesComplete && rankedRound) {
+        state.pendingNavAfterLeave = 'ranked';
+        goToView('ranked');
+        loadRankedOverview({ silent: true });
+        render();
+        return;
+      }
       state.roundResultChoicePending = true;
       emitNextRoundChoice();
       render();
@@ -3448,7 +3476,13 @@ function syncRoundResultModal() {
   if (leaveBtn) {
     leaveBtn.onclick = () => {
       if (rankedRound) {
-        state.rankedForfeitModalOpen = true;
+        if (rankedSeriesActive) {
+          state.rankedForfeitModalOpen = true;
+        } else {
+          state.pendingNavAfterLeave = 'ranked';
+          goToView('ranked');
+          loadRankedOverview({ silent: true });
+        }
         render();
         return;
       }
@@ -4766,6 +4800,7 @@ function renderRanked() {
   const canQueue = Boolean(overview.canQueue ?? (Math.floor(Number(me.chips) || 0) >= fixedBet));
   const queueDisabledReason = overview.disabledReason || `Need at least ${fixedBet.toLocaleString()} chips for this rank.`;
   const activeSeries = overview.activeSeries || null;
+  const activeSeriesLive = Boolean(activeSeries && !activeSeries.complete && String(activeSeries.status || '').toLowerCase() === 'active');
   const markers = Array.isArray(activeSeries?.markers) ? activeSeries.markers : [];
   const mainMarkers = Array.from({ length: 9 }, (_, idx) => {
     const entry = markers.find((marker) => marker.gameIndex === idx + 1) || null;
@@ -4777,8 +4812,8 @@ function renderRanked() {
   const tiebreakerMarkers = markers.filter((marker) => Number(marker.tiebreakerRound) > 0);
   const currentRankedMatch = Boolean(state.currentMatch && String(state.currentMatch?.matchType || '').toUpperCase() === 'RANKED');
   const searching = rankedQueueIsActive();
-  const canContinue = currentRankedMatch || (Boolean(activeSeries) && canQueue);
-  const actionLabel = currentRankedMatch || activeSeries ? 'Continue Series' : 'Start Ranked Series';
+  const canContinue = currentRankedMatch || activeSeriesLive;
+  const actionLabel = canContinue ? 'Continue Series' : 'Start Ranked Series';
   const actionDisabled = (!canQueue && !canContinue) || offlineModeEnabled();
   const forfeitDisabled = !currentRankedMatch || offlineModeEnabled();
 
@@ -4837,7 +4872,7 @@ function renderRanked() {
           <li class="muted">Series winner is decided by net chips after game 9 (not game win count).</li>
           <li class="muted">If chips tie after 9, tiebreakers continue until a non-zero chip swing decides the winner.</li>
           <li class="muted">You cannot leave mid-series unless you explicitly forfeit.</li>
-          <li class="muted">Elo updates every ranked game and is variance-adjusted.</li>
+          <li class="muted">Elo is finalized once per completed series (or forfeit), not per game.</li>
         </ul>
       </section>
     </main>
@@ -4867,7 +4902,11 @@ function renderRanked() {
         render();
         return;
       }
-      joinRankedQueue();
+      if (activeSeriesLive) {
+        joinRankedQueue({ continueSeries: true });
+        return;
+      }
+      joinRankedQueue({ continueSeries: false });
     };
   }
   const rankedSeriesCancelBtn = document.getElementById('rankedSeriesCancelBtn');

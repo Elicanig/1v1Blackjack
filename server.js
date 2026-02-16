@@ -46,6 +46,10 @@ const RANKED_BASE_ELO = 1000;
 const RANKED_ELO_DELTA_CLAMP = 35;
 const RANKED_PUSH_DELTA_SCALE = 0.25;
 const RANKED_PUSH_DELTA_CAP = 3;
+const RANKED_SERIES_WIN_DELTA_MIN = 12;
+const RANKED_SERIES_WIN_DELTA_MAX = 28;
+const RANKED_SERIES_LOSS_DELTA_MIN = -28;
+const RANKED_SERIES_LOSS_DELTA_MAX = -12;
 const RANKED_MATCH_MAX_ELO_GAP = 220;
 const RANKED_QUEUE_TIMEOUT_MS = 60_000;
 const RANKED_SERIES_TARGET_GAMES = 9;
@@ -689,7 +693,8 @@ function getMatchBetLimits(match) {
   const highRoller = String(match?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(match?.highRoller);
   if (highRoller) return { min: HIGH_ROLLER_MIN_BET, max: MAX_BET_HARD_CAP };
   const rankedFixed = Math.max(0, Math.floor(Number(match?.rankedBet) || 0));
-  if (rankedFixed > 0) return { min: rankedFixed, max: rankedFixed };
+  // Ranked keeps base bet fixed, but in-round actions (double/split pressure) must remain legal.
+  if (rankedFixed > 0) return { min: rankedFixed, max: MAX_BET_HARD_CAP };
   const quickPlayBucket = normalizeQuickPlayBucket(match?.quickPlayBucket);
   if (quickPlayBucket) return { min: quickPlayBucket, max: quickPlayBucket };
   const botId = match?.playerIds?.find((id) => isBotPlayer(id));
@@ -2178,6 +2183,57 @@ function rankedEloDeltaForGame({
   };
 }
 
+function rankedSeriesKFactorForElo(elo) {
+  const rating = normalizeRankedElo(elo);
+  if (rating < 1200) return 46;
+  if (rating < 1600) return 44;
+  if (rating < 1850) return 40;
+  return 36;
+}
+
+function rankedLossSoftenerForTier(rankTierKey) {
+  const tierKey = String(rankTierKey || '').trim().toUpperCase();
+  if (tierKey === 'BRONZE') return 0.75;
+  if (tierKey === 'SILVER') return 0.85;
+  return 1;
+}
+
+function rankedClampSeriesDelta(rawDelta) {
+  const raw = Number(rawDelta) || 0;
+  if (raw >= 0) return Math.max(RANKED_SERIES_WIN_DELTA_MIN, Math.min(RANKED_SERIES_WIN_DELTA_MAX, raw));
+  return Math.max(RANKED_SERIES_LOSS_DELTA_MIN, Math.min(RANKED_SERIES_LOSS_DELTA_MAX, raw));
+}
+
+function rankedSeriesDeltaForOutcome({
+  playerElo,
+  opponentElo,
+  won = false,
+  rankTierKey = ''
+} = {}) {
+  const startElo = normalizeRankedElo(playerElo);
+  const oppElo = normalizeRankedElo(opponentElo);
+  const expected = rankedExpectedScore(startElo, oppElo);
+  const actual = won ? 1 : 0;
+  const k = rankedSeriesKFactorForElo(startElo);
+  const rawDelta = k * (actual - expected);
+  const clampedDelta = rankedClampSeriesDelta(rawDelta);
+  const lossSoftener = clampedDelta < 0 ? rankedLossSoftenerForTier(rankTierKey || rankedTierFromElo(startElo).key) : 1;
+  let finalDelta = Math.round(clampedDelta * lossSoftener);
+  if (won && finalDelta <= 0) finalDelta = 1;
+  if (!won && finalDelta >= 0) finalDelta = -1;
+  return {
+    startElo,
+    oppElo,
+    expected,
+    actual,
+    k,
+    rawDelta,
+    clampedDelta,
+    lossSoftener,
+    finalDelta
+  };
+}
+
 function rankedTierByKey(rankKey) {
   const safe = String(rankKey || '').trim().toUpperCase();
   return RANKED_TIERS.find((tier) => tier.key === safe) || null;
@@ -2188,6 +2244,7 @@ function createRankedSeries(match) {
   if (!Array.isArray(db.data.rankedSeries)) db.data.rankedSeries = [];
   const [p1, p2] = match.playerIds;
   const p1Meta = rankedMetaForUser(getUserById(p1));
+  const p2Meta = rankedMetaForUser(getUserById(p2));
   const seriesId = nanoid(12);
   const betAmount = Math.max(1, Math.floor(Number(match.rankedBet || p1Meta?.bets?.min) || 50));
   const rankAtStart = p1Meta?.tierKey || rankedTierFromElo(RANKED_BASE_ELO).key;
@@ -2200,6 +2257,10 @@ function createRankedSeries(match) {
     p2,
     rankAtStart,
     rank_at_start: rankAtStart,
+    p1RankAtStart: p1Meta?.tierKey || rankedTierFromElo(RANKED_BASE_ELO).key,
+    p2RankAtStart: p2Meta?.tierKey || rankedTierFromElo(RANKED_BASE_ELO).key,
+    p1EloStart: normalizeRankedElo(p1Meta?.elo),
+    p2EloStart: normalizeRankedElo(p2Meta?.elo),
     betAmount,
     bet_amount: betAmount,
     gameIndex: 1,
@@ -2211,6 +2272,9 @@ function createRankedSeries(match) {
     status: 'active',
     winnerId: null,
     loserId: null,
+    eloFinalizedAt: null,
+    eloFinalizedBy: null,
+    seriesElo: null,
     createdAt: nowIso(),
     completedAt: null
   };
@@ -2235,14 +2299,15 @@ function activeRankedSeriesForUser(userId) {
   return null;
 }
 
-function ensureRankedSeriesForMatch(match) {
+function ensureRankedSeriesForMatch(match, { createIfMissing = true } = {}) {
   if (!match || String(match.matchType || '').toUpperCase() !== 'RANKED') return null;
   let series = match.rankedSeriesId ? getRankedSeriesById(match.rankedSeriesId) : null;
-  if (!series || series.status !== 'active') {
-    series = createRankedSeries(match);
-  } else if (!match.rankedSeriesId) {
+  if (series && !match.rankedSeriesId) {
     match.rankedSeriesId = series.id;
   }
+  if (series) return series;
+  if (!createIfMissing) return null;
+  series = createRankedSeries(match);
   return series;
 }
 
@@ -2262,8 +2327,14 @@ function rankedSeriesSummaryForUser(series, userId) {
     result: userIsP1 ? game.resultP1 : game.resultP2,
     tiebreakerRound: Math.max(0, Math.floor(Number(game.tiebreakerRound) || 0)),
     runningChipDelta: userIsP1 ? Number(game.runningP1ChipDelta || 0) : Number(game.runningP2ChipDelta || 0),
-    eloDelta: userIsP1 ? Number(game.eloDeltaP1 || 0) : Number(game.eloDeltaP2 || 0)
+    eloDelta: userIsP1
+      ? (Number.isFinite(Number(game.eloDeltaP1)) ? Number(game.eloDeltaP1) : null)
+      : (Number.isFinite(Number(game.eloDeltaP2)) ? Number(game.eloDeltaP2) : null)
   }));
+  const seriesElo = series.seriesElo && typeof series.seriesElo === 'object' ? series.seriesElo : null;
+  const eloDelta = seriesElo
+    ? (userIsP1 ? Number(seriesElo.deltaP1 || 0) : Number(seriesElo.deltaP2 || 0))
+    : null;
   return {
     seriesId: series.id,
     status: series.status,
@@ -2281,6 +2352,8 @@ function rankedSeriesSummaryForUser(series, userId) {
     winnerId: series.winnerId || null,
     loserId: series.loserId || null,
     complete: series.status === 'complete',
+    eloDelta: Number.isFinite(Number(eloDelta)) ? Math.floor(Number(eloDelta)) : null,
+    eloFinalizedAt: series.eloFinalizedAt || null,
     createdAt: series.createdAt,
     completedAt: series.completedAt || null
   };
@@ -2295,6 +2368,16 @@ function recordRankedSeriesGame(match, {
 } = {}) {
   const series = ensureRankedSeriesForMatch(match);
   if (!series) return null;
+  if (series.status === 'complete') {
+    return {
+      series,
+      gameEntry: null,
+      complete: true,
+      winnerId: series.winnerId || null,
+      tiebreakerRound: Math.max(0, Math.floor(Number(series.tiebreakerCount) || 0)),
+      inTiebreaker: false
+    };
+  }
   const [p1, p2] = [series.p1, series.p2];
   const deltaP1 = Math.floor(Number(netByPlayer?.[p1]) || 0);
   const deltaP2 = Math.floor(Number(netByPlayer?.[p2]) || 0);
@@ -2368,165 +2451,133 @@ function finalizeRankedSeriesByForfeit(match, winnerId, loserId) {
   return series;
 }
 
-function applyRankedEloResult(match, {
+function finalizeRankedSeriesElo(series, {
   winnerId = null,
   loserId = null,
-  outcomes = [],
-  tiebreakerRound = 0,
-  netByPlayer = {}
+  reason = 'series_complete'
 } = {}) {
-  if (!match || String(match.matchType || '').toUpperCase() !== 'RANKED') return;
-  const [p1Id, p2Id] = match.playerIds || [];
+  if (!series || !winnerId || !loserId) return null;
+  if (series.eloFinalizedAt && series.seriesElo) {
+    return series.seriesElo;
+  }
+  const p1Id = series.p1;
+  const p2Id = series.p2;
   const user1 = getUserById(p1Id);
   const user2 = getUserById(p2Id);
   if (!user1 || !user2) return null;
   ensureRankedState(user1);
   ensureRankedState(user2);
 
-  const eloBefore1 = normalizeRankedElo(user1.rankedElo);
-  const eloBefore2 = normalizeRankedElo(user2.rankedElo);
-  const handStatesByPlayer = {
-    [p1Id]: match.round?.players?.[p1Id]?.hands || [],
-    [p2Id]: match.round?.players?.[p2Id]?.hands || []
-  };
-  const variance = rankedVarianceScore(outcomes, handStatesByPlayer, p1Id, p2Id);
-  const varianceMultiplier = lerp(1.0, 0.6, variance.score);
-  const marginMultiplier = rankedMarginMultiplierForGame(match, winnerId, loserId, netByPlayer);
-
-  const pushGame = !winnerId || !loserId;
-  const score1 = pushGame ? 0.5 : (winnerId === p1Id ? 1 : 0);
-  const score2 = pushGame ? 0.5 : (winnerId === p2Id ? 1 : 0);
-  const deltaCalc1 = rankedEloDeltaForGame({
-    playerElo: eloBefore1,
-    opponentElo: eloBefore2,
-    actualScore: score1,
-    varianceMultiplier,
-    marginMultiplier: pushGame ? 1 : marginMultiplier
+  const startElo1 = normalizeRankedElo(series.p1EloStart ?? user1.rankedElo);
+  const startElo2 = normalizeRankedElo(series.p2EloStart ?? user2.rankedElo);
+  const calc1 = rankedSeriesDeltaForOutcome({
+    playerElo: startElo1,
+    opponentElo: startElo2,
+    won: winnerId === p1Id,
+    rankTierKey: series.p1RankAtStart || rankedTierFromElo(startElo1).key
   });
-  const deltaCalc2 = rankedEloDeltaForGame({
-    playerElo: eloBefore2,
-    opponentElo: eloBefore1,
-    actualScore: score2,
-    varianceMultiplier,
-    marginMultiplier: pushGame ? 1 : marginMultiplier
+  const calc2 = rankedSeriesDeltaForOutcome({
+    playerElo: startElo2,
+    opponentElo: startElo1,
+    won: winnerId === p2Id,
+    rankTierKey: series.p2RankAtStart || rankedTierFromElo(startElo2).key
   });
-  const delta1 = deltaCalc1.finalDelta;
-  const delta2 = deltaCalc2.finalDelta;
+  const delta1 = calc1.finalDelta;
+  const delta2 = calc2.finalDelta;
 
-  user1.rankedElo = Math.max(0, eloBefore1 + delta1);
-  user2.rankedElo = Math.max(0, eloBefore2 + delta2);
+  user1.rankedElo = Math.max(0, startElo1 + delta1);
+  user2.rankedElo = Math.max(0, startElo2 + delta2);
   user1.rankedGames = Math.max(0, Math.floor(Number(user1.rankedGames) || 0) + 1);
   user2.rankedGames = Math.max(0, Math.floor(Number(user2.rankedGames) || 0) + 1);
-
-  if (!pushGame) {
-    const winner = winnerId === p1Id ? user1 : user2;
-    const loser = loserId === p1Id ? user1 : user2;
-    winner.rankedWins = Math.max(0, Math.floor(Number(winner.rankedWins) || 0) + 1);
-    loser.rankedLosses = Math.max(0, Math.floor(Number(loser.rankedLosses) || 0) + 1);
-    winner.rankedLossStreak = 0;
-    loser.rankedLossStreak = Math.max(0, Math.floor(Number(loser.rankedLossStreak) || 0) + 1);
-  }
-
+  const winner = winnerId === p1Id ? user1 : user2;
+  const loser = loserId === p1Id ? user1 : user2;
+  winner.rankedWins = Math.max(0, Math.floor(Number(winner.rankedWins) || 0) + 1);
+  loser.rankedLosses = Math.max(0, Math.floor(Number(loser.rankedLosses) || 0) + 1);
+  winner.rankedLossStreak = 0;
+  loser.rankedLossStreak = Math.max(0, Math.floor(Number(loser.rankedLossStreak) || 0) + 1);
   ensureRankedState(user1);
   ensureRankedState(user2);
 
-  const eloCalc = {
-    [p1Id]: {
-      preElo: eloBefore1,
-      oppElo: eloBefore2,
-      expected: Number(deltaCalc1.expectedScore.toFixed(4)),
-      actual: score1,
-      baseK: deltaCalc1.baseK,
-      effectiveK: Number(deltaCalc1.effectiveK.toFixed(4)),
-      rawDelta: Number(deltaCalc1.rawDelta.toFixed(4)),
+  const now = nowIso();
+  const seriesElo = {
+    seriesId: series.id,
+    winnerId,
+    loserId,
+    reason,
+    finalizedAt: now,
+    p1Id,
+    p2Id,
+    deltaP1: delta1,
+    deltaP2: delta2,
+    p1: {
+      startElo: startElo1,
+      oppElo: startElo2,
+      expected: Number(calc1.expected.toFixed(4)),
+      actual: calc1.actual,
+      k: calc1.k,
+      rawDelta: Number(calc1.rawDelta.toFixed(4)),
+      clampedDelta: Number(calc1.clampedDelta.toFixed(4)),
+      lossSoftener: Number(calc1.lossSoftener.toFixed(4)),
       finalDelta: delta1,
-      postElo: user1.rankedElo,
-      clamped: deltaCalc1.clamped
+      endElo: user1.rankedElo
     },
-    [p2Id]: {
-      preElo: eloBefore2,
-      oppElo: eloBefore1,
-      expected: Number(deltaCalc2.expectedScore.toFixed(4)),
-      actual: score2,
-      baseK: deltaCalc2.baseK,
-      effectiveK: Number(deltaCalc2.effectiveK.toFixed(4)),
-      rawDelta: Number(deltaCalc2.rawDelta.toFixed(4)),
+    p2: {
+      startElo: startElo2,
+      oppElo: startElo1,
+      expected: Number(calc2.expected.toFixed(4)),
+      actual: calc2.actual,
+      k: calc2.k,
+      rawDelta: Number(calc2.rawDelta.toFixed(4)),
+      clampedDelta: Number(calc2.clampedDelta.toFixed(4)),
+      lossSoftener: Number(calc2.lossSoftener.toFixed(4)),
       finalDelta: delta2,
-      postElo: user2.rankedElo,
-      clamped: deltaCalc2.clamped
+      endElo: user2.rankedElo
     }
   };
 
+  series.seriesElo = seriesElo;
+  series.eloFinalizedAt = now;
+  series.eloFinalizedBy = reason;
+  if (Array.isArray(series.games) && series.games.length > 0) {
+    const finalGame = series.games[series.games.length - 1];
+    finalGame.eloDeltaP1 = delta1;
+    finalGame.eloDeltaP2 = delta2;
+  }
+
   if (process.env.NODE_ENV !== 'test') {
-    // Ranked Elo update audit logging for sanity checks and abuse/debug visibility.
     // eslint-disable-next-line no-console
-    console.log('[ranked-elo]', JSON.stringify({
-      matchId: match.id,
-      roundNumber: Math.max(1, Math.floor(Number(match.roundNumber) || 1)),
-      tiebreakerRound: Math.max(0, Math.floor(Number(tiebreakerRound) || 0)),
-      varianceScore: Number(variance.score.toFixed(4)),
-      varianceMultiplier: Number(varianceMultiplier.toFixed(4)),
-      marginMultiplier: Number((pushGame ? 1 : marginMultiplier).toFixed(4)),
-      players: eloCalc
+    console.log('[ranked-series-elo]', JSON.stringify({
+      seriesId: series.id,
+      winnerId,
+      loserId,
+      reason,
+      p1: seriesElo.p1,
+      p2: seriesElo.p2
     }));
   }
 
   db.data.rankedHistory.push({
     id: nanoid(10),
-    matchId: match.id,
-    mode: 'ranked',
-    timestamp: nowIso(),
-    baseBet: Math.max(0, Math.floor(Number(match.round?.baseBet) || 0)),
-    p1: p1Id,
-    p2: p2Id,
-    result: pushGame ? 'push' : `${winnerId}:win`,
+    mode: 'ranked_series',
+    timestamp: now,
+    seriesId: series.id,
+    matchId: series.matchId || null,
     winnerId,
     loserId,
-    p1EloBefore: eloBefore1,
+    reason,
+    p1EloBefore: startElo1,
     p1EloAfter: user1.rankedElo,
-    p2EloBefore: eloBefore2,
+    p2EloBefore: startElo2,
     p2EloAfter: user2.rankedElo,
     p1EloDelta: delta1,
     p2EloDelta: delta2,
-    varianceScore: Number(variance.score.toFixed(4)),
-    varianceMultiplier: Number(varianceMultiplier.toFixed(4)),
-    marginMultiplier: Number((pushGame ? 1 : marginMultiplier).toFixed(4)),
-    luckContext: {
-      naturals: variance.naturals,
-      bustEvents: variance.bustEvents,
-      pushCount: variance.pushCount,
-      closeMargins: variance.closeMargins,
-      splitOutcomes: variance.splitOutcomes,
-      handCount: variance.handCount
-    },
-    eloCalc,
-    tiebreakerRound: Math.max(0, Math.floor(Number(tiebreakerRound) || 0))
+    eloCalc: {
+      [p1Id]: seriesElo.p1,
+      [p2Id]: seriesElo.p2
+    }
   });
   db.data.rankedHistory = db.data.rankedHistory.slice(-3000);
-
-  return {
-    p1Id,
-    p2Id,
-    winnerId,
-    loserId,
-    push: pushGame,
-    deltaByPlayer: {
-      [p1Id]: delta1,
-      [p2Id]: delta2
-    },
-    beforeByPlayer: {
-      [p1Id]: eloBefore1,
-      [p2Id]: eloBefore2
-    },
-    afterByPlayer: {
-      [p1Id]: user1.rankedElo,
-      [p2Id]: user2.rankedElo
-    },
-    varianceScore: variance.score,
-    varianceMultiplier,
-    marginMultiplier: pushGame ? 1 : marginMultiplier,
-    luckContext: variance
-  };
+  return seriesElo;
 }
 
 function creditUserBankroll(user, rewardChips) {
@@ -2682,7 +2733,7 @@ function buildClientState(match, viewerId) {
   const negotiation = negotiationEnabled ? ensureBetNegotiation(match) : null;
   const fixedTableBet = normalizeQuickPlayBucket(match.quickPlayBucket) || Math.max(0, Math.floor(Number(match.rankedBet) || 0));
   const rankedSeries = String(match.matchType || '').toUpperCase() === 'RANKED'
-    ? rankedSeriesSummaryForUser(ensureRankedSeriesForMatch(match), viewerId)
+    ? rankedSeriesSummaryForUser(ensureRankedSeriesForMatch(match, { createIfMissing: false }), viewerId)
     : null;
   const rankedSeriesHud = rankedSeries
     ? (() => {
@@ -3595,24 +3646,20 @@ function resolveRound(match) {
   }
 
   let rankedSeriesUpdate = null;
-  let rankedEloResult = null;
   if (rankedRound) {
-    const activeSeries = ensureRankedSeriesForMatch(match);
-    const nextGameIndex = (activeSeries?.games?.length || 0) + 1;
-    const tiebreakerRound = nextGameIndex > RANKED_SERIES_TARGET_GAMES ? (nextGameIndex - RANKED_SERIES_TARGET_GAMES) : 0;
-    rankedEloResult = applyRankedEloResult(match, {
-      winnerId,
-      loserId,
-      outcomes,
-      tiebreakerRound,
-      netByPlayer: chipsDelta
-    });
+    ensureRankedSeriesForMatch(match, { createIfMissing: true });
     rankedSeriesUpdate = recordRankedSeriesGame(match, {
       winnerId,
       loserId,
-      netByPlayer: chipsDelta,
-      eloResult: rankedEloResult
+      netByPlayer: chipsDelta
     });
+    if (rankedSeriesUpdate?.complete && rankedSeriesUpdate?.winnerId) {
+      finalizeRankedSeriesElo(rankedSeriesUpdate.series, {
+        winnerId: rankedSeriesUpdate.winnerId,
+        loserId: rankedSeriesUpdate.series?.loserId || loserId,
+        reason: 'series_complete'
+      });
+    }
   }
 
   if (realMatch) {
@@ -3749,6 +3796,9 @@ function applyRoundResultChoice(match, playerId, choice) {
   if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
   if (match.phase !== PHASES.RESULT) return { error: 'Round result is not ready' };
   if (!['next', 'betting', 'double'].includes(choice)) return { error: 'Invalid round choice' };
+  if (choice === 'double' && String(match.matchType || '').toUpperCase() === 'RANKED') {
+    return { error: 'Double or Nothing is unavailable in ranked series' };
+  }
 
   if (!match.round.resultChoiceByPlayer) match.round.resultChoiceByPlayer = {};
   match.round.resultChoiceByPlayer[playerId] = choice;
@@ -3766,6 +3816,9 @@ function applyRoundResultChoice(match, playerId, choice) {
   const shouldAutoStart = everyoneNext || everyoneDouble;
 
   if (everyoneDouble) {
+    if (String(match.matchType || '').toUpperCase() === 'RANKED') {
+      return { error: 'Double or Nothing is unavailable in ranked series' };
+    }
     const currentBase = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
     const proposed = currentBase * 2;
     const betLimits = getMatchBetLimits(match);
@@ -3800,6 +3853,9 @@ function applyRoundResultChoice(match, playerId, choice) {
 function applyDoubleOrNothingChoice(match, playerId) {
   if (!match || !match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
   if (match.phase !== PHASES.RESULT) return { error: 'Round result is not ready' };
+  if (String(match.matchType || '').toUpperCase() === 'RANKED') {
+    return { error: 'Double or Nothing is unavailable in ranked series' };
+  }
   const currentBase = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
   const proposed = currentBase * 2;
   const betLimits = getMatchBetLimits(match);
@@ -4841,28 +4897,23 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
   }
 
   if (!botMatch && opponentId && rankedMatch && leaverUser && opponentUser) {
-    const activeSeries = ensureRankedSeriesForMatch(match);
-    const nextGameIndex = (activeSeries?.games?.length || 0) + 1;
-    const tiebreakerRound = nextGameIndex > RANKED_SERIES_TARGET_GAMES ? (nextGameIndex - RANKED_SERIES_TARGET_GAMES) : 0;
+    ensureRankedSeriesForMatch(match, { createIfMissing: true });
     const netByPlayer = {
       [leaverId]: -Math.max(0, Math.floor(Number(chargedAmount) || 0)),
       [opponentId]: Math.max(0, Math.floor(Number(chargedAmount) || 0))
     };
-    const eloResult = applyRankedEloResult(match, {
-      winnerId: opponentId,
-      loserId: leaverId,
-      outcomes: [],
-      tiebreakerRound,
-      netByPlayer
-    });
-    recordRankedSeriesGame(match, {
+    const seriesUpdate = recordRankedSeriesGame(match, {
       winnerId: opponentId,
       loserId: leaverId,
       netByPlayer,
-      eloResult,
       forfeit: true
     });
-    finalizeRankedSeriesByForfeit(match, opponentId, leaverId);
+    const finalizedSeries = finalizeRankedSeriesByForfeit(match, opponentId, leaverId) || seriesUpdate?.series;
+    finalizeRankedSeriesElo(finalizedSeries, {
+      winnerId: opponentId,
+      loserId: leaverId,
+      reason: source === 'disconnect_timeout' ? 'disconnect_forfeit' : 'forfeit'
+    });
     emitUserUpdate(leaverUser.id);
     emitUserUpdate(opponentUser.id);
     wrote = true;
@@ -5790,6 +5841,22 @@ app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/ranked/join', authMiddleware, async (req, res) => {
+  const wantsContinueSeries = Boolean(req.body?.continueSeries);
+  if (wantsContinueSeries) {
+    const activeSeries = activeRankedSeriesForUser(req.user.id);
+    if (!activeSeries) {
+      return res.status(409).json({
+        error: 'No active ranked series found to continue. Refreshing ranked state.',
+        overview: rankedOverviewForUser(req.user)
+      });
+    }
+    if (!isUserInActiveMatch(req.user.id)) {
+      return res.status(409).json({
+        error: 'Active series exists but no live ranked match is attached. Refreshing ranked state.',
+        overview: rankedOverviewForUser(req.user)
+      });
+    }
+  }
   if (isUserInActiveMatch(req.user.id)) {
     return res.status(409).json({ error: 'Already in an active match' });
   }
@@ -6331,6 +6398,8 @@ export {
   rankedBetRangeForElo,
   rankedKFactorForElo,
   rankedEloDeltaForGame,
+  rankedSeriesDeltaForOutcome,
+  finalizeRankedSeriesElo,
   cleanupExpiredNotificationsForUser,
   markNotificationsSeenForUser,
   notificationsForUser,
