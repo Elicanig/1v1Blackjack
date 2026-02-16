@@ -18,6 +18,8 @@ import {
   buildChallengePayload,
   countWinningSplitHandsForPlayer,
   calculateForfeitLossAmount,
+  rankedTierFromElo,
+  rankedBetRangeForElo,
   getBotObservation,
   chooseBotActionFromObservation
 } from '../server.js';
@@ -455,6 +457,29 @@ test('39 bot difficulty bet ranges are clamped server-side', () => {
   assert.equal(low.selected, 1);
 });
 
+test('39b ranked tiers map elo to expected ranges', () => {
+  assert.equal(rankedTierFromElo(1000).label, 'Bronze');
+  assert.equal(rankedTierFromElo(1250).label, 'Gold');
+  assert.equal(rankedTierFromElo(1700).label, 'Master');
+  assert.deepEqual(rankedBetRangeForElo(1850), { min: 1000, max: 5000 });
+});
+
+test('39c double is blocked when pressure would exceed table max for opponent', () => {
+  const p1Hand = newHand([card('9'), card('2')], [false, true], 250, 0);
+  const p2Hand = newHand([card('10'), card('7')], [false, true], 500, 0);
+  const m = makeMatch({ p1Hand, p2Hand, deck: [card('3')] });
+  const res = applyAction(m, 'p1', 'double');
+  assert.equal(res.error, 'Stake increase would exceed table max 500');
+});
+
+test('39d split is blocked when pressure would exceed table max for opponent', () => {
+  const p1Hand = newHand([card('8'), card('8', 'D')], [false, true], 260, 0);
+  const p2Hand = newHand([card('10'), card('7')], [false, true], 260, 0);
+  const m = makeMatch({ p1Hand, p2Hand, deck: [card('4'), card('3')] });
+  const res = applyAction(m, 'p1', 'split');
+  assert.equal(res.error, 'Stake increase would exceed table max 500');
+});
+
 test('40 bot bust resolves round immediately without waiting for player action', () => {
   const botId = 'bot:normal:t2';
   const m = {
@@ -535,6 +560,74 @@ test('41 bot split first-hand bust advances to second bot hand', () => {
   assert.equal(m.round.players[botId].activeHandIndex, 1);
   assert.equal(m.round.players[botId].hands[0].bust, true);
   assert.equal(m.round.players[botId].hands[1].bust, false);
+});
+
+function makeSplitResolutionMatch({ firstHand, secondHand, opponentHand }) {
+  const m = makeMatch({ p1Hand: firstHand, p2Hand: opponentHand, deck: [] });
+  m.round.turnPlayerId = 'p1';
+  m.round.players.p1.hands = [firstHand, secondHand];
+  m.round.players.p1.activeHandIndex = 1;
+  m.round.players.p2.hands = [opponentHand];
+  m.round.players.p2.activeHandIndex = 0;
+  m.round.firstActionTaken = true;
+  return m;
+}
+
+test('41b split payout sums both winning split hands', () => {
+  const hand1 = newHand([card('10'), card('Q')], [false, false], 5, 1);
+  hand1.wasSplitHand = true;
+  hand1.stood = true;
+  hand1.locked = true;
+  const hand2 = newHand([card('10'), card('9')], [false, false], 5, 1);
+  hand2.wasSplitHand = true;
+  const opp = newHand([card('10'), card('8')], [false, false], 5, 0);
+  opp.stood = true;
+  opp.locked = true;
+  const m = makeSplitResolutionMatch({ firstHand: hand1, secondHand: hand2, opponentHand: opp });
+
+  const res = applyAction(m, 'p1', 'stand');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, 10);
+  assert.equal(m.round.resultByPlayer.p2.deltaChips, -10);
+});
+
+test('41c split payout nets correctly when winning one and losing one hand', () => {
+  const hand1 = newHand([card('10'), card('Q')], [false, false], 5, 1);
+  hand1.wasSplitHand = true;
+  hand1.stood = true;
+  hand1.locked = true;
+  const hand2 = newHand([card('10'), card('6')], [false, false], 5, 1);
+  hand2.wasSplitHand = true;
+  const opp = newHand([card('10'), card('8')], [false, false], 5, 0);
+  opp.stood = true;
+  opp.locked = true;
+  const m = makeSplitResolutionMatch({ firstHand: hand1, secondHand: hand2, opponentHand: opp });
+
+  const res = applyAction(m, 'p1', 'stand');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, 0);
+  assert.equal(m.round.resultByPlayer.p2.deltaChips, 0);
+});
+
+test('41d split payout handles push scenarios per hand', () => {
+  const hand1 = newHand([card('10'), card('Q')], [false, false], 5, 1);
+  hand1.wasSplitHand = true;
+  hand1.stood = true;
+  hand1.locked = true;
+  const hand2 = newHand([card('10'), card('8')], [false, false], 5, 1);
+  hand2.wasSplitHand = true;
+  const opp = newHand([card('10'), card('8')], [false, false], 5, 0);
+  opp.stood = true;
+  opp.locked = true;
+  const m = makeSplitResolutionMatch({ firstHand: hand1, secondHand: hand2, opponentHand: opp });
+
+  const res = applyAction(m, 'p1', 'stand');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, 5);
+  assert.equal(m.round.resultByPlayer.p2.deltaChips, -5);
 });
 
 test('42 practice matches do not advance challenge progress, real matches do', () => {

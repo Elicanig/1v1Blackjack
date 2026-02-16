@@ -1,5 +1,18 @@
 import { formatHandTotalLine } from './match-view-model.js';
 import { renderSuitIconSvg } from './suit-icons.js';
+import {
+  OFFLINE_BASE_BET,
+  OFFLINE_STARTING_BANKROLL,
+  OFFLINE_STORAGE_KEYS,
+  applyOfflineRoundStats,
+  createOfflineMatch,
+  loadOfflineProfile,
+  offlineApplyAction,
+  offlineConfirmBet,
+  offlineRoundChoice,
+  offlineSetBaseBet,
+  saveOfflineProfile
+} from './offline-bot.js';
 const app = document.getElementById('app');
 let spotlightInitialized = false;
 let hoverGlowInitialized = false;
@@ -21,6 +34,12 @@ const BOT_BET_RANGES = {
 const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000, 5000];
 const HIGH_ROLLER_MIN_BET = 2500;
 const LEADERBOARD_LIMIT = 25;
+const TITLE_DEFS = Object.freeze([
+  { key: '', label: 'None', unlockHint: 'No title equipped' },
+  { key: 'HIGH_ROLLER', label: 'High Roller', unlockHint: 'Play 10 real matches with bets >= 2,500.' },
+  { key: 'GIANT_KILLER', label: 'Giant Killer', unlockHint: 'Beat a player with higher level or bankroll.' },
+  { key: 'STREAK_LORD', label: 'Streak Lord', unlockHint: 'Reach a 10-match win streak.' }
+]);
 
 function initialViewFromPath() {
   const pathname = window.location.pathname.toLowerCase();
@@ -137,7 +156,7 @@ function initTwinkleLayer() {
   layer.className = 'twinkle-layer';
   const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (!reduced) {
-    const count = 28;
+    const count = 44;
     for (let i = 0; i < count; i += 1) {
       const star = document.createElement('span');
       star.className = 'twinkle-dot';
@@ -145,7 +164,7 @@ function initTwinkleLayer() {
       star.style.setProperty('--ty', `${Math.random() * 100}%`);
       star.style.setProperty('--delay', `${(Math.random() * 4).toFixed(2)}s`);
       star.style.setProperty('--dur', `${(3.2 + Math.random() * 3.1).toFixed(2)}s`);
-      star.style.setProperty('--size', `${(1 + Math.random() * 2.2).toFixed(2)}px`);
+      star.style.setProperty('--size', `${(1.2 + Math.random() * 2.8).toFixed(2)}px`);
       layer.appendChild(star);
     }
   }
@@ -179,6 +198,7 @@ const state = {
   outgoingFriendChallenges: [],
   notifications: [],
   notificationsOpen: false,
+  presenceByUser: {},
   notificationFriendRequestStatus: {},
   toasts: [],
   challenges: { hourly: [], daily: [], weekly: [], skill: [] },
@@ -248,6 +268,22 @@ const state = {
     matchId: null,
     pendingMatch: null
   },
+  rankedQueue: {
+    status: 'idle',
+    searching: false,
+    queuedAt: null,
+    bet: 100,
+    pendingMatch: null,
+    opponentName: '',
+    connected: false
+  },
+  network: {
+    offlineMode: !navigator.onLine,
+    lastCheckedAt: 0,
+    checking: false
+  },
+  offlineProfile: loadOfflineProfile(),
+  challengePopup: null,
   leaderboard: {
     rows: [],
     currentUserRank: null,
@@ -260,6 +296,161 @@ const state = {
 };
 
 let freeClaimTicker = null;
+let offlineHeartbeatTimer = null;
+
+function offlineModeEnabled() {
+  return Boolean(state.network.offlineMode);
+}
+
+function isOfflineMatchActive() {
+  return Boolean(state.currentMatch?.matchType === 'OFFLINE_BOT');
+}
+
+function persistOfflineProfile() {
+  saveOfflineProfile(state.offlineProfile);
+}
+
+function updateOfflineProfileFromMatch() {
+  if (!isOfflineMatchActive() || !state.me?.id) return;
+  const meState = state.currentMatch.players?.[state.me.id];
+  if (!meState) return;
+  state.offlineProfile.bankroll = Math.max(0, Math.floor(Number(meState.bankroll) || 0));
+  persistOfflineProfile();
+}
+
+function ensureOfflineIdentity() {
+  if (state.me) return;
+  const fallbackName = state.offlineProfile?.name || 'Offline Player';
+  state.me = {
+    id: 'offline:guest',
+    username: fallbackName,
+    avatarStyle: 'adventurer',
+    avatarSeed: fallbackName,
+    avatar: '',
+    bio: 'Offline bot player',
+    chips: Math.max(0, Math.floor(Number(state.offlineProfile?.bankroll) || OFFLINE_STARTING_BANKROLL)),
+    bankroll: Math.max(0, Math.floor(Number(state.offlineProfile?.bankroll) || OFFLINE_STARTING_BANKROLL)),
+    stats: {},
+    betHistory: [],
+    selectedBet: OFFLINE_BASE_BET,
+    xp: 0,
+    level: 1,
+    levelProgress: 0,
+    xpToNextLevel: 100,
+    rankTier: 'Bronze',
+    rankTierKey: 'BRONZE',
+    rankedElo: 1000,
+    rankedWins: 0,
+    rankedLosses: 0,
+    unlockedTitles: [],
+    selectedTitle: '',
+    selectedTitleKey: '',
+    customStatText: '',
+    pvpWins: 0,
+    pvpLosses: 0,
+    dailyWinStreakCount: 0
+  };
+}
+
+async function checkServerReachable() {
+  if (!navigator.onLine) return false;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1800);
+  try {
+    const res = await fetch('/health', { method: 'GET', signal: controller.signal, cache: 'no-store' });
+    clearTimeout(timeout);
+    return res.ok;
+  } catch {
+    clearTimeout(timeout);
+    return false;
+  }
+}
+
+async function refreshOfflineMode({ silent = false } = {}) {
+  if (state.network.checking) return;
+  state.network.checking = true;
+  const reachable = await checkServerReachable();
+  const nextOffline = !reachable;
+  const changed = nextOffline !== state.network.offlineMode;
+  state.network.offlineMode = nextOffline;
+  state.network.lastCheckedAt = Date.now();
+  state.network.checking = false;
+  if (changed && !silent) {
+    if (nextOffline) pushToast('Offline Mode: bot matches only.');
+    else {
+      pushToast('Connection restored.');
+      if (state.token && !state.socket) {
+        loadMe().then(() => {
+          if (state.token && !offlineModeEnabled()) connectSocket();
+        }).catch(() => {});
+      }
+    }
+    render();
+  }
+}
+
+function startOfflineBotMatch() {
+  ensureOfflineIdentity();
+  state.offlineProfile.name = state.me.username || state.offlineProfile.name || 'Offline Player';
+  const bankroll = Math.max(0, Math.floor(Number(state.offlineProfile?.bankroll) || OFFLINE_STARTING_BANKROLL));
+  const startingBet = Math.max(5, Math.min(bankroll || 5, Math.floor(Number(state.currentBet) || OFFLINE_BASE_BET)));
+  const match = createOfflineMatch({
+    playerId: state.me.id,
+    playerName: state.me.username,
+    bankroll,
+    difficulty: state.selectedBotDifficulty || 'normal',
+    baseBet: startingBet
+  });
+  state.currentMatch = match;
+  state.currentBet = startingBet;
+  state.roundResultBanner = null;
+  state.roundResultChoicePending = false;
+  persistOfflineProfile();
+  goToView('match');
+  setStatus('Offline bot match started.');
+  render();
+}
+
+function applyOfflineBetSelection(amount) {
+  if (!isOfflineMatchActive()) return { error: 'Offline match not active' };
+  const result = offlineSetBaseBet(state.currentMatch, amount);
+  if (!result.error) {
+    state.currentBet = result.selected;
+    updateOfflineProfileFromMatch();
+  }
+  return result;
+}
+
+function applyOfflineMatchAction(action) {
+  if (!isOfflineMatchActive()) return { error: 'Offline match not active' };
+  const result = offlineApplyAction(state.currentMatch, action);
+  if (result?.roundResult) {
+    state.roundResultBanner = result.roundResult;
+    state.offlineProfile.stats = applyOfflineRoundStats(state.offlineProfile.stats, result.roundResult);
+  }
+  updateOfflineProfileFromMatch();
+  return result;
+}
+
+function confirmOfflineBet() {
+  if (!isOfflineMatchActive()) return { error: 'Offline match not active' };
+  const result = offlineConfirmBet(state.currentMatch);
+  if (result.error) return result;
+  updateOfflineProfileFromMatch();
+  return result;
+}
+
+function chooseOfflineRoundResult(choice) {
+  if (!isOfflineMatchActive()) return { error: 'Offline match not active' };
+  const result = offlineRoundChoice(state.currentMatch, choice);
+  if (result.error) return result;
+  if (result?.roundResult) {
+    state.offlineProfile.stats = applyOfflineRoundStats(state.offlineProfile.stats, result.roundResult);
+  }
+  state.roundResultBanner = null;
+  updateOfflineProfileFromMatch();
+  return result;
+}
 
 function cancelBankrollTween() {
   if (state.bankrollTweenRaf) {
@@ -339,6 +530,47 @@ function formatQuickPlayBucket(bucket) {
   return (normalized || 250).toLocaleString();
 }
 
+function rankTierLabelFromUser(user = {}) {
+  if (user.rankTier) return String(user.rankTier);
+  const elo = Math.floor(Number(user.rankedElo) || 0);
+  if (elo >= 1850) return 'Grandmaster';
+  if (elo >= 1700) return 'Master';
+  if (elo >= 1550) return 'Diamond';
+  if (elo >= 1400) return 'Platinum';
+  if (elo >= 1250) return 'Gold';
+  if (elo >= 1100) return 'Silver';
+  return 'Bronze';
+}
+
+function rankTierKeyFromUser(user = {}) {
+  const key = String(user.rankTierKey || '').trim().toUpperCase();
+  if (key) return key;
+  return rankTierLabelFromUser(user).replace(/\s+/g, '_').toUpperCase();
+}
+
+function formatLastSeen(lastSeenAt) {
+  if (!lastSeenAt) return 'Offline';
+  const ts = new Date(lastSeenAt).getTime();
+  if (!Number.isFinite(ts)) return 'Offline';
+  const diffMs = Math.max(0, Date.now() - ts);
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'Offline • just now';
+  if (mins < 60) return `Offline • ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `Offline • ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `Offline • ${days}d ago`;
+}
+
+function resolveFriendPresence(friend) {
+  const live = state.presenceByUser?.[friend.id] || null;
+  const online = live ? Boolean(live.online) : Boolean(friend.online);
+  const inMatch = friend.presence === 'in_match';
+  const presenceKey = inMatch ? 'in_match' : online ? 'online' : 'offline';
+  const label = inMatch ? 'In match' : online ? 'Online' : formatLastSeen(live?.lastSeenAt || friend.lastSeenAt);
+  return { presenceKey, label };
+}
+
 function formatNotificationTime(createdAt) {
   const ts = createdAt ? new Date(createdAt).getTime() : NaN;
   if (!Number.isFinite(ts)) return '';
@@ -387,13 +619,21 @@ function renderBadgePill(badge, extraClass = '') {
   return `<span class="rank-badge ${extraClass}">${text}</span>`;
 }
 
+function renderRankTierBadge(userLike = {}, extraClass = '') {
+  const label = rankTierLabelFromUser(userLike);
+  const key = rankTierKeyFromUser(userLike);
+  if (!label) return '';
+  return `<span class="rank-tier-badge ${extraClass}" data-rank-tier="${key}">${label}</span>`;
+}
+
 function renderPlayerMeta(participant = {}) {
   const title = participant.selectedTitle || '';
   const badge = renderBadgePill(participant.dynamicBadge, 'nameplate-badge');
+  const rankBadge = renderRankTierBadge(participant, 'nameplate-rank');
   const level = Number.isFinite(Number(participant.level)) ? Math.max(1, Math.floor(Number(participant.level))) : null;
   const levelText = level ? `<span class="nameplate-level">Lv ${level}</span>` : '';
   const titleText = title ? `<span class="nameplate-title">${title}</span>` : '';
-  return `${levelText}${badge}${titleText}`;
+  return `${rankBadge}${levelText}${badge}${titleText}`;
 }
 
 function clearQuickPlayConnectTimer() {
@@ -468,6 +708,41 @@ function beginQuickPlayConnectedState(payload = {}) {
   if (quickPlayConnectTimer) return;
   quickPlayConnectTimer = setTimeout(() => {
     finalizeQuickPlayConnectedState();
+  }, 850);
+}
+
+function rankedQueueIsActive() {
+  return Boolean(state.rankedQueue.searching || state.rankedQueue.connected);
+}
+
+function resetRankedQueueState() {
+  state.rankedQueue = {
+    status: 'idle',
+    searching: false,
+    queuedAt: null,
+    bet: Math.max(50, Math.floor(Number(state.me?.rankedBetMin) || 100)),
+    pendingMatch: null,
+    opponentName: '',
+    connected: false
+  };
+}
+
+function beginRankedConnectedState(payload = {}) {
+  state.rankedQueue.connected = true;
+  state.rankedQueue.searching = false;
+  state.rankedQueue.status = 'connected';
+  state.rankedQueue.pendingMatch = payload.match || null;
+  state.rankedQueue.opponentName = payload.opponentName || 'Opponent';
+  if (Number.isFinite(Number(payload.fixedBet))) {
+    state.rankedQueue.bet = Math.max(1, Math.floor(Number(payload.fixedBet)));
+  }
+  setTimeout(() => {
+    const match = state.rankedQueue.pendingMatch;
+    resetRankedQueueState();
+    if (!match) return;
+    state.currentMatch = match;
+    goToView('match');
+    render();
   }, 850);
 }
 
@@ -975,7 +1250,7 @@ async function safeCopy(text) {
 }
 
 function connectSocket() {
-  if (!state.token) return;
+  if (!state.token || offlineModeEnabled()) return;
   if (state.socket) state.socket.disconnect();
 
   state.socket = io({ auth: { token: state.token } });
@@ -1008,13 +1283,41 @@ function connectSocket() {
           render();
         });
     }
+    if (state.rankedQueue.searching) {
+      api('/api/ranked/status', { method: 'GET' })
+        .then((data) => {
+          if (data?.status === 'found') {
+            beginRankedConnectedState(data);
+          } else if (data?.status === 'searching') {
+            state.rankedQueue.status = 'searching';
+            state.rankedQueue.searching = true;
+            if (data?.queuedAt) state.rankedQueue.queuedAt = data.queuedAt;
+            if (Number.isFinite(Number(data?.requestedBet))) state.rankedQueue.bet = Math.floor(Number(data.requestedBet));
+          } else {
+            resetRankedQueueState();
+          }
+          render();
+        })
+        .catch(() => {
+          resetRankedQueueState();
+          render();
+        });
+    }
   });
 
-  state.socket.on('connect_error', (e) => setError(e?.message || 'Connection error'));
+  state.socket.on('connect_error', (e) => {
+    state.network.offlineMode = true;
+    setError(e?.message || 'Connection error');
+  });
   state.socket.on('disconnect', () => {
     if (state.quickPlay.status === 'searching') {
       resetQuickPlayState();
       pushToast('Quick Play cancelled: connection lost.');
+      render();
+    }
+    if (state.rankedQueue.searching) {
+      resetRankedQueueState();
+      pushToast('Ranked queue cancelled: connection lost.');
       render();
     }
   });
@@ -1045,6 +1348,28 @@ function connectSocket() {
     if (!quickPlayIsActive()) return;
     resetQuickPlayState();
     if (error) setError(error);
+  });
+  state.socket.on('ranked:found', (payload = {}) => {
+    beginRankedConnectedState(payload);
+    render();
+  });
+  state.socket.on('presence:snapshot', ({ friends }) => {
+    state.presenceByUser = friends || {};
+    render();
+  });
+  state.socket.on('presence:update', (payload = {}) => {
+    if (!payload?.userId) return;
+    state.presenceByUser[payload.userId] = {
+      online: Boolean(payload.online),
+      lastSeenAt: payload.lastSeenAt || null
+    };
+    render();
+  });
+  state.socket.on('friend:challenge', (payload = {}) => {
+    if (!payload?.challengeId) return;
+    state.challengePopup = payload;
+    pushToast(`Challenge from ${payload.fromUsername || 'Friend'}.`);
+    render();
   });
   state.socket.on('notify:list', ({ notifications }) => {
     state.notifications = notifications || [];
@@ -1173,6 +1498,7 @@ function connectSocket() {
   state.socket.on('match:ended', ({ reason }) => {
     setStatus(reason);
     resetQuickPlayState();
+    resetRankedQueueState();
     state.matchChatDraft = '';
     state.currentMatch = null;
     state.currentLobby = null;
@@ -1193,6 +1519,9 @@ async function loadMe() {
     if (!auth?.ok) throw new Error('Invalid auth');
     const data = await api('/api/me');
     state.me = data.user;
+    if (!rankedQueueIsActive()) {
+      state.rankedQueue.bet = Math.max(1, Math.floor(Number(data.user?.rankedBetMin) || state.rankedQueue.bet || 100));
+    }
     state.bankrollDisplay = data.user?.chips ?? 0;
     state.authUsername = data.user.username;
     localStorage.setItem('bb_auth_token', state.token);
@@ -1221,6 +1550,14 @@ async function loadMe() {
     if (state.me) {
       state.me.streakCount = data.streakCount ?? state.me.streakCount ?? 0;
       state.me.nextStreakReward = data.nextStreakReward ?? state.me.nextStreakReward ?? 50;
+    }
+    if (data.rankedQueue?.status === 'searching') {
+      state.rankedQueue.searching = true;
+      state.rankedQueue.status = 'searching';
+      state.rankedQueue.queuedAt = data.rankedQueue.queuedAt || null;
+      if (Number.isFinite(Number(data.rankedQueue.requestedBet))) {
+        state.rankedQueue.bet = Math.floor(Number(data.rankedQueue.requestedBet));
+      }
     }
     updateFreeClaimCountdown();
     if (typeof data.user?.selectedBet === 'number') {
@@ -1251,7 +1588,18 @@ async function loadMe() {
     await loadLeaderboard({ silent: true });
     render();
   } catch (e) {
+    const msg = String(e?.message || '');
+    const offlineLike = !navigator.onLine || /failed to fetch|network|timeout|aborted/i.test(msg);
+    if (offlineLike) {
+      state.network.offlineMode = true;
+      if (!state.me) {
+        state.authNotice = 'Offline mode available. Play bot matches locally.';
+      }
+      render();
+      return;
+    }
     resetQuickPlayState();
+    resetRankedQueueState();
     localStorage.removeItem('bb_auth_token');
     localStorage.removeItem('bb_auth_username');
     localStorage.removeItem('bb_token');
@@ -1332,6 +1680,16 @@ async function forfeitBotMatch({ showToast = false, refreshOnError = true } = {}
 
 function leaveCurrentMatch(options = {}) {
   if (!state.currentMatch) return;
+  if (isOfflineMatchActive()) {
+    updateOfflineProfileFromMatch();
+    state.currentMatch = null;
+    state.currentLobby = null;
+    state.leaveMatchModal = false;
+    goToView('home');
+    if (options.showToast) pushToast('Left offline bot match.');
+    render();
+    return;
+  }
   if (isBotMatchActive()) {
     forfeitBotMatch(options);
     return;
@@ -1347,6 +1705,15 @@ function navigateWithMatchSafety(view) {
     return;
   }
   if (!isBotMatchActive()) {
+    goToView(view);
+    if (view === 'friends') loadFriendsData();
+    render();
+    return;
+  }
+  if (isOfflineMatchActive()) {
+    state.currentMatch = null;
+    state.currentLobby = null;
+    state.leaveMatchModal = false;
     goToView(view);
     if (view === 'friends') loadFriendsData();
     render();
@@ -1449,6 +1816,12 @@ function playerName(id) {
 }
 
 function emitAction(action) {
+  if (isOfflineMatchActive()) {
+    const result = applyOfflineMatchAction(action);
+    if (result?.error) setError(result.error);
+    render();
+    return;
+  }
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:action', { matchId: state.currentMatch.id, action });
 }
@@ -1459,11 +1832,23 @@ function emitPressureDecision(decision) {
 }
 
 function emitSetBaseBet(amount) {
+  if (isOfflineMatchActive()) {
+    const result = applyOfflineBetSelection(amount);
+    if (result?.error) setError(result.error);
+    render();
+    return;
+  }
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:setBaseBet', { matchId: state.currentMatch.id, amount });
 }
 
 function emitConfirmBet() {
+  if (isOfflineMatchActive()) {
+    const result = confirmOfflineBet();
+    if (result?.error) setError(result.error);
+    render();
+    return;
+  }
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:confirmBet', { matchId: state.currentMatch.id });
 }
@@ -1479,21 +1864,43 @@ function emitResetBetNegotiation() {
 }
 
 function emitNextRoundChoice() {
+  if (isOfflineMatchActive()) {
+    const result = chooseOfflineRoundResult('next');
+    if (result?.error) setError(result.error);
+    render();
+    return;
+  }
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:nextRound', { matchId: state.currentMatch.id });
 }
 
 function emitChangeBetChoice() {
+  if (isOfflineMatchActive()) {
+    const result = chooseOfflineRoundResult('betting');
+    if (result?.error) setError(result.error);
+    render();
+    return;
+  }
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:changeBet', { matchId: state.currentMatch.id });
 }
 
 function emitDoubleOrNothing() {
+  if (isOfflineMatchActive()) {
+    const result = chooseOfflineRoundResult('double');
+    if (result?.error) setError(result.error);
+    render();
+    return;
+  }
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:doubleOrNothing', { matchId: state.currentMatch.id });
 }
 
 function emitLeaveMatch() {
+  if (isOfflineMatchActive()) {
+    leaveCurrentMatch({ showToast: true });
+    return;
+  }
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:leave', { matchId: state.currentMatch.id });
 }
@@ -1814,6 +2221,15 @@ function applyFriendsPayload(data = {}) {
 }
 
 async function loadFriendsData() {
+  if (!state.token) {
+    state.friends = [];
+    state.incomingRequests = [];
+    state.outgoingRequests = [];
+    state.incomingFriendChallenges = [];
+    state.outgoingFriendChallenges = [];
+    render();
+    return;
+  }
   try {
     const data = await api('/api/friends/list');
     applyFriendsPayload(data);
@@ -1913,6 +2329,7 @@ async function clearNotifications() {
 }
 
 async function refreshNotifications() {
+  if (!state.token) return;
   try {
     const data = await api('/api/notifications');
     state.notifications = data.notifications || [];
@@ -2079,8 +2496,13 @@ function runNotificationAction(notification) {
 
 async function joinQuickPlayQueue({ bucket = null, silent = false } = {}) {
   if (!state.token || !state.me) return;
+  if (offlineModeEnabled()) return setError('Quick Play requires an online connection.');
   if (state.currentMatch) {
     setError('Leave your current match before joining Quick Play.');
+    return;
+  }
+  if (rankedQueueIsActive()) {
+    setError('Cancel ranked matchmaking first.');
     return;
   }
   if (quickPlayIsActive()) return;
@@ -2144,7 +2566,66 @@ async function cancelQuickPlayQueue({ silent = false } = {}) {
   }
 }
 
+async function joinRankedQueue() {
+  if (!state.token || !state.me) return;
+  if (offlineModeEnabled()) {
+    return setError('Ranked requires an online connection.');
+  }
+  if (state.currentMatch) {
+    return setError('Leave your current match before joining ranked.');
+  }
+  if (quickPlayIsActive()) {
+    return setError('Cancel Quick Play first.');
+  }
+  if (rankedQueueIsActive()) return;
+  const min = Math.max(1, Math.floor(Number(state.me.rankedBetMin) || 50));
+  const max = Math.max(min, Math.floor(Number(state.me.rankedBetMax) || 5000));
+  const selected = Math.max(min, Math.min(max, Math.floor(Number(state.rankedQueue.bet) || min)));
+  state.rankedQueue.searching = true;
+  state.rankedQueue.connected = false;
+  state.rankedQueue.status = 'searching';
+  state.rankedQueue.bet = selected;
+  state.rankedQueue.queuedAt = new Date().toISOString();
+  render();
+  try {
+    const data = await api('/api/ranked/join', {
+      method: 'POST',
+      body: JSON.stringify({ bet: selected })
+    });
+    if (data?.status === 'found') {
+      beginRankedConnectedState(data);
+      render();
+      return;
+    }
+    state.rankedQueue.searching = true;
+    state.rankedQueue.status = 'searching';
+    state.rankedQueue.queuedAt = data?.queuedAt || state.rankedQueue.queuedAt;
+    state.rankedQueue.bet = Number.isFinite(Number(data?.bet)) ? Math.floor(Number(data.bet)) : selected;
+    setStatus('Searching for ranked opponent...');
+    render();
+  } catch (e) {
+    resetRankedQueueState();
+    setError(e.message);
+  }
+}
+
+async function cancelRankedQueue({ silent = false } = {}) {
+  if (!rankedQueueIsActive()) return;
+  try {
+    await api('/api/ranked/cancel', { method: 'POST' });
+  } catch {
+    // best effort
+  }
+  resetRankedQueueState();
+  if (!silent) setStatus('Stopped ranked matchmaking.');
+  else render();
+}
+
 async function startBotMatch(options = {}) {
+  if (offlineModeEnabled()) {
+    startOfflineBotMatch();
+    return;
+  }
   const highRoller = Boolean(options.highRoller);
   const stakeType = options.stakeType || (highRoller ? 'REAL' : state.botStakeType);
   try {
@@ -2225,9 +2706,11 @@ async function claimChallenge(id) {
 
 function logout() {
   resetQuickPlayState();
+  resetRankedQueueState();
   state.matchChatDraft = '';
   state.inviteModeModalFriend = null;
   state.challengeModalFriend = null;
+  state.challengePopup = null;
   if (state.socket) state.socket.disconnect();
   state.socket = null;
   state.token = null;
@@ -2239,6 +2722,7 @@ function logout() {
   state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
   state.challengeResetRefreshInFlight = false;
   state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
+  state.presenceByUser = {};
   state.statsMoreOpen = false;
   state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
   state.pressureGlow = { key: '', expiresAt: 0, seen: true };
@@ -2251,6 +2735,7 @@ function logout() {
 }
 
 function renderNotificationBell() {
+  if (!state.token) return '';
   const unread = unreadCount();
   return `
     <div class="notif-wrap">
@@ -2370,6 +2855,52 @@ function syncNotificationOverlay() {
   });
 }
 
+function syncChallengePromptOverlay() {
+  let mount = document.getElementById('challengePromptMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'challengePromptMount';
+    document.body.appendChild(mount);
+  }
+  if (!state.challengePopup) {
+    mount.innerHTML = '';
+    return;
+  }
+  const prompt = state.challengePopup;
+  mount.innerHTML = `
+    <div class="notif-overlay-backdrop"></div>
+    <div class="notif-overlay-panel card challenge-popup-panel">
+      <div class="notif-head">
+        <strong>Incoming Challenge</strong>
+      </div>
+      <div><strong>${prompt.fromUsername || 'Friend'}</strong> challenged you for ${Number(prompt.bet || 0).toLocaleString()} chips.</div>
+      ${prompt.message ? `<div class="muted">"${prompt.message}"</div>` : ''}
+      <div class="row" style="margin-top:10px">
+        <button id="challengePromptAcceptBtn" class="primary">Accept</button>
+        <button id="challengePromptDeclineBtn" class="warn">Decline</button>
+      </div>
+    </div>
+  `;
+  const acceptBtn = document.getElementById('challengePromptAcceptBtn');
+  if (acceptBtn) {
+    acceptBtn.onclick = () => {
+      const challengeId = state.challengePopup?.challengeId;
+      state.challengePopup = null;
+      if (challengeId) respondFriendChallenge(challengeId, 'accept');
+      render();
+    };
+  }
+  const declineBtn = document.getElementById('challengePromptDeclineBtn');
+  if (declineBtn) {
+    declineBtn.onclick = () => {
+      const challengeId = state.challengePopup?.challengeId;
+      state.challengePopup = null;
+      if (challengeId) respondFriendChallenge(challengeId, 'decline');
+      render();
+    };
+  }
+}
+
 function syncRoundResultModal() {
   let mount = document.getElementById('roundResultMount');
   if (!mount) {
@@ -2384,18 +2915,27 @@ function syncRoundResultModal() {
     mount.innerHTML = '';
     return;
   }
+  const meId = state.me?.id;
   const delta = result.deltaChips || 0;
   const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
-  const bankroll = Number.isFinite(state.bankrollDisplay) ? Math.round(state.bankrollDisplay) : state.me?.chips || 0;
+  const bankroll = isOfflineMatchActive()
+    ? Math.max(0, Math.floor(Number(match?.players?.[meId]?.bankroll) || 0))
+    : (Number.isFinite(state.bankrollDisplay) ? Math.round(state.bankrollDisplay) : state.me?.chips || 0);
   const headline = result.outcome === 'win' ? 'WIN' : result.outcome === 'lose' ? 'LOSE' : 'PUSH';
   const subtitle = result.title || (result.outcome === 'win' ? 'You Win' : result.outcome === 'lose' ? 'You Lose' : 'Push');
-  const meId = state.me?.id;
   const alreadySelected = Boolean(meId && match?.resultChoiceByPlayer?.[meId]);
   const busy = state.roundResultChoicePending || alreadySelected;
   const opponentId = match?.playerIds?.find((id) => id !== meId);
   const botRound = Boolean(opponentId && match?.participants?.[opponentId]?.isBot);
+  const pvpRound = Boolean(opponentId && !botRound);
   const doubledBet = Math.max(1, Math.floor(Number(match?.baseBet) || 0) * 2);
-  const canDoubleOrNothing = botRound && (result.isPractice || bankroll >= doubledBet);
+  const opponentBankroll = Math.max(0, Math.floor(Number(match?.players?.[opponentId]?.bankroll) || 0));
+  const maxBetCap = Math.max(1, Math.floor(Number(match?.maxBetCap) || doubledBet));
+  const minBet = Math.max(1, Math.floor(Number(match?.minBet) || 1));
+  const canDoubleOrNothing = (botRound || pvpRound) &&
+    doubledBet >= minBet &&
+    doubledBet <= maxBetCap &&
+    (result.isPractice || (bankroll >= doubledBet && opponentBankroll >= doubledBet));
   mount.innerHTML = `
     <div class="round-result-wrap">
       <div class="round-result-popup result-modal card">
@@ -2408,16 +2948,12 @@ function syncRoundResultModal() {
             <button id="roundResultNextBtn" class="primary" ${busy ? 'disabled' : ''}>Next Round</button>
             <button id="roundResultChangeBetBtn" class="ghost" ${busy ? 'disabled' : ''}>Change Bet</button>
           </div>
-          ${
-            botRound
-              ? `<div class="result-actions-mid">
-                   <button id="roundResultDoubleBtn" class="gold result-double-btn" ${busy || !canDoubleOrNothing ? 'disabled' : ''}>
-                     Double or Nothing (${doubledBet.toLocaleString()})
-                   </button>
-                 </div>
-                 <div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">Leave to Lobby</button></div>`
-              : ''
-          }
+          <div class="result-actions-mid">
+            <button id="roundResultDoubleBtn" class="gold result-double-btn" ${busy || !canDoubleOrNothing ? 'disabled' : ''}>
+              Double or Nothing (${doubledBet.toLocaleString()})${pvpRound ? ' • both must accept' : ''}
+            </button>
+          </div>
+          <div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">${botRound ? 'Leave to Lobby' : 'Leave to Home'}</button></div>
         </div>
         ${busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : ''}
       </div>
@@ -2442,7 +2978,7 @@ function syncRoundResultModal() {
   const leaveBtn = document.getElementById('roundResultLeaveBtn');
   if (leaveBtn) {
     leaveBtn.onclick = () => {
-      state.pendingNavAfterLeave = 'home';
+      state.pendingNavAfterLeave = isOfflineMatchActive() ? 'home' : (botRound ? 'lobbies' : 'home');
       leaveCurrentMatch({ showToast: true, refreshOnError: true });
     };
   }
@@ -2457,7 +2993,10 @@ function syncRoundResultModal() {
 }
 
 function renderTopbar(title = 'Blackjack Battle') {
-  const bankroll = Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : state.me?.chips;
+  const onlineBankroll = Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : state.me?.chips;
+  const offlineBankroll = Math.max(0, Math.floor(Number(state.offlineProfile?.bankroll) || OFFLINE_STARTING_BANKROLL));
+  const usingOfflineEconomy = offlineModeEnabled() || isOfflineMatchActive();
+  const bankroll = usingOfflineEconomy ? offlineBankroll : onlineBankroll;
   const chipText = Number.isFinite(bankroll) ? Number(bankroll).toLocaleString() : '0';
   const claimableCount = claimableChallengesCount();
   const challengeBadge = claimableCount > 0
@@ -2467,7 +3006,7 @@ function renderTopbar(title = 'Blackjack Battle') {
     <div class="card topbar">
       <div class="topbar-left">
         <div class="logo" id="topLogo" tabindex="0"><span>${title}</span></div>
-        <div class="chip-balance"><span class="chip-icon">◎</span>${chipText}</div>
+        <div class="chip-balance"><span class="chip-icon">◎</span>${chipText}${usingOfflineEconomy ? ' <span class="muted">(Offline Bankroll)</span>' : ''}</div>
       </div>
       <div class="topbar-center tabs">
         <button data-go="home" class="nav-pill ${state.view === 'home' ? 'nav-active' : ''}">Home</button>
@@ -2481,9 +3020,10 @@ function renderTopbar(title = 'Blackjack Battle') {
       </div>
       <div class="topbar-right nav">
         ${renderNotificationBell()}
-        <button class="warn" id="logoutBtn">Logout</button>
+        ${state.token ? '<button class="warn" id="logoutBtn">Logout</button>' : ''}
       </div>
     </div>
+    ${offlineModeEnabled() ? '<div class="offline-banner">Offline Mode: bot matches only.</div>' : ''}
   `;
 }
 
@@ -2508,6 +3048,7 @@ function renderAuth() {
     <div class="card auth">
       <h1>Blackjack Battle</h1>
       <p class="muted">1v1 real-time blackjack with poker-style pressure betting.</p>
+      ${offlineModeEnabled() ? '<p class="offline-auth-note">Offline Mode detected. You can still play bot matches locally.</p>' : ''}
       <div class="grid">
         <form id="loginForm" class="section card">
           <h3>Login</h3>
@@ -2536,6 +3077,7 @@ function renderAuth() {
       }
       ${state.authNotice ? `<p class="muted">${state.authNotice}</p>` : ''}
       ${state.error ? `<p class="muted" style="color:#bc3f3f">${state.error}</p>` : ''}
+      ${offlineModeEnabled() ? '<button id="offlinePlayBtn" class="gold" type="button">Play Bot (Offline)</button>' : ''}
     </div>
   `;
 
@@ -2554,6 +3096,15 @@ function renderAuth() {
       pushToast(ok ? 'PIN copied.' : "Couldn't copy — please select and copy manually.");
     };
   }
+  const offlinePlayBtn = document.getElementById('offlinePlayBtn');
+  if (offlinePlayBtn) {
+    offlinePlayBtn.onclick = () => {
+      ensureOfflineIdentity();
+      state.bankrollDisplay = state.offlineProfile.bankroll;
+      goToView('home');
+      render();
+    };
+  }
 }
 
 function renderHome() {
@@ -2570,6 +3121,11 @@ function renderHome() {
   const dailyWinStreak = Math.max(0, Math.floor(Number(me.dailyWinStreakCount) || 0));
   const pvpWins = Math.max(0, Math.floor(Number(me.pvpWins) || 0));
   const pvpLosses = Math.max(0, Math.floor(Number(me.pvpLosses) || 0));
+  const rankedTier = rankTierLabelFromUser(me);
+  const rankedElo = Math.max(0, Math.floor(Number(me.rankedElo) || 0));
+  const rankedWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
+  const rankedLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
+  const rankedSearching = rankedQueueIsActive();
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -2583,7 +3139,7 @@ function renderHome() {
             <button
               class="pvp-cta pvp-cta-primary"
               id="quickPlayBtn"
-              ${quickPlaySearching || quickPlayConnected ? 'disabled' : ''}
+              ${quickPlaySearching || quickPlayConnected || rankedSearching || offlineModeEnabled() ? 'disabled' : ''}
               ${!quickPlaySearching && !quickPlayConnected ? 'autofocus' : ''}
             >
               <span class="pvp-cta-label">${quickPlayLabel}</span>
@@ -2593,6 +3149,19 @@ function renderHome() {
               <span class="pvp-cta-label">Lobbies</span>
               <span class="pvp-cta-sub">Create or join private matches</span>
             </button>
+          </div>
+          <div class="ranked-card card">
+            <div class="ranked-head">
+              <strong>Ranked</strong>
+              ${renderRankTierBadge(me)}
+            </div>
+            <div class="muted">Elo ${rankedElo} • W-L ${rankedWins}-${rankedLosses}</div>
+            <div class="muted">Tier bet range: ${Math.max(1, Math.floor(Number(me.rankedBetMin) || 50)).toLocaleString()}-${Math.max(1, Math.floor(Number(me.rankedBetMax) || 5000)).toLocaleString()}</div>
+            <div class="ranked-actions">
+              <input id="rankedBetInput" type="number" min="${Math.max(1, Math.floor(Number(me.rankedBetMin) || 50))}" max="${Math.max(1, Math.floor(Number(me.rankedBetMax) || 5000))}" value="${Math.max(1, Math.floor(Number(state.rankedQueue.bet) || Math.floor(Number(me.rankedBetMin) || 50)))}" ${rankedSearching || offlineModeEnabled() ? 'disabled' : ''} />
+              <button id="rankedQueueBtn" class="gold" ${offlineModeEnabled() ? 'disabled' : ''}>${rankedSearching ? 'Searching...' : 'Find Ranked Match'}</button>
+              ${rankedSearching ? '<button id="rankedCancelBtn" class="ghost">Cancel</button>' : ''}
+            </div>
           </div>
           <div class="high-roller-entry card">
             <div>
@@ -2631,7 +3200,9 @@ function renderHome() {
                 <button type="button" data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
               </div>
               <div class="muted practice-note">Practice uses fake chips and won&apos;t affect your account.</div>
+              <div class="muted practice-note">Offline bankroll: ${Math.max(0, Math.floor(Number(state.offlineProfile?.bankroll) || OFFLINE_STARTING_BANKROLL)).toLocaleString()} • W-L-P ${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.wins) || 0))}-${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.losses) || 0))}-${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.pushes) || 0))}</div>
               <button class="ghost bot-play-btn" id="playBotBtn">Play Bot</button>
+              <button class="gold bot-play-btn" id="playOfflineBotBtn">Play Bot (Offline)</button>
             </div>
           </section>
           <section class="leaderboard-card" aria-label="Global leaderboard">
@@ -2646,6 +3217,7 @@ function renderHome() {
                     <div class="leaderboard-row ${row.userId === me.id ? 'is-me' : ''}">
                       <span class="leaderboard-rank">#${row.rank}</span>
                       <span class="leaderboard-name">${row.username}</span>
+                      ${renderRankTierBadge(row)}
                       ${renderBadgePill(row.dynamicBadge)}
                       <span class="leaderboard-level">Lv ${Math.max(1, Number(row.level) || 1)}</span>
                       <span class="leaderboard-chips">${Number(row.chips || 0).toLocaleString()}</span>
@@ -2832,6 +3404,14 @@ function renderHome() {
   }
   const quickPlayBtn = document.getElementById('quickPlayBtn');
   quickPlayBtn.onclick = () => {
+    if (offlineModeEnabled()) {
+      pushToast('Quick Play unavailable offline.');
+      return;
+    }
+    if (rankedQueueIsActive()) {
+      pushToast('Cancel ranked queue first.');
+      return;
+    }
     if (quickPlayIsActive()) return;
     state.quickPlay.bucketPickerOpen = true;
     render();
@@ -2875,6 +3455,25 @@ function renderHome() {
   }
   const playBotBtn = document.getElementById('playBotBtn');
   if (playBotBtn) playBotBtn.onclick = () => startBotMatch();
+  const playOfflineBotBtn = document.getElementById('playOfflineBotBtn');
+  if (playOfflineBotBtn) {
+    playOfflineBotBtn.onclick = () => {
+      startOfflineBotMatch();
+    };
+  }
+  const rankedBetInput = document.getElementById('rankedBetInput');
+  if (rankedBetInput) {
+    rankedBetInput.oninput = () => {
+      const min = Math.max(1, Math.floor(Number(me.rankedBetMin) || 50));
+      const max = Math.max(min, Math.floor(Number(me.rankedBetMax) || 5000));
+      const value = Math.floor(Number(rankedBetInput.value) || min);
+      state.rankedQueue.bet = Math.max(min, Math.min(max, value));
+    };
+  }
+  const rankedQueueBtn = document.getElementById('rankedQueueBtn');
+  if (rankedQueueBtn) rankedQueueBtn.onclick = () => joinRankedQueue();
+  const rankedCancelBtn = document.getElementById('rankedCancelBtn');
+  if (rankedCancelBtn) rankedCancelBtn.onclick = () => cancelRankedQueue();
   const openStatsMoreBtn = document.getElementById('openStatsMoreBtn');
   if (openStatsMoreBtn) {
     openStatsMoreBtn.onclick = () => {
@@ -2918,90 +3517,122 @@ function renderProfile() {
   const preview = `https://api.dicebear.com/9.x/${encodeURIComponent(me.avatarStyle || 'adventurer')}/svg?seed=${encodeURIComponent(
     me.avatarSeed || me.username
   )}`;
-  const unlockedTitles = Array.isArray(me.unlockedTitles) ? me.unlockedTitles : [];
-  const titleLabel = (key) =>
-    key === 'HIGH_ROLLER'
-      ? 'High Roller'
-      : key === 'GIANT_KILLER'
-        ? 'Giant Killer'
-        : key === 'STREAK_LORD'
-          ? 'Streak Lord'
-          : key;
+  const unlockedSet = new Set(Array.isArray(me.unlockedTitles) ? me.unlockedTitles : []);
   const level = Math.max(1, Math.floor(Number(me.level) || 1));
   const levelProgress = Math.max(0, Math.min(1, Number(me.levelProgress) || 0));
   const levelPercent = Math.round(levelProgress * 100);
+  const rankTier = rankTierLabelFromUser(me);
+  const rankElo = Math.max(0, Math.floor(Number(me.rankedElo) || 0));
+  const rankWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
+  const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
   app.innerHTML = `
     ${renderTopbar('Profile')}
     <main class="view-stack">
       <div class="card section">
-      <div class="profile-progress">
-        <div class="profile-progress-head">
-          <strong>Level ${level}</strong>
-          <span class="muted">${Math.max(0, Math.floor(Number(me.xpToNextLevel) || 0)).toLocaleString()} XP to next level</span>
+        <div class="row profile-name-row" style="align-items:center;gap:8px;margin-bottom:8px">
+          <strong>${me.username}</strong>
+          ${renderRankTierBadge(me)}
+          ${renderBadgePill(me.dynamicBadge)}
+          ${me.selectedTitle ? `<span class="nameplate-title">${me.selectedTitle}</span>` : ''}
         </div>
-        <div class="xp-track"><span class="xp-fill" style="width:${levelPercent}%"></span></div>
-      </div>
-      <div class="row" style="align-items:center;gap:8px;margin-bottom:8px">
-        <strong>${me.username}</strong>
-        ${renderBadgePill(me.dynamicBadge)}
-        ${me.selectedTitle ? `<span class="nameplate-title">${me.selectedTitle}</span>` : ''}
-      </div>
-      <form id="profileForm" class="grid">
-        <div class="row">
-          <div class="col">
-            <label>Username</label>
-            <input value="${me.username}" disabled />
-          </div>
-          <div class="col">
-            <label>Avatar Style</label>
-            <select name="avatar_style">
-              ${['adventurer', 'pixel-art', 'bottts', 'fun-emoji']
-                .map((s) => `<option value="${s}" ${me.avatarStyle === s ? 'selected' : ''}>${s}</option>`)
-                .join('')}
-            </select>
-          </div>
-        </div>
-        <div class="row">
-          <div class="col">
-            <label>Avatar Seed</label>
-            <input name="avatar_seed" value="${me.avatarSeed || me.username}" />
-          </div>
-          <div class="col">
-            <label>Preview</label>
-            <div style="display:flex;align-items:center;gap:10px">
-              <img src="${preview}" alt="avatar preview" style="width:44px;height:44px;border-radius:999px;border:1px solid rgba(255,255,255,0.15)" />
-              <span class="muted">Generated automatically</span>
+        <form id="profileForm" class="grid">
+          <section class="profile-group">
+            <h3>Identity</h3>
+            <div class="row">
+              <div class="col">
+                <label>Username</label>
+                <input value="${me.username}" disabled />
+              </div>
+              <div class="col">
+                <label>Avatar Style</label>
+                <select name="avatar_style">
+                  ${['adventurer', 'pixel-art', 'bottts', 'fun-emoji']
+                    .map((s) => `<option value="${s}" ${me.avatarStyle === s ? 'selected' : ''}>${s}</option>`)
+                    .join('')}
+                </select>
+              </div>
             </div>
-          </div>
-        </div>
-        <div>
-          <label>Bio</label>
-          <textarea name="bio" rows="3">${me.bio || ''}</textarea>
-        </div>
-        <div class="row">
-          <div class="col">
-            <label>Custom Stat (public)</label>
-            <input name="custom_stat_text" maxlength="60" value="${me.customStatText || ''}" placeholder="Favorite Bet: 250" />
-          </div>
-          <div class="col">
-            <label>Displayed Title</label>
-            <select name="selected_title">
-              <option value="">None</option>
-              ${unlockedTitles
-                .map((key) => `<option value="${key}" ${me.selectedTitleKey === key ? 'selected' : ''}>${titleLabel(key)}</option>`)
-                .join('')}
-            </select>
-          </div>
-        </div>
-        <button class="primary" type="submit">Save Profile</button>
-      </form>
-      <p class="muted">Chip balance: ${me.chips} • Rank ${me.leaderboardRank ? `#${me.leaderboardRank}` : 'Unranked'} • PvP ${me.pvpWins || 0}-${me.pvpLosses || 0}</p>
-      <div class="row" style="align-items:center;gap:10px">
-        <strong>Login PIN:</strong>
-        <span>${state.revealPin ? me.pin || '****' : me.pinMasked || '****'}</span>
-        <button id="togglePinBtn" class="ghost" type="button">${state.revealPin ? 'Hide PIN' : 'Show PIN'}</button>
-        <button id="copyPinBtnProfile" class="ghost" type="button">Copy PIN</button>
-      </div>
+            <div class="row">
+              <div class="col">
+                <label>Avatar Seed</label>
+                <input name="avatar_seed" value="${me.avatarSeed || me.username}" />
+              </div>
+              <div class="col">
+                <label>Preview</label>
+                <div style="display:flex;align-items:center;gap:10px">
+                  <img src="${preview}" alt="avatar preview" style="width:44px;height:44px;border-radius:999px;border:1px solid rgba(255,255,255,0.15)" />
+                  <span class="muted">Generated automatically</span>
+                </div>
+              </div>
+            </div>
+            <div>
+              <label>Bio</label>
+              <textarea name="bio" rows="3">${me.bio || ''}</textarea>
+            </div>
+          </section>
+
+          <section class="profile-group">
+            <h3>Progress</h3>
+            <div class="profile-progress">
+              <div class="profile-progress-head">
+                <strong>Level ${level}</strong>
+                <span class="muted">${Math.max(0, Math.floor(Number(me.xpToNextLevel) || 0)).toLocaleString()} XP to next level</span>
+              </div>
+              <div class="xp-track"><span class="xp-fill" style="width:${levelPercent}%"></span></div>
+            </div>
+            <div class="row">
+              <div class="col">
+                <label>Rank</label>
+                <div class="muted">${rankTier} • Elo ${rankElo}</div>
+              </div>
+              <div class="col">
+                <label>Ranked W-L</label>
+                <div class="muted">${rankWins}-${rankLosses}</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="profile-group">
+            <h3>Social</h3>
+            <div class="row">
+              <div class="col">
+                <label>Custom Stat (public)</label>
+                <input name="custom_stat_text" maxlength="60" value="${me.customStatText || ''}" placeholder="Favorite Bet: 250" />
+              </div>
+            </div>
+            <div class="titles-equip">
+              <label>Displayed Title</label>
+              <select name="selected_title">
+                ${TITLE_DEFS.map((entry) => {
+                  if (!entry.key) return '<option value="">None</option>';
+                  const unlocked = unlockedSet.has(entry.key);
+                  return `<option value="${entry.key}" ${me.selectedTitleKey === entry.key ? 'selected' : ''} ${unlocked ? '' : 'disabled'}>${entry.label}${unlocked ? '' : ' (Locked)'}</option>`;
+                }).join('')}
+              </select>
+              <div class="titles-list">
+                ${TITLE_DEFS.filter((entry) => entry.key).map((entry) => {
+                  const unlocked = unlockedSet.has(entry.key);
+                  return `<div class="title-row ${unlocked ? 'unlocked' : 'locked'}" title="${unlocked ? 'Unlocked' : entry.unlockHint}">
+                    <span>${unlocked ? '✓' : '🔒'} ${entry.label}</span>
+                    <span class="muted">${unlocked ? 'Ready to equip' : entry.unlockHint}</span>
+                  </div>`;
+                }).join('')}
+              </div>
+            </div>
+          </section>
+
+          <section class="profile-group">
+            <h3>Security</h3>
+            <div class="row" style="align-items:center;gap:10px">
+              <strong>Login PIN:</strong>
+              <span>${state.revealPin ? me.pin || '****' : me.pinMasked || '****'}</span>
+              <button id="togglePinBtn" class="ghost" type="button">${state.revealPin ? 'Hide PIN' : 'Show PIN'}</button>
+              <button id="copyPinBtnProfile" class="ghost" type="button">Copy PIN</button>
+            </div>
+          </section>
+          <button class="primary" type="submit">Save Profile</button>
+        </form>
+        <p class="muted">Chip balance: ${me.chips} • Rank ${me.leaderboardRank ? `#${me.leaderboardRank}` : 'Unranked'} • PvP ${me.pvpWins || 0}-${me.pvpLosses || 0}</p>
       </div>
     </main>
   `;
@@ -3102,7 +3733,9 @@ function renderFriends() {
         ${(state.friends || []).length === 0 ? '<p class="muted">No friends yet.</p>' : ''}
         ${(state.friends || [])
           .map(
-            (f) => `
+            (f) => {
+              const presence = resolveFriendPresence(f);
+              return `
           <div class="friend">
             <div>
               <div style="display:flex;align-items:center;gap:8px">
@@ -3111,12 +3744,13 @@ function renderFriends() {
                     ? `<img src="${f.avatarUrl || f.avatar}" alt="${f.username} avatar" style="width:26px;height:26px;border-radius:999px;border:1px solid rgba(255,255,255,0.16)" />`
                     : `<span style="width:26px;height:26px;border-radius:999px;display:inline-grid;place-items:center;background:rgba(255,255,255,0.12)">${(f.username || '?').slice(0, 1).toUpperCase()}</span>`
                 }
-                <span class="status-dot status-${f.presence || (f.online ? 'online' : 'offline')}"></span>
+                <span class="status-dot status-${presence.presenceKey}"></span>
                 <strong>${f.username}</strong>
+                ${renderRankTierBadge(f)}
                 ${renderBadgePill(f.dynamicBadge)}
                 <span class="muted">Lv ${Math.max(1, Math.floor(Number(f.level) || 1))}</span>
               </div>
-              <div class="muted">${f.presence === 'in_match' ? 'In match' : f.online ? 'Online' : 'Offline'} • ${f.chips} chips</div>
+              <div class="muted">${presence.label} • ${f.chips} chips</div>
               <div class="muted">You: ${Math.max(0, Number(f.headToHead?.wins) || 0)}-${Math.max(0, Number(f.headToHead?.losses) || 0)} vs ${f.username}${f.selectedTitle ? ` • ${f.selectedTitle}` : ''}</div>
               ${f.customStatText ? `<div class="muted">Stat: ${f.customStatText}</div>` : ''}
             </div>
@@ -3124,7 +3758,8 @@ function renderFriends() {
               <button data-invite-open="${f.username}">Invite</button>
             </div>
           </div>
-        `
+        `;
+            }
           )
           .join('')}
         <h3 style="margin-top:1rem">Outgoing Pending</h3>
@@ -3608,6 +4243,9 @@ function renderMatch() {
   const negotiationYourProposal = Number.isFinite(Number(negotiation.yourProposal)) ? Number(negotiation.yourProposal) : null;
   const negotiationOpponentProposal = Number.isFinite(Number(negotiation.opponentProposal)) ? Number(negotiation.opponentProposal) : null;
   const negotiationAgreedAmount = Number.isFinite(Number(negotiation.agreedAmount)) ? Number(negotiation.agreedAmount) : null;
+  const negotiationTargetBet = Number.isFinite(Number(negotiation.targetBet))
+    ? Number(negotiation.targetBet)
+    : (negotiationAgreedAmount || Math.max(negotiationYourProposal || 0, negotiationOpponentProposal || 0) || null);
   const negotiationStatusText = negotiationEnabled
     ? negotiation.status === 'locked'
       ? `Agreed at ${Number(negotiationAgreedAmount || match.baseBet || 0).toLocaleString()}`
@@ -3639,7 +4277,9 @@ function renderMatch() {
     match.phase === 'RESULT' ||
     match.phase === 'NEXT_ROUND';
   const displayBankroll =
-    Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : (myState.bankroll ?? me.chips);
+    isOfflineMatchActive()
+      ? (myState.bankroll ?? 0)
+      : (Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : (myState.bankroll ?? me.chips));
   const canAct = myTurn && !waitingPressure && activeHand && !activeHand.locked;
   const canSurrender = Boolean(canAct && (activeHand?.actionCount || 0) === 0);
   const emoteCoolingDown = Date.now() < state.emoteCooldownUntil;
@@ -3703,8 +4343,8 @@ function renderMatch() {
                               <strong>${negotiationOpponentProposal ? negotiationOpponentProposal.toLocaleString() : '—'}</strong>
                             </div>
                             <div class="negotiation-cell">
-                              <span class="muted">Agreed amount</span>
-                              <strong>${negotiationAgreedAmount ? negotiationAgreedAmount.toLocaleString() : 'Not yet'}</strong>
+                              <span class="muted">Current target</span>
+                              <strong>${negotiationTargetBet ? negotiationTargetBet.toLocaleString() : 'Pending'}</strong>
                             </div>
                             <div class="negotiation-cell is-status">
                               <span class="muted">Status</span>
@@ -4229,6 +4869,46 @@ function syncQuickPlayOverlay() {
   }
 }
 
+function syncRankedOverlay() {
+  let mount = document.getElementById('rankedOverlayMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'rankedOverlayMount';
+    document.body.appendChild(mount);
+  }
+  if (!rankedQueueIsActive()) {
+    mount.innerHTML = '';
+    return;
+  }
+  const isConnected = state.rankedQueue.connected;
+  const tier = rankTierLabelFromUser(state.me || {});
+  const elo = Math.max(0, Math.floor(Number(state.me?.rankedElo) || 0));
+  mount.innerHTML = `
+    <div class="quickplay-overlay-backdrop"></div>
+    <div class="quickplay-overlay-panel card">
+      <div class="quickplay-status-pill ${isConnected ? 'is-connected' : 'is-searching'}">
+        ${isConnected ? 'Connected' : 'Searching'}
+      </div>
+      <h3>${isConnected ? 'Ranked opponent found' : 'Finding ranked match...'}</h3>
+      <p class="muted">${isConnected ? `Connected with ${state.rankedQueue.opponentName || 'opponent'}.` : 'Matching by Elo and tier bet range.'}</p>
+      <div class="muted quickplay-bucket-note">${tier} • Elo ${elo} • Bet ${Number(state.rankedQueue.bet || 0).toLocaleString()}</div>
+      ${
+        !isConnected
+          ? `<div class="quickplay-loader-row">
+              <span class="quickplay-spinner" aria-hidden="true"></span>
+              <span class="muted">Searching for a fair ranked opponent...</span>
+            </div>
+            <div class="quickplay-actions">
+              <button id="rankedOverlayCancelBtn" class="ghost">Cancel</button>
+            </div>`
+          : ''
+      }
+    </div>
+  `;
+  const cancelBtn = document.getElementById('rankedOverlayCancelBtn');
+  if (cancelBtn) cancelBtn.onclick = () => cancelRankedQueue();
+}
+
 function syncQuickPlayBucketModal() {
   let mount = document.getElementById('quickPlayBucketMount');
   if (!mount) {
@@ -4303,7 +4983,9 @@ function render() {
   const enteringFriends = state.lastRenderedView !== 'friends' && state.view === 'friends';
   state.lastRenderedView = state.view;
   app.dataset.view = state.view;
-  if (!state.token || !state.me) {
+  const hasOnlineSession = Boolean(state.token && state.me);
+  const hasOfflineSession = Boolean(!state.token && state.me && (offlineModeEnabled() || String(state.me.id || '').startsWith('offline:')));
+  if (!hasOnlineSession && !hasOfflineSession) {
     renderAuth();
   } else {
     if (state.view === 'profile') {
@@ -4328,15 +5010,24 @@ function render() {
   bindNotificationUI();
   syncToasts();
   syncNotificationOverlay();
+  syncChallengePromptOverlay();
   syncRoundResultModal();
   syncPressureOverlay();
   syncQuickPlayBucketModal();
   syncQuickPlayOverlay();
+  syncRankedOverlay();
   syncTurnCountdownUI();
   if (enteringFriends && state.token) loadFriendsData();
 }
 
 (async function init() {
+  window.addEventListener('online', () => {
+    refreshOfflineMode();
+  });
+  window.addEventListener('offline', () => {
+    state.network.offlineMode = true;
+    render();
+  });
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && state.quickPlay.bucketPickerOpen) {
       state.quickPlay.bucketPickerOpen = false;
@@ -4398,6 +5089,12 @@ function render() {
   initCursorSpotlight();
   useHoverGlow();
   initTwinkleLayer();
+  await refreshOfflineMode({ silent: true });
+  if (!offlineHeartbeatTimer) {
+    offlineHeartbeatTimer = setInterval(() => {
+      refreshOfflineMode({ silent: true });
+    }, 8000);
+  }
   if (!freeClaimTicker) {
     freeClaimTicker = setInterval(() => {
       if (!state.token || !state.me || !state.freeClaimNextAt) return;
