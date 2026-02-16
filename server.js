@@ -188,6 +188,8 @@ for (const user of db.data.users) {
         message: n.message || '',
         createdAt: n.createdAt || nowIso(),
         action: n.action || null,
+        requestId: typeof n.requestId === 'string' ? n.requestId : null,
+        fromUserId: typeof n.fromUserId === 'string' ? n.fromUserId : null,
         read: Boolean(n.read)
       }))
       .slice(0, 60);
@@ -201,6 +203,8 @@ for (const user of db.data.users) {
           entry.type !== prev.type ||
           entry.message !== prev.message ||
           entry.createdAt !== prev.createdAt ||
+          entry.requestId !== (typeof prev.requestId === 'string' ? prev.requestId : null) ||
+          entry.fromUserId !== (typeof prev.fromUserId === 'string' ? prev.fromUserId : null) ||
           entry.read !== Boolean(prev.read) ||
           entry.action !== (prev.action || null)
         );
@@ -718,6 +722,8 @@ function pushNotification(userId, notification) {
     message: notification.message || '',
     createdAt: notification.createdAt || nowIso(),
     action: notification.action || null,
+    requestId: typeof notification.requestId === 'string' ? notification.requestId : null,
+    fromUserId: typeof notification.fromUserId === 'string' ? notification.fromUserId : null,
     read: false
   };
   user.notifications.unshift(payload);
@@ -2795,26 +2801,46 @@ function cleanupMatch(match) {
   }
 }
 
+function calculateForfeitLossAmount(availableChips, exposureBet, baseBet = BASE_BET) {
+  const chips = Math.max(0, Math.floor(Number(availableChips) || 0));
+  const exposure = Math.max(0, Math.floor(Number(exposureBet) || 0));
+  const fallbackBet = Math.max(1, Math.floor(Number(baseBet) || BASE_BET));
+  const desired = Math.max(fallbackBet, exposure || fallbackBet);
+  return Math.min(chips, desired);
+}
+
 function leaveMatchByForfeit(match, leaverId) {
+  if (!match || !match.playerIds.includes(leaverId)) return;
   const opponentId = match.playerIds.find((id) => id !== leaverId);
+  const botMatch = match.playerIds.some((id) => isBotPlayer(id));
   const leaverUser = !isBotPlayer(leaverId) ? getUserById(leaverId) : null;
   const opponentUser = !isBotPlayer(opponentId) ? getUserById(opponentId) : null;
-  if (leaverUser && opponentUser && isRealMatch(match)) {
+  if (leaverUser && isRealMatch(match)) {
     const modeLabel = matchHistoryModeLabel(match);
-    const currentPot =
-      (match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0) +
-      (match.round?.players?.[opponentId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0);
-    const award = Math.max(match.round?.baseBet || BASE_BET, Math.min(leaverUser.chips, currentPot || BASE_BET));
+    const leaverExposure = (match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0);
+    const opponentExposure = opponentId
+      ? (match.round?.players?.[opponentId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0)
+      : 0;
+    const exposure = opponentUser ? leaverExposure + opponentExposure : leaverExposure;
+    const award = calculateForfeitLossAmount(leaverUser.chips, exposure, match.round?.baseBet || BASE_BET);
     leaverUser.chips = Math.max(0, leaverUser.chips - award);
-    opponentUser.chips += award;
-    appendBetHistory(leaverUser, { mode: modeLabel, bet: award, result: 'Forfeit', net: -award, notes: 'left match' });
-    appendBetHistory(opponentUser, { mode: modeLabel, bet: award, result: 'Win', net: award, notes: 'opponent left' });
+    appendBetHistory(leaverUser, {
+      mode: modeLabel,
+      bet: award,
+      result: 'Forfeit',
+      net: -award,
+      notes: botMatch ? 'left bot match' : 'left match'
+    });
+    if (opponentUser) {
+      opponentUser.chips += award;
+      appendBetHistory(opponentUser, { mode: modeLabel, bet: award, result: 'Win', net: award, notes: 'opponent left' });
+      emitUserUpdate(opponentUser.id);
+    }
     emitUserUpdate(leaverUser.id);
-    emitUserUpdate(opponentUser.id);
     db.write();
   }
 
-  emitToUser(leaverId, 'match:ended', { reason: 'You left the match.' });
+  emitToUser(leaverId, 'match:ended', { reason: botMatch ? 'You forfeited the match.' : 'You left the match.' });
   if (opponentId) emitToUser(opponentId, 'match:ended', { reason: 'Opponent left — you win by forfeit.' });
   cleanupMatch(match);
 }
@@ -2976,6 +3002,25 @@ app.get('/api/friends', authMiddleware, (req, res) => {
   return res.json(buildFriendsPayload(req.user));
 });
 
+function findFriendRequestForRecipient(recipientId, { requestId, username } = {}) {
+  if (requestId) {
+    const byId = db.data.friendRequests.find((r) => r.id === requestId && r.toUserId === recipientId);
+    if (byId) return byId;
+  }
+  if (!username) return null;
+  const target = getUserByUsername(username);
+  if (!target) return null;
+  return db.data.friendRequests.find((r) => r.fromUserId === target.id && r.toUserId === recipientId) || null;
+}
+
+function markFriendRequestNotificationResolved(user, requestId) {
+  if (!user || !requestId || !Array.isArray(user.notifications)) return;
+  user.notifications = user.notifications.map((notification) => {
+    if (!notification || notification.requestId !== requestId) return notification;
+    return { ...notification, read: true };
+  });
+}
+
 app.post('/api/friends/add', authMiddleware, async (req, res) => {
   // Backward-compatible alias to friend request flow.
   const { username } = req.body || {};
@@ -2990,8 +3035,9 @@ app.post('/api/friends/add', authMiddleware, async (req, res) => {
       r.status === 'pending'
   );
   if (existing) return res.status(409).json({ error: 'Friend request already pending' });
+  const requestId = nanoid(10);
   db.data.friendRequests.push({
-    id: nanoid(10),
+    id: requestId,
     fromUserId: req.user.id,
     toUserId: target.id,
     status: 'pending',
@@ -2999,7 +3045,9 @@ app.post('/api/friends/add', authMiddleware, async (req, res) => {
   });
   pushNotification(target.id, {
     type: 'friend_request',
-    message: `${req.user.username} sent you a friend request.`
+    message: `${req.user.username} sent you a friend request.`,
+    requestId,
+    fromUserId: req.user.id
   });
   await db.write();
   return res.json(buildFriendsPayload(req.user));
@@ -3022,8 +3070,9 @@ app.post('/api/friends/request', authMiddleware, async (req, res) => {
       r.status === 'pending'
   );
   if (existing) return res.status(409).json({ error: 'Friend request already pending' });
+  const requestId = nanoid(10);
   db.data.friendRequests.push({
-    id: nanoid(10),
+    id: requestId,
     fromUserId: req.user.id,
     toUserId: target.id,
     status: 'pending',
@@ -3031,23 +3080,30 @@ app.post('/api/friends/request', authMiddleware, async (req, res) => {
   });
   pushNotification(target.id, {
     type: 'friend_request',
-    message: `${req.user.username} sent you a friend request.`
+    message: `${req.user.username} sent you a friend request.`,
+    requestId,
+    fromUserId: req.user.id
   });
   await db.write();
   return res.json(buildFriendsPayload(req.user));
 });
 
-app.post('/api/friends/accept', authMiddleware, async (req, res) => {
-  const { requestId, username } = req.body || {};
-  const reqObj = db.data.friendRequests.find((r) => r.id === requestId && r.toUserId === req.user.id && r.status === 'pending');
-  const target = username ? getUserByUsername(username) : null;
-  const fallback = target
-    ? db.data.friendRequests.find(
-        (r) => r.fromUserId === target.id && r.toUserId === req.user.id && r.status === 'pending'
-      )
-    : null;
-  const friendReq = reqObj || fallback;
+async function handleFriendAccept(req, res, params = {}) {
+  const requestId = params.requestId || req.body?.requestId;
+  const username = params.username || req.body?.username;
+  const friendReq = findFriendRequestForRecipient(req.user.id, { requestId, username });
   if (!friendReq) return res.status(404).json({ error: 'Friend request not found' });
+  if (friendReq.status === 'accepted') {
+    markFriendRequestNotificationResolved(req.user, friendReq.id);
+    await db.write();
+    return res.json({ ...buildFriendsPayload(req.user), message: 'Friend request already accepted.' });
+  }
+  if (friendReq.status === 'declined') {
+    return res.status(409).json({ error: 'Friend request already declined.' });
+  }
+  if (friendReq.status !== 'pending') {
+    return res.status(409).json({ error: `Friend request already ${friendReq.status}.` });
+  }
   friendReq.status = 'accepted';
   const from = getUserById(friendReq.fromUserId);
   if (from) {
@@ -3058,22 +3114,56 @@ app.post('/api/friends/accept', authMiddleware, async (req, res) => {
       message: `${req.user.username} accepted your friend request.`
     });
   }
+  markFriendRequestNotificationResolved(req.user, friendReq.id);
   await db.write();
   return res.json(buildFriendsPayload(req.user));
+}
+
+app.post('/api/friends/accept', authMiddleware, async (req, res) => {
+  return handleFriendAccept(req, res);
+});
+
+app.post('/api/friends/requests/:requestId/accept', authMiddleware, async (req, res) => {
+  return handleFriendAccept(req, res, { requestId: req.params.requestId });
 });
 
 app.post('/api/friends/decline', authMiddleware, async (req, res) => {
   const { requestId, username } = req.body || {};
-  const reqObj = db.data.friendRequests.find((r) => r.id === requestId && r.toUserId === req.user.id && r.status === 'pending');
-  const target = username ? getUserByUsername(username) : null;
-  const fallback = target
-    ? db.data.friendRequests.find(
-        (r) => r.fromUserId === target.id && r.toUserId === req.user.id && r.status === 'pending'
-      )
-    : null;
-  const friendReq = reqObj || fallback;
+  const friendReq = findFriendRequestForRecipient(req.user.id, { requestId, username });
   if (!friendReq) return res.status(404).json({ error: 'Friend request not found' });
+  if (friendReq.status === 'declined') {
+    markFriendRequestNotificationResolved(req.user, friendReq.id);
+    await db.write();
+    return res.json({ ...buildFriendsPayload(req.user), message: 'Friend request already declined.' });
+  }
+  if (friendReq.status === 'accepted') {
+    return res.status(409).json({ error: 'Friend request already accepted.' });
+  }
+  if (friendReq.status !== 'pending') {
+    return res.status(409).json({ error: `Friend request already ${friendReq.status}.` });
+  }
   friendReq.status = 'declined';
+  markFriendRequestNotificationResolved(req.user, friendReq.id);
+  await db.write();
+  return res.json(buildFriendsPayload(req.user));
+});
+
+app.post('/api/friends/requests/:requestId/decline', authMiddleware, async (req, res) => {
+  const friendReq = findFriendRequestForRecipient(req.user.id, { requestId: req.params.requestId });
+  if (!friendReq) return res.status(404).json({ error: 'Friend request not found' });
+  if (friendReq.status === 'declined') {
+    markFriendRequestNotificationResolved(req.user, friendReq.id);
+    await db.write();
+    return res.json({ ...buildFriendsPayload(req.user), message: 'Friend request already declined.' });
+  }
+  if (friendReq.status === 'accepted') {
+    return res.status(409).json({ error: 'Friend request already accepted.' });
+  }
+  if (friendReq.status !== 'pending') {
+    return res.status(409).json({ error: `Friend request already ${friendReq.status}.` });
+  }
+  friendReq.status = 'declined';
+  markFriendRequestNotificationResolved(req.user, friendReq.id);
   await db.write();
   return res.json(buildFriendsPayload(req.user));
 });
@@ -3367,6 +3457,32 @@ async function createBotPracticeLobby(req, res) {
 
 app.post('/api/lobbies/bot', authMiddleware, createBotPracticeLobby);
 app.post('/api/matches/bot', authMiddleware, createBotPracticeLobby);
+
+async function handleBotForfeit(req, res) {
+  const { matchId } = req.params;
+  const match = matches.get(matchId);
+  if (!match) {
+    return res.json({ ok: true, alreadySettled: true });
+  }
+  if (!match.playerIds.includes(req.user.id)) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  const isBotMatch = match.playerIds.some((id) => isBotPlayer(id));
+  if (!isBotMatch) {
+    return res.status(400).json({ error: 'Forfeit endpoint is only available for bot matches.' });
+  }
+  leaveMatchByForfeit(match, req.user.id);
+  await db.write();
+  return res.json({ ok: true, forfeited: true });
+}
+
+app.post('/api/matches/:matchId/forfeit', authMiddleware, async (req, res) => {
+  return handleBotForfeit(req, res);
+});
+
+app.post('/api/match/:matchId/forfeit', authMiddleware, async (req, res) => {
+  return handleBotForfeit(req, res);
+});
 
 app.post('/api/matchmaking/join', authMiddleware, async (req, res) => {
   if (isUserInActiveMatch(req.user.id)) {
@@ -3779,6 +3895,10 @@ io.on('connection', (socket) => {
     for (const match of matches.values()) {
       if (!match.playerIds.includes(userId)) continue;
       if (isBotPlayer(userId)) continue;
+      if (match.playerIds.some((id) => isBotPlayer(id))) {
+        leaveMatchByForfeit(match, userId);
+        continue;
+      }
       match.connections[userId] = {
         connected: false,
         graceEndsAt: new Date(Date.now() + DISCONNECT_TIMEOUT_MS).toISOString()
@@ -3843,6 +3963,7 @@ export {
   buildChallengePayload,
   isRealMatch,
   countWinningSplitHandsForPlayer,
+  calculateForfeitLossAmount,
   getBotObservation,
   chooseBotActionFromObservation
 };

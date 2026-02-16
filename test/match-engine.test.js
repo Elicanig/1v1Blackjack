@@ -17,6 +17,7 @@ import {
   recordChallengeEventForMatch,
   buildChallengePayload,
   countWinningSplitHandsForPlayer,
+  calculateForfeitLossAmount,
   getBotObservation,
   chooseBotActionFromObservation
 } from '../server.js';
@@ -631,4 +632,12 @@ test('48 split-win counter supports multiple split-hand wins in one round', () =
     { winner: null, loser: null, amount: 0, handIndex: 3, winnerHandWasSplit: false }
   ];
   assert.equal(countWinningSplitHandsForPlayer(outcomes, 'p1'), 3);
+});
+
+test('49 forfeit loss amount uses exposure when available', () => {
+  assert.equal(calculateForfeitLossAmount(1000, 160, 25), 160);
+});
+
+test('50 forfeit loss amount falls back to base bet and caps by bankroll', () => {
+  assert.equal(calculateForfeitLossAmount(40, 0, 50), 40);
 });

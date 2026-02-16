@@ -154,6 +154,7 @@ const state = {
   outgoingFriendChallenges: [],
   notifications: [],
   notificationsOpen: false,
+  notificationFriendRequestStatus: {},
   toasts: [],
   challenges: { hourly: [], daily: [], weekly: [], skill: [] },
   challengeResets: { hourly: null, daily: null, weekly: null },
@@ -976,10 +977,18 @@ function connectSocket() {
   });
   state.socket.on('notify:list', ({ notifications }) => {
     state.notifications = notifications || [];
+    const activeIds = new Set(state.notifications.map((item) => item.id));
+    state.notificationFriendRequestStatus = Object.fromEntries(
+      Object.entries(state.notificationFriendRequestStatus).filter(([notifId]) => activeIds.has(notifId))
+    );
     render();
   });
   state.socket.on('notify:new', (notification) => {
     state.notifications = [notification, ...state.notifications].slice(0, 60);
+    const activeIds = new Set(state.notifications.map((item) => item.id));
+    state.notificationFriendRequestStatus = Object.fromEntries(
+      Object.entries(state.notificationFriendRequestStatus).filter(([notifId]) => activeIds.has(notifId))
+    );
     pushToast(notification.message, notification.type);
   });
   state.socket.on('friend:challengeStarted', ({ matchId }) => {
@@ -1123,6 +1132,10 @@ async function loadMe() {
     state.incomingFriendChallenges = data.friendChallenges?.incoming || [];
     state.outgoingFriendChallenges = data.friendChallenges?.outgoing || [];
     state.notifications = data.notifications || [];
+    const activeIds = new Set(state.notifications.map((item) => item.id));
+    state.notificationFriendRequestStatus = Object.fromEntries(
+      Object.entries(state.notificationFriendRequestStatus).filter(([notifId]) => activeIds.has(notifId))
+    );
     applyChallengesPayload(data.challenges, data.challengeResets, {
       hourlyResetAt: data.hourlyResetAt,
       dailyResetAt: data.dailyResetAt,
@@ -1177,6 +1190,7 @@ async function loadMe() {
     state.incomingRequests = [];
     state.outgoingRequests = [];
     state.notifications = [];
+    state.notificationFriendRequestStatus = {};
     state.incomingFriendChallenges = [];
     state.outgoingFriendChallenges = [];
     state.challenges = { hourly: [], daily: [], weekly: [], skill: [] };
@@ -1223,6 +1237,32 @@ function isBotMatchActive() {
   return Boolean(oppId && state.currentMatch.participants?.[oppId]?.isBot);
 }
 
+async function forfeitBotMatch({ showToast = false, refreshOnError = true } = {}) {
+  if (!state.currentMatch || !isBotMatchActive()) return false;
+  const matchId = state.currentMatch.id;
+  try {
+    await api(`/api/matches/${encodeURIComponent(matchId)}/forfeit`, { method: 'POST' });
+    if (showToast) pushToast('You forfeited the match.');
+    return true;
+  } catch (e) {
+    console.error('Bot forfeit request failed:', e);
+    pushToast('Could not confirm forfeit. Refreshing balance.');
+    if (refreshOnError) {
+      loadMe().catch((err) => console.warn('Balance refresh failed after forfeit error:', err));
+    }
+    return false;
+  }
+}
+
+function leaveCurrentMatch(options = {}) {
+  if (!state.currentMatch) return;
+  if (isBotMatchActive()) {
+    forfeitBotMatch(options);
+    return;
+  }
+  emitLeaveMatch();
+}
+
 function navigateWithMatchSafety(view) {
   if (!state.currentMatch || !state.me || view === 'match') {
     goToView(view);
@@ -1237,7 +1277,7 @@ function navigateWithMatchSafety(view) {
     return;
   }
   state.pendingNavAfterLeave = view;
-  emitLeaveMatch();
+  leaveCurrentMatch({ showToast: true, refreshOnError: true });
   setTimeout(() => {
     if (!state.pendingNavAfterLeave) return;
     const target = state.pendingNavAfterLeave;
@@ -1475,7 +1515,7 @@ function resetBetStateToLobby() {
   staleBetKeys.forEach((k) => localStorage.removeItem(k));
   state.betInputDraft = '';
   state.currentBet = 5;
-  if (state.currentMatch) emitLeaveMatch();
+  if (state.currentMatch) leaveCurrentMatch({ showToast: false, refreshOnError: true });
   state.currentMatch = null;
   state.currentLobby = null;
   state.leaveMatchModal = false;
@@ -1646,14 +1686,18 @@ async function joinLobby(lobbyIdInput) {
   }
 }
 
+function applyFriendsPayload(data = {}) {
+  state.friends = data.friends || [];
+  state.incomingRequests = data.incoming || [];
+  state.outgoingRequests = data.outgoing || [];
+  state.incomingFriendChallenges = data.incomingChallenges || [];
+  state.outgoingFriendChallenges = data.outgoingChallenges || [];
+}
+
 async function loadFriendsData() {
   try {
     const data = await api('/api/friends/list');
-    state.friends = data.friends || [];
-    state.incomingRequests = data.incoming || [];
-    state.outgoingRequests = data.outgoing || [];
-    state.incomingFriendChallenges = data.incomingChallenges || [];
-    state.outgoingFriendChallenges = data.outgoingChallenges || [];
+    applyFriendsPayload(data);
     render();
   } catch (e) {
     setError(e.message);
@@ -1698,9 +1742,7 @@ async function acceptRequest(requestId) {
       method: 'POST',
       body: JSON.stringify({ requestId })
     });
-    state.friends = data.friends || [];
-    state.incomingRequests = data.incoming || [];
-    state.outgoingRequests = data.outgoing || [];
+    applyFriendsPayload(data);
     pushToast('Friend request accepted.');
   } catch (e) {
     setError(e.message);
@@ -1713,9 +1755,7 @@ async function declineRequest(requestId) {
       method: 'POST',
       body: JSON.stringify({ requestId })
     });
-    state.friends = data.friends || [];
-    state.incomingRequests = data.incoming || [];
-    state.outgoingRequests = data.outgoing || [];
+    applyFriendsPayload(data);
     pushToast('Friend request declined.');
   } catch (e) {
     setError(e.message);
@@ -1746,9 +1786,160 @@ async function clearNotifications() {
   try {
     const data = await api('/api/notifications/clear', { method: 'POST' });
     state.notifications = data.notifications || [];
+    state.notificationFriendRequestStatus = {};
     render();
   } catch (e) {
     setError(e.message);
+  }
+}
+
+async function refreshNotifications() {
+  try {
+    const data = await api('/api/notifications');
+    state.notifications = data.notifications || [];
+    const activeIds = new Set(state.notifications.map((item) => item.id));
+    state.notificationFriendRequestStatus = Object.fromEntries(
+      Object.entries(state.notificationFriendRequestStatus).filter(([notifId]) => activeIds.has(notifId))
+    );
+  } catch (e) {
+    console.warn('Failed to refresh notifications:', e);
+  }
+}
+
+function getNotificationRequestId(notification) {
+  if (!notification || notification.type !== 'friend_request') return '';
+  if (notification.requestId) return String(notification.requestId);
+  if (notification.action?.data?.requestId) return String(notification.action.data.requestId);
+  const fromUserId = notification.fromUserId || notification.action?.data?.fromUserId;
+  if (fromUserId) {
+    const match = (state.incomingRequests || []).find((request) => request.fromUserId === fromUserId);
+    if (match?.id) return match.id;
+  }
+  const senderFromMessage = String(notification.message || '').match(/^(.+?) sent you a friend request/i)?.[1]?.trim();
+  if (senderFromMessage) {
+    const usernameMatch = (state.incomingRequests || []).find((request) => request.username === senderFromMessage);
+    if (usernameMatch?.id) return usernameMatch.id;
+  }
+  return '';
+}
+
+function resolveFriendRequestStatusLabel(status) {
+  if (status === 'accepted') return 'Accepted';
+  if (status === 'declined') return 'Declined';
+  if (status === 'resolved') return 'Resolved';
+  return '';
+}
+
+function renderFriendRequestNotificationActions(notification) {
+  if (!notification || notification.type !== 'friend_request') return '';
+  const notifId = notification.id;
+  const status = state.notificationFriendRequestStatus[notifId] || '';
+  const requestId = getNotificationRequestId(notification);
+  const disabled = status === 'accepting' || status === 'declining' || !requestId;
+  const resolvedLabel = resolveFriendRequestStatusLabel(status);
+  if (resolvedLabel) {
+    return `<div class="row"><button class="ghost" type="button" disabled>${resolvedLabel}</button></div>`;
+  }
+  return `<div class="row">
+      <button class="primary" type="button" data-notif-fr-accept="${notifId}" ${disabled ? 'disabled' : ''}>
+        ${status === 'accepting' ? 'Accepting…' : 'Accept'}
+      </button>
+      <button class="warn" type="button" data-notif-fr-decline="${notifId}" ${disabled ? 'disabled' : ''}>
+        ${status === 'declining' ? 'Declining…' : 'Decline'}
+      </button>
+    </div>`;
+}
+
+function renderNotificationActions(notification) {
+  if (!notification) return '';
+  if (notification.type === 'friend_challenge') {
+    return `<div class="row">
+      <button class="primary" data-notif-ch-accept="${notification.action?.data?.challengeId || ''}">Accept</button>
+      <button class="warn" data-notif-ch-decline="${notification.action?.data?.challengeId || ''}">Decline</button>
+    </div>`;
+  }
+  if (notification.type === 'friend_request') {
+    return renderFriendRequestNotificationActions(notification);
+  }
+  if (notification.action) {
+    return `<button data-notif-action="${notification.id}" class="primary">${notification.action.label || 'Open'}</button>`;
+  }
+  return '';
+}
+
+async function acceptRequestFromNotification(notificationId) {
+  const notification = (state.notifications || []).find((entry) => entry.id === notificationId);
+  if (!notification || notification.type !== 'friend_request') return;
+  const requestId = getNotificationRequestId(notification);
+  if (!requestId) {
+    pushToast('Friend request data is missing. Refreshing...');
+    await Promise.all([loadFriendsData(), refreshNotifications()]);
+    render();
+    return;
+  }
+  const existing = state.notificationFriendRequestStatus[notificationId];
+  if (existing === 'accepting' || existing === 'accepted' || existing === 'resolved') return;
+  state.notificationFriendRequestStatus[notificationId] = 'accepting';
+  render();
+  try {
+    const data = await api(`/api/friends/requests/${encodeURIComponent(requestId)}/accept`, {
+      method: 'POST'
+    });
+    state.notificationFriendRequestStatus[notificationId] = 'accepted';
+    applyFriendsPayload(data);
+    pushToast(data.message || 'Friend request accepted.');
+    await refreshNotifications();
+    render();
+  } catch (e) {
+    const message = String(e.message || '');
+    if (/already|not found/i.test(message)) {
+      state.notificationFriendRequestStatus[notificationId] = 'resolved';
+      pushToast('Friend request already handled.');
+      await Promise.all([loadFriendsData(), refreshNotifications()]);
+      render();
+      return;
+    }
+    delete state.notificationFriendRequestStatus[notificationId];
+    setError(e.message);
+    render();
+  }
+}
+
+async function declineRequestFromNotification(notificationId) {
+  const notification = (state.notifications || []).find((entry) => entry.id === notificationId);
+  if (!notification || notification.type !== 'friend_request') return;
+  const requestId = getNotificationRequestId(notification);
+  if (!requestId) {
+    pushToast('Friend request data is missing. Refreshing...');
+    await Promise.all([loadFriendsData(), refreshNotifications()]);
+    render();
+    return;
+  }
+  const existing = state.notificationFriendRequestStatus[notificationId];
+  if (existing === 'declining' || existing === 'declined' || existing === 'resolved') return;
+  state.notificationFriendRequestStatus[notificationId] = 'declining';
+  render();
+  try {
+    const data = await api(`/api/friends/requests/${encodeURIComponent(requestId)}/decline`, {
+      method: 'POST'
+    });
+    state.notificationFriendRequestStatus[notificationId] = 'declined';
+    applyFriendsPayload(data);
+    pushToast(data.message || 'Friend request declined.');
+    await refreshNotifications();
+    render();
+  } catch (e) {
+    const message = String(e.message || '');
+    if (/already|not found/i.test(message)) {
+      state.notificationFriendRequestStatus[notificationId] = 'resolved';
+      pushToast('Friend request already handled.');
+      await Promise.all([loadFriendsData(), refreshNotifications()]);
+      render();
+      return;
+    }
+    delete state.notificationFriendRequestStatus[notificationId];
+    setError(e.message);
+    render();
   }
 }
 
@@ -1995,16 +2186,7 @@ function syncNotificationOverlay() {
             <div class="notif-item">
               <div>${n.message}</div>
               <div class="muted notif-time">${formatNotificationTime(n.createdAt)}</div>
-              ${
-                n.type === 'friend_challenge'
-                  ? `<div class="row">
-                       <button class="primary" data-notif-ch-accept="${n.action?.data?.challengeId || ''}">Accept</button>
-                       <button class="warn" data-notif-ch-decline="${n.action?.data?.challengeId || ''}">Decline</button>
-                     </div>`
-                  : n.action
-                    ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>`
-                    : ''
-              }
+              ${renderNotificationActions(n)}
             </div>
           `
               )
@@ -2047,6 +2229,16 @@ function syncNotificationOverlay() {
       respondFriendChallenge(btn.dataset.notifChDecline, 'decline');
       state.notificationsOpen = false;
       render();
+    };
+  });
+  mount.querySelectorAll('[data-notif-fr-accept]').forEach((btn) => {
+    btn.onclick = () => {
+      acceptRequestFromNotification(btn.dataset.notifFrAccept);
+    };
+  });
+  mount.querySelectorAll('[data-notif-fr-decline]').forEach((btn) => {
+    btn.onclick = () => {
+      declineRequestFromNotification(btn.dataset.notifFrDecline);
     };
   });
 }
@@ -2952,16 +3144,7 @@ function renderNotifications() {
             <div class="notif-item">
               <div>${n.message}</div>
               <div class="muted notif-time">${formatNotificationTime(n.createdAt)}</div>
-              ${
-                n.type === 'friend_challenge'
-                  ? `<div class="row">
-                       <button class="primary" data-notif-ch-accept="${n.action?.data?.challengeId || ''}">Accept</button>
-                       <button class="warn" data-notif-ch-decline="${n.action?.data?.challengeId || ''}">Decline</button>
-                     </div>`
-                  : n.action
-                    ? `<button data-notif-action="${n.id}" class="primary">${n.action.label || 'Open'}</button>`
-                    : ''
-              }
+              ${renderNotificationActions(n)}
             </div>
           `
               )
@@ -2988,6 +3171,12 @@ function renderNotifications() {
   });
   app.querySelectorAll('[data-notif-ch-decline]').forEach((btn) => {
     btn.onclick = () => respondFriendChallenge(btn.dataset.notifChDecline, 'decline');
+  });
+  app.querySelectorAll('[data-notif-fr-accept]').forEach((btn) => {
+    btn.onclick = () => acceptRequestFromNotification(btn.dataset.notifFrAccept);
+  });
+  app.querySelectorAll('[data-notif-fr-decline]').forEach((btn) => {
+    btn.onclick = () => declineRequestFromNotification(btn.dataset.notifFrDecline);
   });
 }
 
@@ -3522,7 +3711,7 @@ function renderMatch() {
   if (confirmLeaveMatchBtn) {
     confirmLeaveMatchBtn.onclick = () => {
       state.leaveMatchModal = false;
-      emitLeaveMatch();
+      leaveCurrentMatch({ showToast: true, refreshOnError: true });
     };
   }
   const cancelLeaveMatchBtn = document.getElementById('cancelLeaveMatchBtn');
