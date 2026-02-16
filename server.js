@@ -301,7 +301,10 @@ const CHALLENGE_POOLS = {
     { key: 'hourly_hands_won_3', title: 'Quick Closer', description: 'Win 3 hands', goal: 3, rewardChips: 20, event: 'hand_won' },
     { key: 'hourly_pushes_2', title: 'Even Odds', description: 'Get 2 pushes', goal: 2, rewardChips: 16, event: 'push' },
     { key: 'hourly_blackjack_1', title: 'Natural Edge', description: 'Hit 1 natural blackjack', goal: 1, rewardChips: 25, event: 'blackjack' },
-    { key: 'hourly_rounds_2', title: 'Table Presence', description: 'Play 2 rounds', goal: 2, rewardChips: 10, event: 'round_played' }
+    { key: 'hourly_rounds_2', title: 'Table Presence', description: 'Play 2 rounds', goal: 2, rewardChips: 10, event: 'round_played' },
+    { key: 'hourly_hand_losses_2', title: 'Bounce Back', description: 'Complete 2 losing hands', goal: 2, rewardChips: 12, event: 'hand_lost' },
+    { key: 'hourly_round_win_1', title: 'Fast Finisher', description: 'Win 1 round', goal: 1, rewardChips: 22, event: 'round_won' },
+    { key: 'hourly_hands_played_10', title: 'Table Tempo', description: 'Play 10 hands', goal: 10, rewardChips: 18, event: 'hand_played' }
   ],
   daily: [
     { key: 'daily_hands_played_20', title: 'Daily Grinder', description: 'Play 20 hands', goal: 20, rewardChips: 70, event: 'hand_played' },
@@ -311,7 +314,11 @@ const CHALLENGE_POOLS = {
     { key: 'daily_rounds_8', title: 'Session Pro', description: 'Play 8 rounds', goal: 8, rewardChips: 60, event: 'round_played' },
     { key: 'daily_split_win_2', title: 'Split Specialist', description: 'Win 2 split hands', goal: 2, rewardChips: 95, event: 'split_win' },
     { key: 'daily_hands_lost_8', title: 'Learn and Adapt', description: 'Complete 8 losing hands', goal: 8, rewardChips: 55, event: 'hand_lost' },
-    { key: 'daily_round_win_3', title: 'Closer', description: 'Win 3 rounds', goal: 3, rewardChips: 120, event: 'round_won' }
+    { key: 'daily_round_win_3', title: 'Closer', description: 'Win 3 rounds', goal: 3, rewardChips: 120, event: 'round_won' },
+    { key: 'daily_hands_won_6', title: 'Six Shooter', description: 'Win 6 hands', goal: 6, rewardChips: 90, event: 'hand_won' },
+    { key: 'daily_rounds_12', title: 'Long Session', description: 'Play 12 rounds', goal: 12, rewardChips: 105, event: 'round_played' },
+    { key: 'daily_blackjack_2', title: 'Double Natural', description: 'Hit 2 natural blackjacks', goal: 2, rewardChips: 115, event: 'blackjack' },
+    { key: 'daily_round_win_5', title: 'Momentum Builder', description: 'Win 5 rounds', goal: 5, rewardChips: 145, event: 'round_won' }
   ],
   weekly: [
     { key: 'weekly_hands_played_90', title: 'High Volume', description: 'Play 90 hands', goal: 90, rewardChips: 260, event: 'hand_played' },
@@ -320,7 +327,10 @@ const CHALLENGE_POOLS = {
     { key: 'weekly_blackjack_10', title: 'High Roller Naturals', description: 'Hit 10 natural blackjacks', goal: 10, rewardChips: 600, event: 'blackjack' },
     { key: 'weekly_rounds_35', title: 'Table Marathon', description: 'Play 35 rounds', goal: 35, rewardChips: 240, event: 'round_played' },
     { key: 'weekly_split_win_12', title: 'Split Maestro', description: 'Win 12 split hands', goal: 12, rewardChips: 520, event: 'split_win' },
-    { key: 'weekly_round_win_14', title: 'Weekly Victor', description: 'Win 14 rounds', goal: 14, rewardChips: 480, event: 'round_won' }
+    { key: 'weekly_round_win_14', title: 'Weekly Victor', description: 'Win 14 rounds', goal: 14, rewardChips: 480, event: 'round_won' },
+    { key: 'weekly_rounds_20', title: 'Steady Presence', description: 'Play 20 rounds', goal: 20, rewardChips: 220, event: 'round_played' },
+    { key: 'weekly_hands_lost_25', title: 'Resilient Grinder', description: 'Complete 25 losing hands', goal: 25, rewardChips: 230, event: 'hand_lost' },
+    { key: 'weekly_round_win_8', title: 'Seasoned Winner', description: 'Win 8 rounds', goal: 8, rewardChips: 340, event: 'round_won' }
   ]
 };
 
@@ -958,6 +968,14 @@ function appendBetHistory(user, entry) {
     ...entry
   });
   user.betHistory = user.betHistory.slice(0, 10);
+}
+
+function matchHistoryModeLabel(match) {
+  if (!match) return 'Challenge PvP';
+  if (match.matchType === 'bot') {
+    return isPracticeMatch(match) ? 'Bot Practice' : 'Bot Real';
+  }
+  return isPracticeMatch(match) ? 'Friendly PvP' : 'Challenge PvP';
 }
 
 function creditUserBankroll(user, rewardChips) {
@@ -1822,19 +1840,20 @@ function resolveRound(match) {
   }
 
   if (realMatch) {
+    const modeLabel = matchHistoryModeLabel(match);
     for (let idx = 0; idx < outcomes.length; idx += 1) {
       const out = outcomes[idx];
       const handA = a.hands[out.handIndex] || a.hands[0];
       const handB = b.hands[0];
       appendBetHistory(userA, {
-        mode: match.stakeType === 'REAL' ? 'PvP Real' : 'PvP',
+        mode: modeLabel,
         bet: handA?.bet || match.round.baseBet,
         result: out.winner === aId ? 'Win' : out.loser === aId ? 'Loss' : 'Push',
         net: out.winner === aId ? out.amount : out.loser === aId ? -out.amount : 0,
         notes: handA?.naturalBlackjack ? 'blackjack' : handA?.wasSplitHand ? 'split' : ''
       });
       appendBetHistory(userB, {
-        mode: match.stakeType === 'REAL' ? 'PvP Real' : 'PvP',
+        mode: modeLabel,
         bet: handB?.bet || match.round.baseBet,
         result: out.winner === bId ? 'Win' : out.loser === bId ? 'Loss' : 'Push',
         net: out.winner === bId ? out.amount : out.loser === bId ? -out.amount : 0,
@@ -2541,14 +2560,15 @@ function leaveMatchByForfeit(match, leaverId) {
   const leaverUser = !isBotPlayer(leaverId) ? getUserById(leaverId) : null;
   const opponentUser = !isBotPlayer(opponentId) ? getUserById(opponentId) : null;
   if (leaverUser && opponentUser && isRealMatch(match)) {
+    const modeLabel = matchHistoryModeLabel(match);
     const currentPot =
       (match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0) +
       (match.round?.players?.[opponentId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0);
     const award = Math.max(match.round?.baseBet || BASE_BET, Math.min(leaverUser.chips, currentPot || BASE_BET));
     leaverUser.chips = Math.max(0, leaverUser.chips - award);
     opponentUser.chips += award;
-    appendBetHistory(leaverUser, { mode: 'PvP Real', bet: award, result: 'Forfeit', net: -award, notes: 'left match' });
-    appendBetHistory(opponentUser, { mode: 'PvP Real', bet: award, result: 'Win', net: award, notes: 'opponent left' });
+    appendBetHistory(leaverUser, { mode: modeLabel, bet: award, result: 'Forfeit', net: -award, notes: 'left match' });
+    appendBetHistory(opponentUser, { mode: modeLabel, bet: award, result: 'Win', net: award, notes: 'opponent left' });
     emitUserUpdate(leaverUser.id);
     emitUserUpdate(opponentUser.id);
     db.write();
@@ -2987,12 +3007,37 @@ app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
   });
 });
 
+app.post('/api/lobbies/cancel', authMiddleware, async (req, res) => {
+  const requestedCode = normalizeLobbyCode(req.body?.lobbyId);
+  const lobbyIndex = db.data.lobbies.findIndex((lobby) => {
+    if (lobby.ownerId !== req.user.id) return false;
+    if (lobby.type === 'bot') return false;
+    if (lobby.status !== 'waiting') return false;
+    if (requestedCode && normalizeLobbyCode(lobby.id) !== requestedCode) return false;
+    return true;
+  });
+  if (lobbyIndex < 0) {
+    return res.status(404).json({ error: 'No active lobby to cancel' });
+  }
+  const [removedLobby] = db.data.lobbies.splice(lobbyIndex, 1);
+  lobbyToMatch.delete(removedLobby.id);
+  await db.write();
+  emitToUser(req.user.id, 'lobby:update', {
+    ...removedLobby,
+    status: 'cancelled'
+  });
+  return res.json({ ok: true, cancelledLobbyId: removedLobby.id });
+});
+
 app.post('/api/lobbies/join', authMiddleware, async (req, res) => {
   const { lobbyId } = req.body || {};
   const normalized = normalizeLobbyCode(lobbyId);
   const lobby = db.data.lobbies.find((l) => normalizeLobbyCode(l.id) === normalized);
-  if (!lobby) return res.status(404).json({ error: 'Lobby not found' });
+  if (!lobby || lobby.status === 'cancelled' || lobby.status === 'closed') {
+    return res.status(410).json({ error: 'Lobby no longer exists' });
+  }
   if (lobby.ownerId === req.user.id) return res.status(400).json({ error: 'Cannot join your own lobby' });
+  if (lobby.status !== 'waiting') return res.status(409).json({ error: 'Lobby full' });
   if (lobby.opponentId && lobby.opponentId !== req.user.id) return res.status(409).json({ error: 'Lobby full' });
   if (Array.isArray(lobby.invited) && lobby.invited.length > 0 && !lobby.invited.includes(req.user.username)) {
     return res.status(403).json({ error: 'You are not invited to this private lobby' });

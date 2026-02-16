@@ -190,6 +190,7 @@ const state = {
   botStakeType: 'FAKE',
   emotePickerOpen: false,
   floatingEmote: null,
+  inviteModeModalFriend: null,
   challengeModalFriend: null,
   challengeBet: 25,
   challengeMessage: '',
@@ -940,6 +941,14 @@ function connectSocket() {
     }, 4000);
   });
   state.socket.on('lobby:update', (lobby) => {
+    if (!lobby || lobby.status === 'closed' || lobby.status === 'cancelled') {
+      if (state.currentLobby && (!lobby || state.currentLobby.id === lobby.id)) {
+        state.currentLobby = null;
+        if (lobby?.status === 'cancelled') setStatus('Lobby cancelled.');
+        render();
+      }
+      return;
+    }
     state.currentLobby = lobby;
     render();
   });
@@ -1543,6 +1552,22 @@ async function createLobby() {
   }
 }
 
+async function cancelLobby(lobbyId) {
+  try {
+    await api('/api/lobbies/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ lobbyId })
+    });
+    state.currentLobby = null;
+    state.lobbyJoinInput = '';
+    goToView('lobbies');
+    setStatus('Lobby cancelled.');
+    render();
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
 async function joinLobby(lobbyIdInput) {
   try {
     const code = String(lobbyIdInput || '').trim().toUpperCase();
@@ -1637,16 +1662,16 @@ async function declineRequest(requestId) {
   }
 }
 
-async function inviteFriendToLobby(username) {
+async function inviteFriendToLobby(username, stakeType = 'FAKE') {
   try {
     const data = await api('/api/lobbies/invite', {
       method: 'POST',
-      body: JSON.stringify({ username })
+      body: JSON.stringify({ username, stakeType })
     });
     state.currentLobby = data.lobby;
     goToView('lobbies');
     state.socket?.emit('lobby:watch', data.lobby.id);
-    pushToast(`Invite sent to ${username}.`);
+    pushToast(`${stakeType === 'REAL' ? 'Challenge' : 'Friendly'} invite sent to ${username}.`);
     render();
   } catch (e) {
     setError(e.message);
@@ -1824,6 +1849,8 @@ async function claimChallenge(id) {
 function logout() {
   resetQuickPlayState();
   state.matchChatDraft = '';
+  state.inviteModeModalFriend = null;
+  state.challengeModalFriend = null;
   if (state.socket) state.socket.disconnect();
   state.socket = null;
   state.token = null;
@@ -2490,8 +2517,7 @@ function renderFriends() {
               <div class="muted">${f.presence === 'in_match' ? 'In match' : f.online ? 'Online' : 'Offline'} • ${f.chips} chips</div>
             </div>
             <div class="row">
-              <button data-invite="${f.username}">Invite</button>
-              <button class="ghost" data-challenge-open="${f.username}">Challenge</button>
+              <button data-invite-open="${f.username}">Invite</button>
             </div>
           </div>
         `
@@ -2509,6 +2535,29 @@ function renderFriends() {
       </div>
 
     </main>
+    ${
+      state.inviteModeModalFriend
+        ? `<div class="modal">
+            <div class="modal-panel card">
+              <h3>Invite ${state.inviteModeModalFriend}</h3>
+              <p class="muted">Choose how you want to play.</p>
+              <div class="invite-mode-list">
+                <button type="button" class="invite-mode-option" id="inviteModeFriendlyBtn">
+                  <strong>Friendly Battle</strong>
+                  <span class="muted">No chips won/lost. Stats may track, but no balance changes.</span>
+                </button>
+                <button type="button" class="invite-mode-option invite-mode-option-real" id="inviteModeChallengeBtn">
+                  <strong>Challenge</strong>
+                  <span class="muted">Real chips. Winnings/losses affect balance.</span>
+                </button>
+              </div>
+              <div class="row" style="margin-top:0.7rem">
+                <button id="cancelInviteModeBtn" class="ghost">Cancel</button>
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
     ${
       state.challengeModalFriend
         ? `<div class="modal">
@@ -2559,17 +2608,39 @@ function renderFriends() {
   app.querySelectorAll('[data-decline]').forEach((btn) => {
     btn.onclick = () => declineRequest(btn.dataset.decline);
   });
-  app.querySelectorAll('[data-invite]').forEach((btn) => {
-    btn.onclick = () => inviteFriendToLobby(btn.dataset.invite);
-  });
-  app.querySelectorAll('[data-challenge-open]').forEach((btn) => {
+  app.querySelectorAll('[data-invite-open]').forEach((btn) => {
     btn.onclick = () => {
-      state.challengeModalFriend = btn.dataset.challengeOpen;
+      state.inviteModeModalFriend = btn.dataset.inviteOpen;
+      render();
+    };
+  });
+  const inviteFriendlyBtn = document.getElementById('inviteModeFriendlyBtn');
+  if (inviteFriendlyBtn) {
+    inviteFriendlyBtn.onclick = () => {
+      const username = state.inviteModeModalFriend;
+      state.inviteModeModalFriend = null;
+      if (username) inviteFriendToLobby(username, 'FAKE');
+      else render();
+    };
+  }
+  const inviteChallengeBtn = document.getElementById('inviteModeChallengeBtn');
+  if (inviteChallengeBtn) {
+    inviteChallengeBtn.onclick = () => {
+      const username = state.inviteModeModalFriend;
+      state.inviteModeModalFriend = null;
+      state.challengeModalFriend = username;
       state.challengeBet = Math.max(5, Math.min(50, state.me?.chips || 50));
       state.challengeMessage = '';
       render();
     };
-  });
+  }
+  const cancelInviteModeBtn = document.getElementById('cancelInviteModeBtn');
+  if (cancelInviteModeBtn) {
+    cancelInviteModeBtn.onclick = () => {
+      state.inviteModeModalFriend = null;
+      render();
+    };
+  }
   app.querySelectorAll('[data-challenge-accept]').forEach((btn) => {
     btn.onclick = () => respondFriendChallenge(btn.dataset.challengeAccept, 'accept');
   });
@@ -2595,6 +2666,7 @@ function renderFriends() {
 
 function renderLobby() {
   const lobby = state.currentLobby;
+  const canCancelLobby = Boolean(lobby && state.me && lobby.ownerId === state.me.id && lobby.status === 'waiting');
   const hasPrefilledCode = Boolean((state.lobbyJoinInput || '').trim());
   app.innerHTML = `
     ${renderTopbar('Lobbies')}
@@ -2625,7 +2697,10 @@ function renderLobby() {
             <div class="muted">Owner: ${playerName(lobby.ownerId)}</div>
             <div class="muted">Opponent: ${lobby.opponentId ? playerName(lobby.opponentId) : 'Waiting...'}</div>
           </div>
-          <button id="copyLobbyCode">Copy Join Code</button>
+          <div class="row">
+            <button id="copyLobbyCode">Copy Join Code</button>
+            ${canCancelLobby ? '<button id="cancelLobbyBtn" class="warn" type="button">Cancel Lobby</button>' : ''}
+          </div>
         </div>
         <p class="muted">Share this lobby code with one friend. Match starts when both players are connected.</p>
       </div>`
@@ -2655,6 +2730,10 @@ function renderLobby() {
       if (ok) pushToast('Lobby link copied.');
       else pushToast("Couldn't copy — select and copy manually.");
     };
+  }
+  const cancelBtn = document.getElementById('cancelLobbyBtn');
+  if (cancelBtn && lobby) {
+    cancelBtn.onclick = () => cancelLobby(lobby.id);
   }
 }
 
@@ -3418,7 +3497,7 @@ function syncQuickPlayOverlay() {
       <p class="muted">
         ${isConnected ? `Connected with ${opponentName}. Loading bet confirmation...` : 'Looking for another player in the Quick Play queue.'}
       </p>
-      <div class="muted quickplay-bucket-note">Bucket: $${formatQuickPlayBucket(bucket)}</div>
+      <div class="muted quickplay-bucket-note">Bet: $${formatQuickPlayBucket(bucket)}</div>
       ${
         !isConnected
           ? `<div class="quickplay-loader-row">

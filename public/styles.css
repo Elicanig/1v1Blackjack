@@ -2281,6 +2281,36 @@ select:focus-visible {
   padding: var(--space-3);
 }
 
+.invite-mode-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.invite-mode-option {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(230, 238, 225, 0.2);
+  background: rgba(15, 33, 27, 0.76);
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.invite-mode-option:hover,
+.invite-mode-option:focus-visible {
+  border-color: rgba(208, 175, 108, 0.48);
+  box-shadow: 0 0 0 2px rgba(208, 175, 108, 0.16);
+}
+
+.invite-mode-option-real {
+  background: linear-gradient(160deg, rgba(189, 149, 82, 0.18), rgba(25, 44, 36, 0.86));
+  border-color: rgba(208, 175, 108, 0.34);
+}
+
 .toast-stack {
   position: fixed;
   right: 16px;
