@@ -8,6 +8,7 @@ import { nanoid } from 'nanoid';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createStorage } from './db/storage.js';
+import { hasDatabaseUrl, getPool } from './db/pool.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,7 +41,7 @@ const BOT_BET_LIMITS = {
   medium: { min: 100, max: 500 },
   normal: { min: 500, max: 2000 }
 };
-const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000];
+const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000, 5000];
 const DAILY_REWARD = 100;
 const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DISCONNECT_TIMEOUT_MS = 60_000;
@@ -61,6 +62,28 @@ const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 const HOURLY_RESET_MS = 60 * 60 * 1000;
 const DAILY_RESET_MS = 24 * 60 * 60 * 1000;
 const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000;
+const LEADERBOARD_CACHE_MS = 30_000;
+const LEADERBOARD_MAX_LIMIT = 50;
+const LEADERBOARD_DEFAULT_LIMIT = 25;
+const HIGH_ROLLER_MIN_BET = 2500;
+const MAX_BET_HARD_CAP = 10_000_000;
+const XP_REWARDS = Object.freeze({
+  pvpWin: 40,
+  pvpLoss: 15,
+  botWin: 10,
+  botLoss: 5,
+  challenge: 75
+});
+const TITLE_DEFS = Object.freeze({
+  HIGH_ROLLER: { key: 'HIGH_ROLLER', label: 'High Roller' },
+  GIANT_KILLER: { key: 'GIANT_KILLER', label: 'Giant Killer' },
+  STREAK_LORD: { key: 'STREAK_LORD', label: 'Streak Lord' }
+});
+const DYNAMIC_BADGES = Object.freeze({
+  TOP_1: { key: 'TOP_1', label: 'Top 1', short: '#1' },
+  TOP_5: { key: 'TOP_5', label: 'Top 5', short: 'Top 5' },
+  TOP_10: { key: 'TOP_10', label: 'Top 10', short: 'Top 10' }
+});
 const USER_STATS_DEFAULTS = Object.freeze({
   matchesPlayed: 0,
   roundsWon: 0,
@@ -265,6 +288,71 @@ for (const user of db.data.users) {
     user.skillChallenges = [];
     dbTouched = true;
   }
+  if (!user.headToHead || typeof user.headToHead !== 'object' || Array.isArray(user.headToHead)) {
+    user.headToHead = {};
+    dbTouched = true;
+  }
+  if (!Array.isArray(user.unlockedTitles)) {
+    user.unlockedTitles = [];
+    dbTouched = true;
+  }
+  if (typeof user.selectedTitle !== 'string') {
+    user.selectedTitle = '';
+    dbTouched = true;
+  }
+  if (typeof user.customStatText !== 'string') {
+    user.customStatText = '';
+    dbTouched = true;
+  }
+  if (!Number.isFinite(Number(user.xp))) {
+    user.xp = 0;
+    dbTouched = true;
+  } else {
+    const normalizedXp = Math.max(0, Math.floor(Number(user.xp) || 0));
+    if (normalizedXp !== user.xp) {
+      user.xp = normalizedXp;
+      dbTouched = true;
+    }
+  }
+  if (!Number.isFinite(Number(user.pvpWins))) {
+    user.pvpWins = 0;
+    dbTouched = true;
+  }
+  if (!Number.isFinite(Number(user.pvpLosses))) {
+    user.pvpLosses = 0;
+    dbTouched = true;
+  }
+  if (!Number.isFinite(Number(user.currentMatchWinStreak))) {
+    user.currentMatchWinStreak = 0;
+    dbTouched = true;
+  }
+  if (!Number.isFinite(Number(user.bestMatchWinStreak))) {
+    user.bestMatchWinStreak = 0;
+    dbTouched = true;
+  }
+  if (!Number.isFinite(Number(user.highRollerMatchCount))) {
+    user.highRollerMatchCount = 0;
+    dbTouched = true;
+  }
+  if (!Number.isFinite(Number(user.dailyWinStreakCount))) {
+    user.dailyWinStreakCount = 0;
+    dbTouched = true;
+  }
+  if (user.lastDailyWinDate !== null && user.lastDailyWinDate !== undefined && typeof user.lastDailyWinDate !== 'string') {
+    user.lastDailyWinDate = null;
+    dbTouched = true;
+  }
+  if (!user.lastDailyWinDate) {
+    user.lastDailyWinDate = null;
+  }
+  if (ensureTitleState(user)) {
+    dbTouched = true;
+  }
+  const cleanCustomStat = sanitizeCustomStatText(user.customStatText || '');
+  if (cleanCustomStat !== user.customStatText) {
+    user.customStatText = cleanCustomStat;
+    dbTouched = true;
+  }
 }
 if (!Array.isArray(db.data.friendRequests)) {
   db.data.friendRequests = [];
@@ -292,6 +380,11 @@ const emoteCooldownByUser = new Map();
 const quickPlayQueuesByBucket = new Map();
 const quickPlayBucketByUser = new Map();
 let patchNotesCache = { at: 0, payload: null };
+let leaderboardCache = {
+  at: 0,
+  rows: [],
+  rankByUserId: new Map()
+};
 
 const LOCAL_PATCH_NOTES = [
   {
@@ -455,6 +548,8 @@ function clampBet(amount, balance = MAX_BET_CAP, limits = { min: MIN_BET, max: M
 }
 
 function getMatchBetLimits(match) {
+  const highRoller = String(match?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(match?.highRoller);
+  if (highRoller) return { min: HIGH_ROLLER_MIN_BET, max: MAX_BET_HARD_CAP };
   const quickPlayBucket = normalizeQuickPlayBucket(match?.quickPlayBucket);
   if (quickPlayBucket) return { min: quickPlayBucket, max: quickPlayBucket };
   const botId = match?.playerIds?.find((id) => isBotPlayer(id));
@@ -493,16 +588,23 @@ function buildParticipants(playerIds, botDifficultyById = {}) {
         id: playerId,
         username: `Bot (${difficulty})`,
         isBot: true,
-        difficulty
+        difficulty,
+        level: 1,
+        dynamicBadge: null,
+        selectedTitle: ''
       };
       return acc;
     }
 
     const user = getUserById(playerId);
+    const badge = dynamicBadgeForUser(playerId);
     acc[playerId] = {
       id: playerId,
       username: user?.username || 'Unknown',
-      isBot: false
+      isBot: false,
+      level: levelFromXp(user?.xp || 0),
+      dynamicBadge: badge,
+      selectedTitle: selectedTitleLabelForUser(user)
     };
     return acc;
   }, {});
@@ -647,6 +749,217 @@ function previousUtcDayIso(isoDate) {
   return d.toISOString().slice(0, 10);
 }
 
+function sanitizeCustomStatText(value) {
+  const compact = String(value || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[<>]/g, '')
+    .trim();
+  return compact.slice(0, 60);
+}
+
+function invalidateLeaderboardCache() {
+  leaderboardCache = {
+    at: 0,
+    rows: [],
+    rankByUserId: new Map()
+  };
+}
+
+function leaderboardBadgeForRank(rank) {
+  const numeric = Number(rank);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  if (numeric === 1) return DYNAMIC_BADGES.TOP_1;
+  if (numeric <= 5) return DYNAMIC_BADGES.TOP_5;
+  if (numeric <= 10) return DYNAMIC_BADGES.TOP_10;
+  return null;
+}
+
+function xpFloorForLevel(level) {
+  const safeLevel = Math.max(1, Math.floor(Number(level) || 1));
+  const completedLevels = safeLevel - 1;
+  return (completedLevels * 100) + ((completedLevels * (completedLevels - 1)) / 2) * 25;
+}
+
+function levelFromXp(xp) {
+  const safeXp = Math.max(0, Math.floor(Number(xp) || 0));
+  let level = 1;
+  while (safeXp >= xpFloorForLevel(level + 1)) {
+    level += 1;
+  }
+  return level;
+}
+
+function levelProgressFromXp(xp) {
+  const safeXp = Math.max(0, Math.floor(Number(xp) || 0));
+  const level = levelFromXp(safeXp);
+  const floorXp = xpFloorForLevel(level);
+  const nextFloorXp = xpFloorForLevel(level + 1);
+  const span = Math.max(1, nextFloorXp - floorXp);
+  return {
+    xp: safeXp,
+    level,
+    currentLevelXp: safeXp - floorXp,
+    levelSpanXp: span,
+    xpToNextLevel: Math.max(0, nextFloorXp - safeXp),
+    progress: Math.max(0, Math.min(1, (safeXp - floorXp) / span))
+  };
+}
+
+function normalizeTitleKey(titleKey) {
+  const key = String(titleKey || '').trim().toUpperCase();
+  return TITLE_DEFS[key] ? key : '';
+}
+
+function ensureTitleState(user) {
+  if (!user) return false;
+  let changed = false;
+  if (!Array.isArray(user.unlockedTitles)) {
+    user.unlockedTitles = [];
+    changed = true;
+  }
+  const normalizedTitles = user.unlockedTitles
+    .map((key) => normalizeTitleKey(key))
+    .filter(Boolean);
+  if (
+    normalizedTitles.length !== user.unlockedTitles.length ||
+    normalizedTitles.some((key, idx) => key !== user.unlockedTitles[idx])
+  ) {
+    user.unlockedTitles = normalizedTitles;
+    changed = true;
+  }
+  if (typeof user.selectedTitle !== 'string') {
+    user.selectedTitle = '';
+    changed = true;
+  }
+  if (user.selectedTitle && !user.unlockedTitles.includes(user.selectedTitle)) {
+    user.selectedTitle = '';
+    changed = true;
+  }
+  return changed;
+}
+
+function unlockTitle(user, titleKey) {
+  if (!user) return false;
+  ensureTitleState(user);
+  const normalized = normalizeTitleKey(titleKey);
+  if (!normalized) return false;
+  if (user.unlockedTitles.includes(normalized)) return false;
+  user.unlockedTitles.push(normalized);
+  invalidateLeaderboardCache();
+  return true;
+}
+
+function leaderboardRowsSnapshot(force = false) {
+  const now = Date.now();
+  if (!force && leaderboardCache.rows.length > 0 && now - leaderboardCache.at < LEADERBOARD_CACHE_MS) {
+    return leaderboardCache;
+  }
+  const rows = [...db.data.users]
+    .sort((a, b) => {
+      const chipDelta = (Number(b?.chips) || 0) - (Number(a?.chips) || 0);
+      if (chipDelta !== 0) return chipDelta;
+      return String(a?.username || '').localeCompare(String(b?.username || ''), undefined, { sensitivity: 'base' });
+    })
+    .map((user, idx) => {
+      const rank = idx + 1;
+      const levelMeta = levelProgressFromXp(user?.xp || 0);
+      return {
+        userId: user.id,
+        username: user.username,
+        chips: Math.max(0, Math.floor(Number(user?.chips) || 0)),
+        rank,
+        level: levelMeta.level,
+        xp: levelMeta.xp,
+        selectedTitle: normalizeTitleKey(user?.selectedTitle),
+        dynamicBadge: leaderboardBadgeForRank(rank)
+      };
+    });
+  const rankByUserId = new Map(rows.map((row) => [row.userId, row.rank]));
+  leaderboardCache = { at: now, rows, rankByUserId };
+  return leaderboardCache;
+}
+
+function userRankFromLeaderboard(userId) {
+  if (!userId) return null;
+  const snapshot = leaderboardRowsSnapshot();
+  return snapshot.rankByUserId.get(userId) || null;
+}
+
+function leaderboardPayload(currentUserId, limit = LEADERBOARD_DEFAULT_LIMIT, offset = 0) {
+  const safeLimit = Math.max(1, Math.min(LEADERBOARD_MAX_LIMIT, Math.floor(Number(limit) || LEADERBOARD_DEFAULT_LIMIT)));
+  const safeOffset = Math.max(0, Math.floor(Number(offset) || 0));
+  const snapshot = leaderboardRowsSnapshot();
+  const rows = snapshot.rows.slice(safeOffset, safeOffset + safeLimit).map((row) => ({
+    userId: row.userId,
+    username: row.username,
+    chips: row.chips,
+    rank: row.rank,
+    level: row.level,
+    selectedTitle: row.selectedTitle ? (TITLE_DEFS[row.selectedTitle]?.label || '') : '',
+    dynamicBadge: row.dynamicBadge
+  }));
+  return {
+    rows,
+    currentUserRank: currentUserId ? snapshot.rankByUserId.get(currentUserId) || null : null,
+    totalUsers: snapshot.rows.length
+  };
+}
+
+function dynamicBadgeForUser(userId) {
+  const rank = userRankFromLeaderboard(userId);
+  return leaderboardBadgeForRank(rank);
+}
+
+function ensureHeadToHeadState(user) {
+  if (!user) return;
+  if (!user.headToHead || typeof user.headToHead !== 'object' || Array.isArray(user.headToHead)) {
+    user.headToHead = {};
+  }
+}
+
+function recordHeadToHead(winnerId, loserId) {
+  const winner = getUserById(winnerId);
+  const loser = getUserById(loserId);
+  if (!winner || !loser) return;
+  ensureHeadToHeadState(winner);
+  ensureHeadToHeadState(loser);
+  const winRow = winner.headToHead[loserId] || { wins: 0, losses: 0 };
+  const loseRow = loser.headToHead[winnerId] || { wins: 0, losses: 0 };
+  winRow.wins = Math.max(0, Math.floor(Number(winRow.wins) || 0) + 1);
+  loseRow.losses = Math.max(0, Math.floor(Number(loseRow.losses) || 0) + 1);
+  winner.headToHead[loserId] = winRow;
+  loser.headToHead[winnerId] = loseRow;
+}
+
+function updateDailyWinStreak(user, eventIso = nowIso()) {
+  if (!user) return;
+  const today = String(eventIso || nowIso()).slice(0, 10);
+  const yesterday = previousUtcDayIso(eventIso || nowIso());
+  const last = user.lastDailyWinDate ? String(user.lastDailyWinDate).slice(0, 10) : null;
+  if (last === today) return;
+  if (last === yesterday) {
+    user.dailyWinStreakCount = Math.max(1, Math.floor(Number(user.dailyWinStreakCount) || 0) + 1);
+  } else {
+    user.dailyWinStreakCount = 1;
+  }
+  user.lastDailyWinDate = today;
+}
+
+function awardXp(user, amount) {
+  if (!user) return 0;
+  const gain = Math.max(0, Math.floor(Number(amount) || 0));
+  if (gain <= 0) return Math.max(0, Math.floor(Number(user.xp) || 0));
+  user.xp = Math.max(0, Math.floor(Number(user.xp) || 0) + gain);
+  invalidateLeaderboardCache();
+  return user.xp;
+}
+
+function selectedTitleLabelForUser(user) {
+  const key = normalizeTitleKey(user?.selectedTitle);
+  return key ? TITLE_DEFS[key]?.label || '' : '';
+}
+
 function normalizeUsername(username) {
   return String(username || '').trim().toLowerCase();
 }
@@ -659,6 +972,15 @@ function avatarUrl(style, seed) {
 
 function sanitizeUser(user) {
   const streak = freeClaimMeta(user);
+  const levelMeta = levelProgressFromXp(user?.xp || 0);
+  const rank = userRankFromLeaderboard(user?.id);
+  const dynamicBadge = dynamicBadgeForUser(user?.id);
+  const unlockedTitles = (Array.isArray(user?.unlockedTitles) ? user.unlockedTitles : [])
+    .map((titleKey) => normalizeTitleKey(titleKey))
+    .filter(Boolean);
+  const selectedTitleKey = normalizeTitleKey(user?.selectedTitle);
+  const selectedTitle = selectedTitleKey ? TITLE_DEFS[selectedTitleKey]?.label || '' : '';
+  const customStatText = sanitizeCustomStatText(user?.customStatText || '');
   return {
     id: user.id,
     username: user.username,
@@ -674,7 +996,26 @@ function sanitizeUser(user) {
     selectedBet: user.selectedBet || BASE_BET,
     hasClaimedFree100: Boolean(user.lastStreakClaimAt || user.lastFreeClaimAt),
     streakCount: streak.streakCount,
-    nextStreakReward: streak.nextReward
+    nextStreakReward: streak.nextReward,
+    xp: levelMeta.xp,
+    level: levelMeta.level,
+    xpToNextLevel: levelMeta.xpToNextLevel,
+    levelProgress: levelMeta.progress,
+    currentLevelXp: levelMeta.currentLevelXp,
+    levelSpanXp: levelMeta.levelSpanXp,
+    leaderboardRank: rank,
+    dynamicBadge,
+    pvpWins: Math.max(0, Math.floor(Number(user?.pvpWins) || 0)),
+    pvpLosses: Math.max(0, Math.floor(Number(user?.pvpLosses) || 0)),
+    dailyWinStreakCount: Math.max(0, Math.floor(Number(user?.dailyWinStreakCount) || 0)),
+    lastDailyWinDate: user?.lastDailyWinDate || null,
+    currentMatchWinStreak: Math.max(0, Math.floor(Number(user?.currentMatchWinStreak) || 0)),
+    bestMatchWinStreak: Math.max(0, Math.floor(Number(user?.bestMatchWinStreak) || 0)),
+    highRollerMatchCount: Math.max(0, Math.floor(Number(user?.highRollerMatchCount) || 0)),
+    unlockedTitles,
+    selectedTitleKey,
+    selectedTitle,
+    customStatText
   };
 }
 
@@ -969,6 +1310,10 @@ function buildFriendsPayload(user) {
     .filter(Boolean)
     .map((friend) => ({
       ...sanitizeUser(friend),
+      headToHead: {
+        wins: Math.max(0, Math.floor(Number(user?.headToHead?.[friend.id]?.wins) || 0)),
+        losses: Math.max(0, Math.floor(Number(user?.headToHead?.[friend.id]?.losses) || 0))
+      },
       online: Boolean(activeSessions.get(friend.id)),
       presence: isUserInActiveMatch(friend.id) ? 'in_match' : activeSessions.get(friend.id) ? 'online' : 'offline'
     }));
@@ -1018,7 +1363,10 @@ function setParticipantChips(match, playerId, chips) {
     return;
   }
   const user = getUserById(playerId);
-  if (user) user.chips = safe;
+  if (user) {
+    user.chips = safe;
+    invalidateLeaderboardCache();
+  }
 }
 
 function canAffordIncrement(match, playerId, amount) {
@@ -1039,6 +1387,9 @@ function appendBetHistory(user, entry) {
 
 function matchHistoryModeLabel(match) {
   if (!match) return 'Challenge PvP';
+  if (String(match.matchType || '').toUpperCase() === 'HIGH_ROLLER') {
+    return isBotMatch(match) ? 'Bot High Roller' : 'High Roller PvP';
+  }
   if (match.matchType === 'bot') {
     return isPracticeMatch(match) ? 'Bot Practice' : 'Bot Real';
   }
@@ -1057,6 +1408,7 @@ function creditUserBankroll(user, rewardChips) {
   if (!user) return 0;
   const delta = Math.max(0, Math.floor(Number(rewardChips) || 0));
   user.chips = Math.max(0, Math.floor(Number(user.chips) || 0) + delta);
+  invalidateLeaderboardCache();
   return user.chips;
 }
 
@@ -1201,6 +1553,12 @@ function clearRoundPhaseTimer(matchId) {
 function buildClientState(match, viewerId) {
   const round = match.round;
   const betLimits = getMatchBetLimits(match);
+  const negotiationEnabled = isBetNegotiationEnabled(match);
+  const negotiation = negotiationEnabled ? ensureBetNegotiation(match) : null;
+  const opponentId = nextPlayerId(match, viewerId);
+  const yourProposal = negotiation ? Number(negotiation.proposalsByPlayerId?.[viewerId]) || null : null;
+  const opponentProposal = negotiation ? Number(negotiation.proposalsByPlayerId?.[opponentId]) || null : null;
+  const agreedAmount = negotiation ? Number(negotiation.agreedAmount) || null : null;
   const players = {};
   const revealAllTotals =
     match.phase === PHASES.ROUND_RESOLVE ||
@@ -1250,6 +1608,7 @@ function buildClientState(match, viewerId) {
     participants: match.participants,
     mode: match.mode || (isPracticeMatch(match) ? 'practice' : 'real'),
     isPractice: isPracticeMatch(match),
+    highRoller: String(match?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(match?.highRoller),
     quickPlayBucket: normalizeQuickPlayBucket(match.quickPlayBucket),
     roundNumber: match.roundNumber,
     phase: match.phase,
@@ -1264,10 +1623,27 @@ function buildClientState(match, viewerId) {
     canEditBet:
       match.phase === PHASES.ROUND_INIT &&
       !normalizeQuickPlayBucket(match.quickPlayBucket) &&
-      viewerId === match.betControllerId &&
+      (negotiationEnabled || viewerId === match.betControllerId) &&
       !round.betConfirmedByPlayer?.[viewerId],
-    canConfirmBet: match.phase === PHASES.ROUND_INIT && !round.betConfirmedByPlayer?.[viewerId],
+    canConfirmBet:
+      match.phase === PHASES.ROUND_INIT &&
+      !round.betConfirmedByPlayer?.[viewerId] &&
+      (!negotiationEnabled || Number.isFinite(opponentProposal) || Number.isFinite(agreedAmount)),
     betConfirmedByPlayer: round.betConfirmedByPlayer,
+    betNegotiation: negotiationEnabled
+      ? {
+          enabled: true,
+          status: negotiation?.status || 'negotiating',
+          yourProposal,
+          opponentProposal,
+          agreedAmount,
+          yourAccepted: Boolean(negotiation?.acceptedByPlayerId?.[viewerId]),
+          opponentAccepted: Boolean(negotiation?.acceptedByPlayerId?.[opponentId]),
+          lastActionBy: negotiation?.lastActionBy || null,
+          lastActionType: negotiation?.lastActionType || null,
+          lastActionAt: negotiation?.lastActionAt || null
+        }
+      : { enabled: false, status: 'disabled', yourProposal: null, opponentProposal: null, agreedAmount: null },
     minBet: betLimits.min,
     maxDoublesPerHand: RULES.MAX_DOUBLES_PER_HAND,
     maxBetCap: betLimits.max,
@@ -1297,6 +1673,9 @@ function serializeMatchFor(match, viewerId) {
 }
 
 function pushMatchState(match) {
+  if (match && Array.isArray(match.playerIds)) {
+    match.participants = buildParticipants(match.playerIds, match.bot?.difficultyById || {});
+  }
   syncAfkTurnTimer(match);
   for (const pid of match.playerIds) {
     const socketId = activeSessions.get(pid);
@@ -1642,6 +2021,7 @@ function startRound(match) {
       [p2]: false
     },
     pendingPressure: null,
+    betNegotiation: null,
     botPacing: { firstActionDoneById: {} },
     resultChoiceByPlayer: {},
     firstActionPlayerId: null,
@@ -1661,6 +2041,10 @@ function startRound(match) {
   clearRoundPhaseTimer(match.id);
   match.phase = PHASES.ROUND_INIT;
   match.roundNumber += 1;
+
+  if (isBetNegotiationEnabled(match)) {
+    ensureBetNegotiation(match);
+  }
 
   const u1 = getUserById(p1);
   const u2 = getUserById(p2);
@@ -1786,6 +2170,10 @@ function resolveRound(match) {
   const b = match.round.players[bId];
   const userA = getUserById(aId);
   const userB = getUserById(bId);
+  const levelBefore = {
+    [aId]: levelFromXp(userA?.xp || 0),
+    [bId]: levelFromXp(userB?.xp || 0)
+  };
   const bankrollBefore = {
     [aId]: getParticipantChips(match, aId),
     [bId]: getParticipantChips(match, bId)
@@ -2013,6 +2401,74 @@ function resolveRound(match) {
     if (userA) userA.stats.roundsLost += 1;
   }
 
+  const pvpMatch = !isBotMatch(match);
+  const winnerId = netA > 0 ? aId : netA < 0 ? bId : null;
+  const loserId = netA > 0 ? bId : netA < 0 ? aId : null;
+  const winnerUser = winnerId ? getUserById(winnerId) : null;
+  const loserUser = loserId ? getUserById(loserId) : null;
+
+  if (winnerUser) {
+    winnerUser.currentMatchWinStreak = Math.max(0, Math.floor(Number(winnerUser.currentMatchWinStreak) || 0) + 1);
+    winnerUser.bestMatchWinStreak = Math.max(
+      Math.floor(Number(winnerUser.bestMatchWinStreak) || 0),
+      Math.floor(Number(winnerUser.currentMatchWinStreak) || 0)
+    );
+  }
+  if (loserUser) {
+    loserUser.currentMatchWinStreak = 0;
+  }
+  if (!winnerUser && !loserUser) {
+    if (userA) userA.currentMatchWinStreak = 0;
+    if (userB) userB.currentMatchWinStreak = 0;
+  }
+
+  if (pvpMatch && winnerUser && loserUser) {
+    winnerUser.pvpWins = Math.max(0, Math.floor(Number(winnerUser.pvpWins) || 0) + 1);
+    loserUser.pvpLosses = Math.max(0, Math.floor(Number(loserUser.pvpLosses) || 0) + 1);
+    recordHeadToHead(winnerId, loserId);
+    if (realMatch) {
+      updateDailyWinStreak(winnerUser);
+    }
+    const winnerLevelBefore = levelBefore[winnerId] || 1;
+    const loserLevelBefore = levelBefore[loserId] || 1;
+    const winnerBankrollBefore = Math.floor(Number(bankrollBefore[winnerId]) || 0);
+    const loserBankrollBefore = Math.floor(Number(bankrollBefore[loserId]) || 0);
+    if (winnerLevelBefore < loserLevelBefore || winnerBankrollBefore < loserBankrollBefore) {
+      unlockTitle(winnerUser, 'GIANT_KILLER');
+    }
+  }
+
+  if (realMatch) {
+    const xpWin = pvpMatch ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
+    const xpLoss = pvpMatch ? XP_REWARDS.pvpLoss : XP_REWARDS.botLoss;
+    if (netA > 0) {
+      if (userA) awardXp(userA, xpWin);
+      if (userB) awardXp(userB, xpLoss);
+    } else if (netA < 0) {
+      if (userB) awardXp(userB, xpWin);
+      if (userA) awardXp(userA, xpLoss);
+    } else {
+      // Push still grants small progression to reduce churn.
+      if (userA) awardXp(userA, Math.floor(xpLoss / 2));
+      if (userB) awardXp(userB, Math.floor(xpLoss / 2));
+      if (userA) userA.currentMatchWinStreak = 0;
+      if (userB) userB.currentMatchWinStreak = 0;
+    }
+  }
+
+  const highRollerRound = Math.max(0, Math.floor(Number(match.round?.baseBet) || 0)) >= HIGH_ROLLER_MIN_BET;
+  if (highRollerRound && realMatch) {
+    if (userA) userA.highRollerMatchCount = Math.max(0, Math.floor(Number(userA.highRollerMatchCount) || 0) + 1);
+    if (userB) userB.highRollerMatchCount = Math.max(0, Math.floor(Number(userB.highRollerMatchCount) || 0) + 1);
+  }
+
+  for (const user of [userA, userB]) {
+    if (!user) continue;
+    ensureTitleState(user);
+    if (Math.floor(Number(user.highRollerMatchCount) || 0) >= 10) unlockTitle(user, 'HIGH_ROLLER');
+    if (Math.floor(Number(user.currentMatchWinStreak) || 0) >= 10) unlockTitle(user, 'STREAK_LORD');
+  }
+
   if (realMatch) {
     if (userA) userA.stats.matchesPlayed += 1;
     if (userB) userB.stats.matchesPlayed += 1;
@@ -2128,6 +2584,29 @@ function applyRoundResultChoice(match, playerId, choice) {
   }
 
   return { ok: true, advanced: true, mode: everyoneNext ? 'next' : 'betting' };
+}
+
+function applyDoubleOrNothingChoice(match, playerId) {
+  if (!match || !match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.RESULT) return { error: 'Round result is not ready' };
+  if (!isBotMatch(match)) return { error: 'Double or Nothing is only available in bot matches' };
+
+  const currentBase = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
+  const proposed = currentBase * 2;
+  const betLimits = getMatchBetLimits(match);
+  if (proposed < betLimits.min) return { error: `Double amount must be at least ${betLimits.min}` };
+  if (proposed > betLimits.max) return { error: `Double amount exceeds table max ${betLimits.max}` };
+  const bankroll = getParticipantChips(match, playerId);
+  if (!isPracticeMatch(match) && bankroll < proposed) {
+    return { error: `Need at least ${proposed} chips to double` };
+  }
+
+  if (!match.betSettings) match.betSettings = { selectedBetById: {} };
+  for (const pid of match.playerIds) {
+    match.betSettings.selectedBetById[pid] = proposed;
+  }
+  match.round.baseBet = proposed;
+  return applyRoundResultChoice(match, playerId, 'next');
 }
 
 function appendMatchChatMessage(match, userId, rawMessage) {
@@ -2703,11 +3182,145 @@ function applyPressureDecision(match, playerId, decision) {
   return { ok: true };
 }
 
-function applyBaseBetSelection(match, playerId, amount) {
+function isBetNegotiationEnabled(match) {
+  if (!match) return false;
+  if (match.phase !== PHASES.ROUND_INIT) return false;
+  if (isBotMatch(match)) return false;
+  if (normalizeQuickPlayBucket(match.quickPlayBucket)) return false;
+  if (String(match.matchType || '').toLowerCase() === 'friend_challenge') return false;
+  return true;
+}
+
+function ensureBetNegotiation(match) {
+  if (!isBetNegotiationEnabled(match)) return null;
+  const [p1, p2] = match.playerIds;
+  const limits = getMatchBetLimits(match);
+  const defaultFor = (pid) => {
+    const chips = Math.max(limits.min, getParticipantChips(match, pid));
+    const preferred = match.betSettings?.selectedBetById?.[pid] || match.round.baseBet || BASE_BET;
+    const selected = clampBet(preferred, chips, limits);
+    return Math.max(limits.min, selected);
+  };
+  if (!match.round.betNegotiation || typeof match.round.betNegotiation !== 'object') {
+    const p1Proposal = defaultFor(p1);
+    const p2Proposal = defaultFor(p2);
+    const agreed = p1Proposal === p2Proposal ? p1Proposal : null;
+    match.round.betNegotiation = {
+      status: agreed ? 'agreed' : 'negotiating',
+      proposalsByPlayerId: {
+        [p1]: p1Proposal,
+        [p2]: p2Proposal
+      },
+      acceptedByPlayerId: {
+        [p1]: false,
+        [p2]: false
+      },
+      agreedAmount: agreed,
+      lastActionBy: null,
+      lastActionType: 'init',
+      lastActionAt: nowIso()
+    };
+    match.round.baseBet = agreed || p1Proposal;
+  } else {
+    const negotiation = match.round.betNegotiation;
+    if (!negotiation.proposalsByPlayerId || typeof negotiation.proposalsByPlayerId !== 'object') {
+      negotiation.proposalsByPlayerId = {};
+    }
+    if (!negotiation.acceptedByPlayerId || typeof negotiation.acceptedByPlayerId !== 'object') {
+      negotiation.acceptedByPlayerId = {};
+    }
+    if (!Number.isFinite(Number(negotiation.proposalsByPlayerId[p1]))) {
+      negotiation.proposalsByPlayerId[p1] = defaultFor(p1);
+    }
+    if (!Number.isFinite(Number(negotiation.proposalsByPlayerId[p2]))) {
+      negotiation.proposalsByPlayerId[p2] = defaultFor(p2);
+    }
+    if (typeof negotiation.acceptedByPlayerId[p1] !== 'boolean') negotiation.acceptedByPlayerId[p1] = false;
+    if (typeof negotiation.acceptedByPlayerId[p2] !== 'boolean') negotiation.acceptedByPlayerId[p2] = false;
+    if (typeof negotiation.lastActionType !== 'string') negotiation.lastActionType = 'sync';
+    if (typeof negotiation.lastActionBy !== 'string') negotiation.lastActionBy = null;
+    if (!negotiation.lastActionAt) negotiation.lastActionAt = nowIso();
+    const p1Proposal = Number(negotiation.proposalsByPlayerId[p1]);
+    const p2Proposal = Number(negotiation.proposalsByPlayerId[p2]);
+    if (p1Proposal === p2Proposal) {
+      negotiation.agreedAmount = p1Proposal;
+      if (negotiation.status !== 'locked') negotiation.status = 'agreed';
+      match.round.baseBet = p1Proposal;
+    } else if (negotiation.status !== 'locked') {
+      negotiation.status = 'negotiating';
+      negotiation.agreedAmount = null;
+    }
+  }
+  return match.round.betNegotiation;
+}
+
+function applyBetNegotiationResponse(match, playerId, action, amount = null) {
+  if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.ROUND_INIT) return { error: 'Bet negotiation is only available before dealing' };
+  if (!isBetNegotiationEnabled(match)) return { error: 'Bet negotiation is unavailable for this match' };
+  const negotiation = ensureBetNegotiation(match);
+  const opponentId = nextPlayerId(match, playerId);
+  if (!negotiation) return { error: 'Bet negotiation is unavailable for this match' };
+
+  if (action === 'agree') {
+    return confirmBaseBet(match, playerId);
+  }
+  if (!['raise', 'lower'].includes(action)) {
+    return { error: 'Invalid bet response action' };
+  }
+
+  const betLimits = getMatchBetLimits(match);
+  const bankroll = getParticipantChips(match, playerId);
+  if (bankroll < betLimits.min) return { error: `Need at least ${betLimits.min} chips to negotiate` };
+
+  const baseline =
+    Number(negotiation.proposalsByPlayerId?.[opponentId]) ||
+    Number(negotiation.agreedAmount) ||
+    Number(match.round.baseBet) ||
+    betLimits.min;
+  const selected = clampBet(amount, bankroll || betLimits.min, betLimits);
+  if (selected < betLimits.min) return { error: `Bet must be at least ${betLimits.min}` };
+  if (action === 'raise' && selected <= baseline) return { error: `Raise must be above ${baseline}` };
+  if (action === 'lower' && selected >= baseline) return { error: `Lower must be below ${baseline}` };
+  return applyBaseBetSelection(match, playerId, selected, { responseAction: action });
+}
+
+function resetBetNegotiation(match, playerId) {
+  if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.ROUND_INIT) return { error: 'Bet reset is only available before dealing' };
+  if (!isBetNegotiationEnabled(match)) return { error: 'Bet reset unavailable for this match' };
+  const negotiation = ensureBetNegotiation(match);
+  if (!negotiation) return { error: 'Bet reset unavailable for this match' };
+  const [p1, p2] = match.playerIds;
+  const limits = getMatchBetLimits(match);
+  const resetFor = (pid) => {
+    const chips = Math.max(limits.min, getParticipantChips(match, pid));
+    const preferred = match.betSettings?.selectedBetById?.[pid] || BASE_BET;
+    return Math.max(limits.min, clampBet(preferred, chips, limits));
+  };
+  const p1Amount = resetFor(p1);
+  const p2Amount = resetFor(p2);
+  negotiation.proposalsByPlayerId[p1] = p1Amount;
+  negotiation.proposalsByPlayerId[p2] = p2Amount;
+  negotiation.acceptedByPlayerId[p1] = false;
+  negotiation.acceptedByPlayerId[p2] = false;
+  negotiation.agreedAmount = p1Amount === p2Amount ? p1Amount : null;
+  negotiation.status = negotiation.agreedAmount ? 'agreed' : 'negotiating';
+  negotiation.lastActionBy = playerId;
+  negotiation.lastActionType = 'reset';
+  negotiation.lastActionAt = nowIso();
+  match.round.baseBet = negotiation.agreedAmount || p1Amount;
+  match.round.betConfirmedByPlayer[p1] = false;
+  match.round.betConfirmedByPlayer[p2] = false;
+  return { ok: true, negotiation };
+}
+
+function applyBaseBetSelection(match, playerId, amount, options = {}) {
   if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
   if (match.phase !== PHASES.ROUND_INIT) return { error: 'Bet can only be changed before cards are dealt' };
   if (normalizeQuickPlayBucket(match.quickPlayBucket)) return { error: 'Quick Play bucket bet is fixed for this match' };
-  if (playerId !== match.betControllerId) return { error: 'Only the round owner can set base bet' };
+  const negotiationEnabled = isBetNegotiationEnabled(match);
+  if (!negotiationEnabled && playerId !== match.betControllerId) return { error: 'Only the round owner can set base bet' };
   if (match.round.betConfirmedByPlayer?.[playerId]) return { error: 'Bet already confirmed for this round' };
   const betLimits = getMatchBetLimits(match);
   const chips = getParticipantChips(match, playerId);
@@ -2722,6 +3335,25 @@ function applyBaseBetSelection(match, playerId, amount) {
     if (user) user.selectedBet = selected;
   }
 
+  if (negotiationEnabled) {
+    const negotiation = ensureBetNegotiation(match);
+    const opponentId = nextPlayerId(match, playerId);
+    negotiation.proposalsByPlayerId[playerId] = selected;
+    negotiation.acceptedByPlayerId[playerId] = true;
+    negotiation.acceptedByPlayerId[opponentId] = false;
+    match.round.betConfirmedByPlayer[playerId] = false;
+    match.round.betConfirmedByPlayer[opponentId] = false;
+    negotiation.lastActionBy = playerId;
+    negotiation.lastActionType = options.responseAction || 'propose';
+    negotiation.lastActionAt = nowIso();
+    if (Number(negotiation.proposalsByPlayerId[playerId]) === Number(negotiation.proposalsByPlayerId[opponentId])) {
+      negotiation.agreedAmount = selected;
+      negotiation.status = 'agreed';
+    } else {
+      negotiation.agreedAmount = null;
+      negotiation.status = 'negotiating';
+    }
+  }
   match.round.baseBet = selected;
   scheduleBotBetConfirm(match);
 
@@ -2732,6 +3364,44 @@ function confirmBaseBet(match, playerId) {
   if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
   if (match.phase !== PHASES.ROUND_INIT) return { error: 'Bet confirmation is only available before dealing' };
   if (match.round.betConfirmedByPlayer?.[playerId]) return { ok: true };
+  const negotiationEnabled = isBetNegotiationEnabled(match);
+
+  if (negotiationEnabled) {
+    const negotiation = ensureBetNegotiation(match);
+    const opponentId = nextPlayerId(match, playerId);
+    const opponentProposal = Number(negotiation?.proposalsByPlayerId?.[opponentId]);
+    const agreed = Number(negotiation?.agreedAmount);
+    const betLimits = getMatchBetLimits(match);
+    const targetRaw = Number.isFinite(agreed)
+      ? agreed
+      : Number.isFinite(opponentProposal)
+        ? opponentProposal
+        : Number(match.round.baseBet) || betLimits.min;
+    const target = clampBet(targetRaw, Math.max(getParticipantChips(match, playerId), betLimits.min), betLimits);
+    if (target < betLimits.min) return { error: `Bet must be at least ${betLimits.min}` };
+    negotiation.proposalsByPlayerId[playerId] = target;
+    negotiation.acceptedByPlayerId[playerId] = true;
+    negotiation.lastActionBy = playerId;
+    negotiation.lastActionType = 'agree';
+    negotiation.lastActionAt = nowIso();
+    match.round.betConfirmedByPlayer[playerId] = true;
+
+    const p1 = match.playerIds[0];
+    const p2 = match.playerIds[1];
+    const p1Proposal = Number(negotiation.proposalsByPlayerId[p1]);
+    const p2Proposal = Number(negotiation.proposalsByPlayerId[p2]);
+    const otherId = nextPlayerId(match, playerId);
+    const bothConfirmed = Boolean(match.round.betConfirmedByPlayer[playerId] && match.round.betConfirmedByPlayer[otherId]);
+    if (bothConfirmed && Number.isFinite(p1Proposal) && Number.isFinite(p2Proposal) && p1Proposal === p2Proposal) {
+      negotiation.agreedAmount = p1Proposal;
+      negotiation.status = 'locked';
+      match.round.baseBet = p1Proposal;
+      maybeBeginRoundAfterBetConfirm(match);
+      return { ok: true, agreed: true, amount: p1Proposal };
+    }
+    negotiation.status = p1Proposal === p2Proposal ? 'agreed' : 'negotiating';
+    return { ok: true, waiting: true };
+  }
 
   const betLimits = getMatchBetLimits(match);
   const selected = clampBet(
@@ -2757,10 +3427,14 @@ function createMatch(lobby, options = {}) {
   const mode = resolveMatchMode(stakeType);
   const isPractice = mode === 'practice';
   const quickPlayBucket = normalizeQuickPlayBucket(options.quickPlayBucket || lobby.quickPlayBucket);
+  const highRoller = String(options.matchType || lobby.matchType || '').toUpperCase() === 'HIGH_ROLLER' || lobby.type === 'high_roller';
+  const resolvedMatchType = highRoller ? 'HIGH_ROLLER' : (lobby.type || 'lobby');
   const botId = playerIds.find((pid) => isBotPlayer(pid));
   const botDifficulty = botId ? options.botDifficultyById?.[botId] || 'normal' : null;
   const betLimits = quickPlayBucket
     ? { min: quickPlayBucket, max: quickPlayBucket }
+    : highRoller
+      ? { min: HIGH_ROLLER_MIN_BET, max: MAX_BET_HARD_CAP }
     : botDifficulty
       ? getBetLimitsForDifficulty(botDifficulty)
       : { min: MIN_BET, max: MAX_BET_CAP };
@@ -2782,7 +3456,8 @@ function createMatch(lobby, options = {}) {
   const match = {
     id: nanoid(10),
     lobbyId: lobby.id,
-    matchType: lobby.type || 'lobby',
+    matchType: resolvedMatchType,
+    highRoller,
     quickPlayBucket: quickPlayBucket || null,
     participants: buildParticipants(playerIds, options.botDifficultyById || {}),
     playerIds,
@@ -2894,6 +3569,7 @@ function leaveMatchByForfeit(match, leaverId) {
         const additionalLoss = Math.max(0, Math.min(Math.floor(Number(leaverUser.chips) || 0), expectedLoss - committed));
         if (additionalLoss > 0) {
           leaverUser.chips = Math.max(0, leaverUser.chips - additionalLoss);
+          invalidateLeaderboardCache();
           charged = true;
           chargedAmount = additionalLoss;
         }
@@ -2917,6 +3593,7 @@ function leaveMatchByForfeit(match, leaverId) {
       const award = calculateForfeitLossAmount(leaverUser.chips, exposure, match.round?.baseBet || BASE_BET);
       leaverUser.chips = Math.max(0, leaverUser.chips - award);
       opponentUser.chips += award;
+      invalidateLeaderboardCache();
       appendBetHistory(leaverUser, { mode: modeLabel, bet: award, result: 'Forfeit', net: -award, notes: 'left match' });
       appendBetHistory(opponentUser, { mode: modeLabel, bet: award, result: 'Win', net: award, notes: 'opponent left' });
       emitUserUpdate(leaverUser.id);
@@ -2968,7 +3645,19 @@ function buildNewUser(username) {
     betHistory: [],
     lastStreakClaimAt: null,
     streakCount: 0,
-    skillChallenges: []
+    skillChallenges: [],
+    xp: 0,
+    pvpWins: 0,
+    pvpLosses: 0,
+    currentMatchWinStreak: 0,
+    bestMatchWinStreak: 0,
+    dailyWinStreakCount: 0,
+    lastDailyWinDate: null,
+    highRollerMatchCount: 0,
+    unlockedTitles: [],
+    selectedTitle: '',
+    customStatText: '',
+    headToHead: {}
   };
   refreshChallengesForUser(user, true);
   ensureSkillChallenges(user);
@@ -2984,6 +3673,7 @@ app.post('/api/auth/register', async (req, res) => {
 
   const user = buildNewUser(cleanUsername);
   db.data.users.push(user);
+  invalidateLeaderboardCache();
   await db.write();
   return res.json({ ok: true, userId: user.id, authToken: user.authToken, pin: user.pin, user: sanitizeSelfUser(user) });
 });
@@ -3026,6 +3716,7 @@ app.post('/api/register', async (req, res) => {
   if (getUserByUsername(cleanUsername)) return res.status(409).json({ error: 'Username already exists' });
   const user = buildNewUser(cleanUsername);
   db.data.users.push(user);
+  invalidateLeaderboardCache();
   await db.write();
   return res.json({ token: issueToken(user), user: sanitizeSelfUser(user), authToken: user.authToken, pin: user.pin });
 });
@@ -3073,6 +3764,10 @@ app.get('/api/me', authMiddleware, async (req, res) => {
     freeClaimNextAt: freeClaim.nextAt,
     streakCount: freeClaim.streakCount,
     nextStreakReward: freeClaim.nextReward,
+    overallPvpRecord: {
+      wins: Math.max(0, Math.floor(Number(req.user?.pvpWins) || 0)),
+      losses: Math.max(0, Math.floor(Number(req.user?.pvpLosses) || 0))
+    },
     challenges: challengeData.challenges,
     challengeList: challengeData.challengeList,
     challengeResets: challengeData.challengeResets,
@@ -3084,6 +3779,66 @@ app.get('/api/me', authMiddleware, async (req, res) => {
   });
 });
 
+app.get('/api/leaderboard/chips', authMiddleware, async (req, res) => {
+  const limit = Math.max(1, Math.min(LEADERBOARD_MAX_LIMIT, Math.floor(Number(req.query?.limit) || LEADERBOARD_DEFAULT_LIMIT)));
+  const offset = Math.max(0, Math.floor(Number(req.query?.offset) || 0));
+
+  if (hasDatabaseUrl()) {
+    try {
+      const pool = await getPool();
+      const listResult = await pool.query(
+        `
+          SELECT id, username, bankroll AS chips, rank
+          FROM (
+            SELECT id, username, bankroll,
+              RANK() OVER (ORDER BY bankroll DESC, username ASC) AS rank
+            FROM users
+          ) ranked
+          ORDER BY rank ASC
+          LIMIT $1 OFFSET $2
+        `,
+        [limit, offset]
+      );
+      const meResult = await pool.query(
+        `
+          SELECT rank
+          FROM (
+            SELECT id, RANK() OVER (ORDER BY bankroll DESC, username ASC) AS rank
+            FROM users
+          ) ranked
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [req.user.id]
+      );
+      const rows = listResult.rows.map((row) => {
+        const local = getUserById(row.id);
+        const levelMeta = levelProgressFromXp(local?.xp || 0);
+        const dynamicBadge = leaderboardBadgeForRank(row.rank);
+        return {
+          userId: row.id,
+          username: row.username,
+          chips: Math.max(0, Math.floor(Number(row.chips) || 0)),
+          rank: Math.max(1, Math.floor(Number(row.rank) || 1)),
+          level: levelMeta.level,
+          selectedTitle: selectedTitleLabelForUser(local),
+          dynamicBadge
+        };
+      });
+      return res.json({
+        rows,
+        currentUserRank: meResult.rows[0]?.rank ? Math.max(1, Math.floor(Number(meResult.rows[0].rank) || 1)) : null,
+        totalUsers: db.data.users.length
+      });
+    } catch {
+      // Fallback to in-memory snapshot if SQL ranking is temporarily unavailable.
+    }
+  }
+
+  const payload = leaderboardPayload(req.user.id, limit, offset);
+  return res.json(payload);
+});
+
 app.put('/api/profile', authMiddleware, async (req, res) => {
   const { avatar, avatarStyle, avatarSeed, bio } = req.body || {};
   if (typeof avatarStyle === 'string') req.user.avatarStyle = avatarStyle.slice(0, 80);
@@ -3093,6 +3848,36 @@ app.put('/api/profile', authMiddleware, async (req, res) => {
   if (typeof bio === 'string') req.user.bio = bio.slice(0, 300);
   await db.write();
   return res.json({ user: sanitizeSelfUser(req.user) });
+});
+
+app.get('/api/profile', authMiddleware, (req, res) => {
+  return res.json({ user: sanitizeSelfUser(req.user) });
+});
+
+app.patch('/api/profile/custom-stat', authMiddleware, async (req, res) => {
+  const customStatText = sanitizeCustomStatText(req.body?.customStatText || req.body?.text || '');
+  req.user.customStatText = customStatText;
+  invalidateLeaderboardCache();
+  await db.write();
+  return res.json({ ok: true, customStatText, user: sanitizeSelfUser(req.user) });
+});
+
+app.patch('/api/profile/title', authMiddleware, async (req, res) => {
+  ensureTitleState(req.user);
+  const requested = normalizeTitleKey(req.body?.selectedTitle || req.body?.titleKey || '');
+  if (!requested) {
+    req.user.selectedTitle = '';
+    invalidateLeaderboardCache();
+    await db.write();
+    return res.json({ ok: true, selectedTitle: '', user: sanitizeSelfUser(req.user) });
+  }
+  if (!req.user.unlockedTitles.includes(requested)) {
+    return res.status(403).json({ error: 'Title is not unlocked yet' });
+  }
+  req.user.selectedTitle = requested;
+  invalidateLeaderboardCache();
+  await db.write();
+  return res.json({ ok: true, selectedTitle: requested, user: sanitizeSelfUser(req.user) });
 });
 
 app.get('/api/friends', authMiddleware, (req, res) => {
@@ -3152,6 +3937,24 @@ app.post('/api/friends/add', authMiddleware, async (req, res) => {
 
 app.get('/api/friends/list', authMiddleware, (req, res) => {
   return res.json(buildFriendsPayload(req.user));
+});
+
+app.get('/api/friends/headtohead', authMiddleware, (req, res) => {
+  const payload = {};
+  for (const friendId of req.user.friends || []) {
+    const row = req.user?.headToHead?.[friendId] || {};
+    payload[friendId] = {
+      wins: Math.max(0, Math.floor(Number(row.wins) || 0)),
+      losses: Math.max(0, Math.floor(Number(row.losses) || 0))
+    };
+  }
+  return res.json({
+    headToHead: payload,
+    overallPvpRecord: {
+      wins: Math.max(0, Math.floor(Number(req.user?.pvpWins) || 0)),
+      losses: Math.max(0, Math.floor(Number(req.user?.pvpLosses) || 0))
+    }
+  });
 });
 
 app.post('/api/friends/request', authMiddleware, async (req, res) => {
@@ -3389,10 +4192,19 @@ app.post('/api/friends/challenge/respond', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
+  const requestedMatchType = String(req.body?.matchType || '').toUpperCase();
+  const highRoller = requestedMatchType === 'HIGH_ROLLER';
   const hasStakeTypeInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'stakeType');
-  const resolvedStakeType = hasStakeTypeInput ? resolveStakeType(req.body?.stakeType) : 'FAKE';
+  const resolvedStakeType = highRoller ? 'REAL' : (hasStakeTypeInput ? resolveStakeType(req.body?.stakeType) : 'FAKE');
+  if (highRoller && Math.floor(Number(req.user?.chips) || 0) < HIGH_ROLLER_MIN_BET) {
+    return res.status(400).json({ error: `Need at least ${HIGH_ROLLER_MIN_BET} chips for High Roller lobbies` });
+  }
   const existing = db.data.lobbies.find(
-    (l) => l.ownerId === req.user.id && l.status === 'waiting' && l.type !== 'bot'
+    (l) =>
+      l.ownerId === req.user.id &&
+      l.status === 'waiting' &&
+      l.type !== 'bot' &&
+      (highRoller ? String(l.matchType || '').toUpperCase() === 'HIGH_ROLLER' : String(l.matchType || '').toUpperCase() !== 'HIGH_ROLLER')
   );
   if (existing) {
     if (hasStakeTypeInput && existing.stakeType !== resolvedStakeType) {
@@ -3410,6 +4222,9 @@ app.post('/api/lobbies/create', authMiddleware, async (req, res) => {
     ownerId: req.user.id,
     opponentId: null,
     status: 'waiting',
+    type: highRoller ? 'high_roller' : 'lobby',
+    matchType: highRoller ? 'HIGH_ROLLER' : 'lobby',
+    highRoller,
     invited: [],
     stakeType: resolvedStakeType,
     createdAt: nowIso()
@@ -3452,6 +4267,9 @@ app.post('/api/lobbies/join', authMiddleware, async (req, res) => {
   if (!lobby || lobby.status === 'cancelled' || lobby.status === 'closed') {
     return res.status(410).json({ error: 'Lobby no longer exists' });
   }
+  if (String(lobby.matchType || '').toUpperCase() === 'HIGH_ROLLER' && Math.floor(Number(req.user?.chips) || 0) < HIGH_ROLLER_MIN_BET) {
+    return res.status(400).json({ error: `Need at least ${HIGH_ROLLER_MIN_BET} chips to join this High Roller lobby` });
+  }
   if (lobby.ownerId === req.user.id) return res.status(400).json({ error: 'Cannot join your own lobby' });
   if (lobby.status !== 'waiting') return res.status(409).json({ error: 'Lobby full' });
   if (lobby.opponentId && lobby.opponentId !== req.user.id) return res.status(409).json({ error: 'Lobby full' });
@@ -3487,19 +4305,33 @@ app.get('/api/lobbies/:id', authMiddleware, (req, res) => {
 
 app.post('/api/lobbies/invite', authMiddleware, async (req, res) => {
   const { username } = req.body || {};
+  const requestedMatchType = String(req.body?.matchType || '').toUpperCase();
+  const highRoller = requestedMatchType === 'HIGH_ROLLER';
   const hasStakeTypeInput = Object.prototype.hasOwnProperty.call(req.body || {}, 'stakeType');
-  const resolvedStakeType = hasStakeTypeInput ? resolveStakeType(req.body?.stakeType) : 'FAKE';
+  const resolvedStakeType = highRoller ? 'REAL' : (hasStakeTypeInput ? resolveStakeType(req.body?.stakeType) : 'FAKE');
+  if (highRoller && Math.floor(Number(req.user?.chips) || 0) < HIGH_ROLLER_MIN_BET) {
+    return res.status(400).json({ error: `Need at least ${HIGH_ROLLER_MIN_BET} chips for High Roller invites` });
+  }
   const friend = getUserByUsername(username || '');
   if (!friend) return res.status(404).json({ error: 'Friend not found' });
   if (!req.user.friends.includes(friend.id)) return res.status(403).json({ error: 'Can only invite friends' });
 
-  let lobby = db.data.lobbies.find((l) => l.ownerId === req.user.id && l.status === 'waiting' && l.type !== 'bot');
+  let lobby = db.data.lobbies.find(
+    (l) =>
+      l.ownerId === req.user.id &&
+      l.status === 'waiting' &&
+      l.type !== 'bot' &&
+      (highRoller ? String(l.matchType || '').toUpperCase() === 'HIGH_ROLLER' : String(l.matchType || '').toUpperCase() !== 'HIGH_ROLLER')
+  );
   if (!lobby) {
     lobby = {
       id: normalizeLobbyCode(nanoid(8)),
       ownerId: req.user.id,
       opponentId: null,
       status: 'waiting',
+      type: highRoller ? 'high_roller' : 'lobby',
+      matchType: highRoller ? 'HIGH_ROLLER' : 'lobby',
+      highRoller,
       invited: [],
       stakeType: resolvedStakeType,
       createdAt: nowIso()
@@ -3524,10 +4356,14 @@ app.post('/api/lobbies/invite', authMiddleware, async (req, res) => {
 
 async function createBotPracticeLobby(req, res) {
   const { difficulty, stakeType } = req.body || {};
+  const highRoller = String(req.body?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(req.body?.highRoller);
   if (!['easy', 'medium', 'normal'].includes(difficulty)) {
     return res.status(400).json({ error: 'Difficulty must be easy, medium, or normal' });
   }
-  const resolvedStake = resolveStakeType(stakeType);
+  const resolvedStake = highRoller ? 'REAL' : resolveStakeType(stakeType);
+  if (highRoller && Math.floor(Number(req.user?.chips) || 0) < HIGH_ROLLER_MIN_BET) {
+    return res.status(400).json({ error: `Need at least ${HIGH_ROLLER_MIN_BET} chips for High Roller mode` });
+  }
 
   const botId = `bot:${difficulty}:${nanoid(6)}`;
   const lobby = {
@@ -3536,6 +4372,8 @@ async function createBotPracticeLobby(req, res) {
     opponentId: botId,
     status: 'full',
     type: 'bot',
+    matchType: highRoller ? 'HIGH_ROLLER' : 'bot',
+    highRoller,
     stakeType: resolvedStake,
     botDifficulty: difficulty,
     createdAt: nowIso()
@@ -3658,6 +4496,7 @@ app.post('/api/free-claim', authMiddleware, async (req, res) => {
   req.user.lastStreakClaimAt = now;
   req.user.lastFreeClaimAt = now;
   req.user.chips += reward;
+  invalidateLeaderboardCache();
   await db.write();
   emitUserUpdate(req.user.id);
   const next = freeClaimMeta(req.user);
@@ -3696,6 +4535,7 @@ app.post('/api/daily-claim', authMiddleware, async (req, res) => {
 
   req.user.lastDailyClaimAt = nowIso();
   req.user.chips += DAILY_REWARD;
+  invalidateLeaderboardCache();
   await db.write();
 
   return res.json({ reward: DAILY_REWARD, chips: req.user.chips, claimedAt: req.user.lastDailyClaimAt });
@@ -3739,9 +4579,20 @@ app.post('/api/challenges/claim', authMiddleware, async (req, res) => {
   target.claimed = true;
   target.claimedAt = nowIso();
   const bankroll = creditUserBankroll(req.user, target.rewardChips);
+  awardXp(req.user, XP_REWARDS.challenge);
+  ensureTitleState(req.user);
+  if (Math.floor(Number(req.user.currentMatchWinStreak) || 0) >= 10) unlockTitle(req.user, 'STREAK_LORD');
   await db.write();
   emitUserUpdate(req.user.id);
-  return res.json({ id: targetId, reward: target.rewardChips, chips: bankroll, bankroll, claimedAt: target.claimedAt });
+  return res.json({
+    id: targetId,
+    reward: target.rewardChips,
+    chips: bankroll,
+    bankroll,
+    claimedAt: target.claimedAt,
+    xp: Math.max(0, Math.floor(Number(req.user.xp) || 0)),
+    level: levelFromXp(req.user.xp || 0)
+  });
 });
 
 app.get('/api/patch-notes', async (_req, res) => {
@@ -3883,6 +4734,30 @@ io.on('connection', (socket) => {
     return null;
   });
 
+  socket.on('match:respondBet', (payload = {}) => {
+    const { matchId, action, amount } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    const result = applyBetNegotiationResponse(match, userId, String(action || '').toLowerCase(), amount);
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    scheduleBotBetConfirm(match);
+    return null;
+  });
+
+  socket.on('match:resetBetNegotiation', (payload = {}) => {
+    const { matchId } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    const result = resetBetNegotiation(match, userId);
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    scheduleBotBetConfirm(match);
+    return null;
+  });
+
   socket.on('match:confirmBet', (payload = {}) => {
     const { matchId } = payload;
     const match = matches.get(matchId);
@@ -3915,6 +4790,20 @@ io.on('connection', (socket) => {
     if (!match) return socket.emit('match:error', { error: 'Match not found' });
     if (!match.playerIds.includes(userId)) return socket.emit('match:error', { error: 'Unauthorized' });
     const result = applyRoundResultChoice(match, userId, 'betting');
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    scheduleBotBetConfirm(match);
+    scheduleBotTurn(match);
+    return null;
+  });
+
+  socket.on('match:doubleOrNothing', (payload = {}) => {
+    const { matchId } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    if (!match.playerIds.includes(userId)) return socket.emit('match:error', { error: 'Unauthorized' });
+    const result = applyDoubleOrNothingChoice(match, userId);
     if (result.error) return socket.emit('match:error', result);
     pushMatchState(match);
     db.write();
@@ -4015,6 +4904,7 @@ io.on('connection', (socket) => {
           const penalty = Math.min(100, loser.chips);
           loser.chips -= penalty;
           winner.chips += penalty;
+          invalidateLeaderboardCache();
           winner.stats.roundsWon += 1;
           loser.stats.roundsLost += 1;
           db.write();
