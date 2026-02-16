@@ -536,6 +536,21 @@ function challengeResetText(tier) {
   return `Resets in ${formatCooldown(remaining)}`;
 }
 
+function claimableChallengesCount() {
+  const groups = state.challenges || {};
+  let count = 0;
+  for (const tier of ['hourly', 'daily', 'weekly', 'skill']) {
+    const list = Array.isArray(groups[tier]) ? groups[tier] : [];
+    for (const challenge of list) {
+      const progress = Math.max(0, Math.floor(Number(challenge?.progress) || 0));
+      const goal = Math.max(1, Math.floor(Number(challenge?.goal) || 1));
+      const claimed = Boolean(challenge?.claimed || challenge?.claimedAt);
+      if (!claimed && progress >= goal) count += 1;
+    }
+  }
+  return count;
+}
+
 function updateChallengeResetCountdowns() {
   const prev = { ...state.challengeResetRemainingMs };
   const next = { hourly: 0, daily: 0, weekly: 0 };
@@ -2048,6 +2063,10 @@ function syncRoundResultModal() {
 function renderTopbar(title = 'Blackjack Battle') {
   const bankroll = Number.isFinite(state.bankrollDisplay) ? state.bankrollDisplay : state.me?.chips;
   const chipText = Number.isFinite(bankroll) ? Number(bankroll).toLocaleString() : '0';
+  const claimableCount = claimableChallengesCount();
+  const challengeBadge = claimableCount > 0
+    ? `<span class="nav-pill-badge" aria-label="${claimableCount} claimable challenges">${claimableCount > 9 ? '9+' : claimableCount}</span>`
+    : '';
   return `
     <div class="card topbar">
       <div class="topbar-left">
@@ -2059,7 +2078,9 @@ function renderTopbar(title = 'Blackjack Battle') {
         <button data-go="profile" class="nav-pill ${state.view === 'profile' ? 'nav-active' : ''}">Profile</button>
         <button data-go="friends" class="nav-pill ${state.view === 'friends' ? 'nav-active' : ''}">Friends</button>
         <button data-go="lobbies" class="nav-pill ${state.view === 'lobbies' ? 'nav-active' : ''}">Lobbies</button>
-        <button data-go="challenges" class="nav-pill ${state.view === 'challenges' ? 'nav-active' : ''}">Challenges</button>
+        <button data-go="challenges" class="nav-pill nav-pill-challenges ${state.view === 'challenges' ? 'nav-active' : ''}">
+          <span>Challenges</span>${challengeBadge}
+        </button>
         <button data-go="rules" class="nav-pill ${state.view === 'rules' ? 'nav-active' : ''}">Rules</button>
       </div>
       <div class="topbar-right nav">

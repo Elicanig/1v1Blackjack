@@ -2034,29 +2034,145 @@ function legalActionsForHand(hand, playerRoundState = null) {
   return actions;
 }
 
+const BOT_OBSERVATION_FORBIDDEN_KEYS = ['deck', 'shoe', 'remainingDeck', 'fullMatchState', 'opponentHiddenCards'];
+
+function deepFreezeObject(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const key of Object.keys(value)) {
+    deepFreezeObject(value[key]);
+  }
+  return value;
+}
+
+function assertSafeBotObservation(observation) {
+  const stack = [{ path: 'observation', value: observation }];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || !current.value || typeof current.value !== 'object') continue;
+    for (const key of Object.keys(current.value)) {
+      const lowered = key.toLowerCase();
+      if (BOT_OBSERVATION_FORBIDDEN_KEYS.some((forbidden) => lowered.includes(forbidden.toLowerCase()))) {
+        throw new Error(`Unsafe bot observation key: ${current.path}.${key}`);
+      }
+      stack.push({ path: `${current.path}.${key}`, value: current.value[key] });
+    }
+  }
+}
+
+function sanitizeCard(card) {
+  if (!card || typeof card !== 'object') return null;
+  return {
+    id: card.id || `${card.rank}${card.suit}`,
+    rank: card.rank,
+    suit: card.suit
+  };
+}
+
+function getBotObservation(match, botId) {
+  const botState = match?.round?.players?.[botId];
+  if (!botState) return null;
+  const opponentId = nextPlayerId(match, botId);
+  const opponentState = match?.round?.players?.[opponentId];
+  const activeHandIndex = Number.isInteger(botState.activeHandIndex) ? botState.activeHandIndex : 0;
+  const activeHand = botState.hands?.[activeHandIndex] || null;
+  const allowedActions = legalActionsForHand(activeHand, botState);
+
+  const observation = {
+    phase: match.phase,
+    allowedActions,
+    bot: {
+      id: botId,
+      bankroll: getParticipantChips(match, botId),
+      activeHandIndex,
+      hands: (botState.hands || []).map((hand, index) => {
+        const meta = handMeta(hand.cards || []);
+        const splitEligible = canSplit(hand, botState);
+        return {
+          index,
+          cards: (hand.cards || []).map(sanitizeCard).filter(Boolean),
+          total: meta.total,
+          isSoft: meta.isSoft,
+          bet: hand.bet || 0,
+          actionCount: hand.actionCount || 0,
+          doubleCount: hand.doubleCount || 0,
+          doubled: Boolean(hand.doubled),
+          splitDepth: hand.splitDepth || 0,
+          bust: Boolean(hand.bust),
+          stood: Boolean(hand.stood),
+          surrendered: Boolean(hand.surrendered),
+          locked: Boolean(hand.locked),
+          splitEligible,
+          pairRank: splitEligible && hand.cards?.length === 2 ? hand.cards[0]?.rank || null : null
+        };
+      })
+    },
+    opponent: {
+      id: opponentId,
+      hands: (opponentState?.hands || []).map((hand, index) => {
+        const hiddenFlags = Array.isArray(hand?.hidden) ? hand.hidden : [];
+        const visibleCards = (hand?.cards || [])
+          .filter((_, cardIndex) => !hiddenFlags[cardIndex])
+          .map(sanitizeCard)
+          .filter(Boolean);
+        return {
+          index,
+          upcards: visibleCards,
+          upTotal: visibleTotal(hand?.cards || [], hiddenFlags),
+          bet: hand?.bet || 0
+        };
+      })
+    },
+    public: {
+      baseBet: match?.round?.baseBet || 0,
+      mode: match?.mode || resolveMatchMode(match?.stakeType)
+    }
+  };
+
+  if (
+    match.phase === PHASES.PRESSURE_RESPONSE &&
+    match?.round?.pendingPressure &&
+    match.round.pendingPressure.opponentId === botId
+  ) {
+    const pressure = match.round.pendingPressure;
+    const affectedHandIndices = Array.isArray(pressure.affectedHandIndices) && pressure.affectedHandIndices.length
+      ? pressure.affectedHandIndices
+      : [activeHandIndex];
+    const required = pressure.delta * affectedHandIndices.length;
+    observation.pressure = {
+      type: pressure.type,
+      delta: pressure.delta,
+      affectedHandIndices,
+      required,
+      canMatch: canAffordIncrement(match, botId, required),
+      allowedDecisions: ['match', 'surrender']
+    };
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    assertSafeBotObservation(observation);
+  }
+  return deepFreezeObject(observation);
+}
+
 function getBotDifficulty(match, botId) {
   return match.bot?.difficultyById?.[botId] || 'normal';
 }
 
-function chooseBotAction(match, botId) {
-  const botState = match.round.players[botId];
-  const hand = currentHand(botState);
-  if (!hand) return 'stand';
-
-  const legal = legalActionsForHand(hand, botState);
+function chooseBotActionFromObservation(observation, difficulty = 'normal') {
+  if (!observation || observation.phase !== PHASES.ACTION_TURN) return 'stand';
+  if (process.env.NODE_ENV !== 'production') assertSafeBotObservation(observation);
+  const legal = Array.isArray(observation.allowedActions) ? observation.allowedActions : [];
   if (!legal.length) return 'stand';
 
-  const opponentId = nextPlayerId(match, botId);
-  const opponentState = match.round.players[opponentId];
-  const opponentHand = currentHand(opponentState) || opponentState.hands[0];
-  const opponentUpCard = opponentHand?.cards?.[0] || null;
+  const activeHandIndex = observation.bot?.activeHandIndex ?? 0;
+  const hand = observation.bot?.hands?.[activeHandIndex] || null;
+  if (!hand) return legal.includes('stand') ? 'stand' : legal[0];
+  const opponentUpCard = observation.opponent?.hands?.[0]?.upcards?.[0] || null;
   const opponentUpCardTotal = opponentUpCard ? cardValue(opponentUpCard) : 10;
-  const total = handTotal(hand.cards);
-  const meta = handMeta(hand.cards);
-  let ideal = basicStrategyAction(hand, meta, total, opponentUpCardTotal);
+  let ideal = basicStrategyActionFromObservation(hand, opponentUpCardTotal);
   if (!legal.includes(ideal)) ideal = legal[0];
 
-  const difficulty = getBotDifficulty(match, botId);
   const accuracy = difficulty === 'easy' ? 0.45 : difficulty === 'medium' ? 0.75 : 0.94;
   if (Math.random() <= accuracy) return ideal;
 
@@ -2065,9 +2181,10 @@ function chooseBotAction(match, botId) {
   return alternatives[Math.floor(Math.random() * alternatives.length)];
 }
 
-function basicStrategyAction(hand, meta, total, up) {
-  if (canSplit(hand)) {
-    const r = hand.cards[0].rank;
+function basicStrategyActionFromObservation(hand, up) {
+  const total = hand.total || 0;
+  if (hand.splitEligible && hand.pairRank) {
+    const r = hand.pairRank;
     if (r === 'A' || r === '8') return 'split';
     if (r === '9' && ![7, 10, 11].includes(up)) return 'split';
     if (r === '7' && up <= 7) return 'split';
@@ -2076,7 +2193,7 @@ function basicStrategyAction(hand, meta, total, up) {
     if (r === '4' && (up === 5 || up === 6)) return 'split';
   }
 
-  if (meta.isSoft) {
+  if (hand.isSoft) {
     if (total >= 19) return 'stand';
     if (total === 18) return up >= 9 || up === 11 ? 'hit' : 'stand';
     if (total === 17 || total === 16) return up >= 4 && up <= 6 ? 'double' : 'hit';
@@ -2093,24 +2210,23 @@ function basicStrategyAction(hand, meta, total, up) {
   return 'hit';
 }
 
-function chooseBotPressureDecision(match, botId) {
-  const pressure = match.round.pendingPressure;
+function chooseBotPressureDecisionFromObservation(observation, difficulty = 'normal') {
+  if (!observation || observation.phase !== PHASES.PRESSURE_RESPONSE) return 'surrender';
+  if (process.env.NODE_ENV !== 'production') assertSafeBotObservation(observation);
+  const pressure = observation.pressure;
   if (!pressure) return 'surrender';
-  const botState = match.round.players[botId];
   const firstIndex = (pressure.affectedHandIndices && pressure.affectedHandIndices[0]) || 0;
-  const hand = botState.hands[firstIndex] || botState.hands[0];
+  const hand = observation.bot?.hands?.[firstIndex] || observation.bot?.hands?.[0];
   if (!hand || hand.bust || hand.surrendered) return 'surrender';
 
-  const difficulty = getBotDifficulty(match, botId);
   const base = difficulty === 'easy' ? 0.45 : difficulty === 'medium' ? 0.65 : 0.83;
-  const total = handTotal(hand.cards);
+  const total = hand.total || 0;
   let chance = base;
   if (total >= 17) chance += 0.1;
   if (total <= 12) chance -= 0.15;
   if (pressure.delta >= 10) chance -= 0.05;
   chance = Math.max(0.1, Math.min(0.95, chance));
-  const required = pressure.delta * ((pressure.affectedHandIndices && pressure.affectedHandIndices.length) || 1);
-  if (!canAffordIncrement(match, botId, required)) return 'surrender';
+  if (!pressure.canMatch) return 'surrender';
   return Math.random() < chance ? 'match' : 'surrender';
 }
 
@@ -2163,7 +2279,8 @@ function scheduleBotTurn(match) {
       match.round.pendingPressure &&
       isBotPlayer(match.round.pendingPressure.opponentId)
     ) {
-      const decision = chooseBotPressureDecision(match, botId);
+      const observation = getBotObservation(match, botId);
+      const decision = chooseBotPressureDecisionFromObservation(observation, getBotDifficulty(match, botId));
       const result = applyPressureDecision(match, botId, decision);
       if (!result.error) {
         markBotActionCompleted(match, botId);
@@ -2178,7 +2295,8 @@ function scheduleBotTurn(match) {
     if (match.round.pendingPressure) return;
     if (match.round.turnPlayerId !== botId) return;
 
-    const action = chooseBotAction(match, botId);
+    const observation = getBotObservation(match, botId);
+    const action = chooseBotActionFromObservation(observation, getBotDifficulty(match, botId));
     const result = applyAction(match, botId, action);
     if (result.error) {
       const fallback = applyAction(match, botId, 'stand');
@@ -3612,5 +3730,7 @@ export {
   refreshChallengesForUser,
   recordChallengeEventForMatch,
   buildChallengePayload,
-  isRealMatch
+  isRealMatch,
+  getBotObservation,
+  chooseBotActionFromObservation
 };

@@ -15,7 +15,9 @@ import {
   advanceToNextPlayableHand,
   refreshChallengesForUser,
   recordChallengeEventForMatch,
-  buildChallengePayload
+  buildChallengePayload,
+  getBotObservation,
+  chooseBotActionFromObservation
 } from '../server.js';
 
 function card(rank, suit = 'H') {
@@ -556,4 +558,49 @@ test('43 challenge payload includes reset timestamps for countdown UI', () => {
   assert.ok(payload.challengeResets.weekly);
   assert.equal(Number.isFinite(new Date(payload.nextDailyResetAt).getTime()), true);
   assert.equal(Number.isFinite(new Date(payload.nextWeeklyResetAt).getTime()), true);
+});
+
+test('44 bot observation excludes deck and hidden opponent cards', () => {
+  const botId = 'bot:normal:t4';
+  const hiddenOpponentHand = newHand([card('K', 'S'), card('A', 'D')], [false, true], 25, 0);
+  const match = {
+    id: 'm-bot-observe',
+    phase: PHASES.ACTION_TURN,
+    playerIds: ['p1', botId],
+    round: {
+      turnPlayerId: botId,
+      pendingPressure: null,
+      baseBet: 25,
+      deck: [card('9', 'C'), card('7', 'D')],
+      players: {
+        p1: { activeHandIndex: 0, hands: [hiddenOpponentHand] },
+        [botId]: { activeHandIndex: 0, hands: [newHand([card('9', 'H'), card('7', 'H')], [false, false], 25, 0)] }
+      }
+    }
+  };
+  const observation = getBotObservation(match, botId);
+  const serialized = JSON.stringify(observation);
+  assert.equal(serialized.includes('"deck"'), false);
+  assert.equal(serialized.includes('A","suit":"D"'), false);
+  assert.equal(observation.opponent.hands[0].upcards.length, 1);
+  assert.equal(observation.opponent.hands[0].upcards[0].rank, 'K');
+});
+
+test('45 bot chooses from observed legal actions only', () => {
+  const observation = {
+    phase: PHASES.ACTION_TURN,
+    allowedActions: ['hit', 'stand'],
+    bot: {
+      activeHandIndex: 0,
+      hands: [{ total: 11, isSoft: false, splitEligible: false, pairRank: null }]
+    },
+    opponent: {
+      hands: [{ upcards: [{ rank: '6', suit: 'H' }] }]
+    },
+    public: { baseBet: 25, mode: 'real' }
+  };
+  for (let i = 0; i < 30; i += 1) {
+    const action = chooseBotActionFromObservation(observation, 'normal');
+    assert.equal(['hit', 'stand'].includes(action), true);
+  }
 });

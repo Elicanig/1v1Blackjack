@@ -347,6 +347,28 @@ body::after {
   box-shadow: 0 0 0 1px rgba(212, 175, 55, 0.16) inset;
 }
 
+.nav-pill-challenges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-pill-badge {
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 5px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  background: linear-gradient(180deg, #d9b069, #b7853d);
+  color: #1f170a;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 0 0 1px rgba(122, 86, 35, 0.42);
+}
+
 .notif-wrap {
   position: relative;
 }
