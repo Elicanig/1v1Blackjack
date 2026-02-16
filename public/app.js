@@ -18,6 +18,7 @@ const BOT_BET_RANGES = {
   medium: { min: 100, max: 500 },
   normal: { min: 500, max: 2000 }
 };
+const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000];
 
 function initialViewFromPath() {
   const pathname = window.location.pathname.toLowerCase();
@@ -135,7 +136,7 @@ function applyGlowFollowClasses() {
     return;
   }
   app
-    .querySelectorAll('button.primary, button.gold, button.ghost, .tabs .nav-pill, .nav button:not(.warn), .card.section')
+    .querySelectorAll('button.primary, button.gold, button.ghost, .pvp-cta, .tabs .nav-pill, .nav button:not(.warn), .card.section')
     .forEach((el) => el.classList.add('glow-follow'));
 }
 
@@ -184,6 +185,7 @@ const state = {
   bankrollTweenRaf: null,
   currentBet: 5,
   betInputDraft: '',
+  matchChatDraft: '',
   selectedBotDifficulty: 'normal',
   botStakeType: 'FAKE',
   emotePickerOpen: false,
@@ -209,6 +211,9 @@ const state = {
   },
   quickPlay: {
     status: 'idle',
+    bucket: null,
+    selectedBucket: 250,
+    bucketPickerOpen: false,
     queuePosition: null,
     queuedAt: null,
     opponentName: '',
@@ -289,6 +294,53 @@ function formatWeeklyCountdown(ms) {
   return formatCooldown(remaining);
 }
 
+function normalizeQuickPlayBucketValue(rawBucket) {
+  const numeric = Math.floor(Number(rawBucket));
+  if (!Number.isFinite(numeric)) return null;
+  return QUICK_PLAY_BUCKETS.includes(numeric) ? numeric : null;
+}
+
+function formatQuickPlayBucket(bucket) {
+  const normalized = normalizeQuickPlayBucketValue(bucket);
+  return (normalized || 250).toLocaleString();
+}
+
+function formatNotificationTime(createdAt) {
+  const ts = createdAt ? new Date(createdAt).getTime() : NaN;
+  if (!Number.isFinite(ts)) return '';
+  const now = Date.now();
+  const diffMs = Math.max(0, now - ts);
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 10) return 'Just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const eventDate = new Date(ts);
+  const nowDate = new Date(now);
+  const sameDay =
+    eventDate.getFullYear() === nowDate.getFullYear() &&
+    eventDate.getMonth() === nowDate.getMonth() &&
+    eventDate.getDate() === nowDate.getDate();
+  if (sameDay) {
+    return `Today ${eventDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  }
+  const yesterday = new Date(now);
+  yesterday.setDate(nowDate.getDate() - 1);
+  const isYesterday =
+    eventDate.getFullYear() === yesterday.getFullYear() &&
+    eventDate.getMonth() === yesterday.getMonth() &&
+    eventDate.getDate() === yesterday.getDate();
+  if (isYesterday) {
+    return `Yesterday ${eventDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  }
+  return eventDate.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+}
+
 function clearQuickPlayConnectTimer() {
   if (quickPlayConnectTimer) {
     clearTimeout(quickPlayConnectTimer);
@@ -302,8 +354,12 @@ function quickPlayIsActive() {
 
 function resetQuickPlayState({ clearTimer = true } = {}) {
   if (clearTimer) clearQuickPlayConnectTimer();
+  const selectedBucket = normalizeQuickPlayBucketValue(state.quickPlay?.selectedBucket) || 250;
   state.quickPlay = {
     status: 'idle',
+    bucket: null,
+    selectedBucket,
+    bucketPickerOpen: false,
     queuePosition: null,
     queuedAt: null,
     opponentName: '',
@@ -334,6 +390,12 @@ function finalizeQuickPlayConnectedState() {
 function beginQuickPlayConnectedState(payload = {}) {
   const incomingMatch = payload.match || null;
   const incomingMatchId = payload.matchId || incomingMatch?.id || state.quickPlay.matchId || null;
+  const nextBucket =
+    normalizeQuickPlayBucketValue(payload.bucket) ||
+    normalizeQuickPlayBucketValue(incomingMatch?.quickPlayBucket) ||
+    normalizeQuickPlayBucketValue(state.quickPlay.bucket) ||
+    normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) ||
+    250;
   const nextOpponentName =
     payload.opponentName ||
     quickPlayOpponentNameFromMatch(incomingMatch) ||
@@ -341,6 +403,9 @@ function beginQuickPlayConnectedState(payload = {}) {
     'Opponent';
 
   state.quickPlay.status = 'connected';
+  state.quickPlay.bucket = nextBucket;
+  state.quickPlay.selectedBucket = nextBucket;
+  state.quickPlay.bucketPickerOpen = false;
   state.quickPlay.matchId = incomingMatchId;
   state.quickPlay.opponentName = nextOpponentName;
   state.quickPlay.queuePosition = null;
@@ -784,13 +849,23 @@ function connectSocket() {
 
   state.socket.on('connect', () => {
     if (state.quickPlay.status === 'searching') {
-      api('/api/matchmaking/join', { method: 'POST' })
+      const reconnectBucket =
+        normalizeQuickPlayBucketValue(state.quickPlay.bucket) ||
+        normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) ||
+        250;
+      api('/api/matchmaking/join', {
+        method: 'POST',
+        body: JSON.stringify({ bucket: reconnectBucket })
+      })
         .then((data) => {
           if (data?.status === 'found') {
             beginQuickPlayConnectedState(data);
           } else {
             state.quickPlay.queuePosition = Number.isFinite(Number(data?.queuePosition)) ? Number(data.queuePosition) : null;
             if (data?.queuedAt) state.quickPlay.queuedAt = data.queuedAt;
+            const responseBucket = normalizeQuickPlayBucketValue(data?.bucket) || reconnectBucket;
+            state.quickPlay.bucket = responseBucket;
+            state.quickPlay.selectedBucket = responseBucket;
           }
           render();
         })
@@ -812,8 +887,16 @@ function connectSocket() {
   });
   state.socket.on('matchmaking:searching', (payload = {}) => {
     if (!quickPlayIsActive()) return;
+    const bucket =
+      normalizeQuickPlayBucketValue(payload.bucket) ||
+      normalizeQuickPlayBucketValue(state.quickPlay.bucket) ||
+      normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) ||
+      250;
     state.quickPlay.status = 'searching';
+    state.quickPlay.bucket = bucket;
+    state.quickPlay.selectedBucket = bucket;
     state.quickPlay.queuePosition = Number.isFinite(Number(payload.queuePosition)) ? Number(payload.queuePosition) : state.quickPlay.queuePosition;
+    if (payload?.queuedAt) state.quickPlay.queuedAt = payload.queuedAt;
     render();
   });
   state.socket.on('matchmaking:found', (payload = {}) => {
@@ -860,10 +943,18 @@ function connectSocket() {
     state.currentLobby = lobby;
     render();
   });
+  state.socket.on('match:chat', (payload = {}) => {
+    if (!state.currentMatch || payload.matchId !== state.currentMatch.id) return;
+    state.currentMatch.chat = Array.isArray(payload.chat) ? payload.chat : state.currentMatch.chat || [];
+    render();
+  });
   state.socket.on('match:state', (match) => {
     const previousMatch = state.currentMatch;
     const previousRound = state.currentMatch?.roundNumber || 0;
     updateCardAnimationState(previousMatch, match);
+    if (previousMatch?.id !== match?.id) {
+      state.matchChatDraft = '';
+    }
     state.currentMatch = match;
     state.leaveMatchModal = false;
     const myChoice = state.me?.id ? match?.resultChoiceByPlayer?.[state.me.id] : null;
@@ -932,6 +1023,7 @@ function connectSocket() {
   state.socket.on('match:ended', ({ reason }) => {
     setStatus(reason);
     resetQuickPlayState();
+    state.matchChatDraft = '';
     state.currentMatch = null;
     state.currentLobby = null;
     state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -1209,6 +1301,11 @@ function emitLeaveMatch() {
 function emitEmote(type, value) {
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('game:emote', { matchId: state.currentMatch.id, type, value });
+}
+
+function emitMatchChat(text) {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('match:chat', { matchId: state.currentMatch.id, text });
 }
 
 function getBetStorageKey(userId = state.me?.id) {
@@ -1585,16 +1682,23 @@ function runNotificationAction(notification) {
   }
 }
 
-async function joinQuickPlayQueue({ silent = false } = {}) {
+async function joinQuickPlayQueue({ bucket = null, silent = false } = {}) {
   if (!state.token || !state.me) return;
   if (state.currentMatch) {
     setError('Leave your current match before joining Quick Play.');
     return;
   }
   if (quickPlayIsActive()) return;
+  const selectedBucket =
+    normalizeQuickPlayBucketValue(bucket) ||
+    normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) ||
+    250;
   clearQuickPlayConnectTimer();
   state.quickPlay = {
     status: 'searching',
+    bucket: selectedBucket,
+    selectedBucket,
+    bucketPickerOpen: false,
     queuePosition: null,
     queuedAt: new Date().toISOString(),
     opponentName: '',
@@ -1604,16 +1708,22 @@ async function joinQuickPlayQueue({ silent = false } = {}) {
   goToView('home');
   render();
   try {
-    const data = await api('/api/matchmaking/join', { method: 'POST' });
+    const data = await api('/api/matchmaking/join', {
+      method: 'POST',
+      body: JSON.stringify({ bucket: selectedBucket })
+    });
     if (data?.status === 'found') {
       beginQuickPlayConnectedState(data);
       render();
       return;
     }
+    const responseBucket = normalizeQuickPlayBucketValue(data?.bucket) || selectedBucket;
     state.quickPlay.status = 'searching';
+    state.quickPlay.bucket = responseBucket;
+    state.quickPlay.selectedBucket = responseBucket;
     state.quickPlay.queuePosition = Number.isFinite(Number(data?.queuePosition)) ? Number(data.queuePosition) : null;
     state.quickPlay.queuedAt = data?.queuedAt || state.quickPlay.queuedAt;
-    if (!silent) setStatus('Searching for a Quick Play opponent...');
+    if (!silent) setStatus(`Searching Quick Play $${formatQuickPlayBucket(responseBucket)} queue...`);
     render();
   } catch (e) {
     resetQuickPlayState();
@@ -1624,6 +1734,7 @@ async function joinQuickPlayQueue({ silent = false } = {}) {
 async function cancelQuickPlayQueue({ silent = false } = {}) {
   if (!quickPlayIsActive()) return;
   const wasConnected = state.quickPlay.status === 'connected';
+  const bucket = state.quickPlay.bucket;
   try {
     await api('/api/matchmaking/cancel', { method: 'POST' });
   } catch {
@@ -1631,7 +1742,8 @@ async function cancelQuickPlayQueue({ silent = false } = {}) {
   }
   resetQuickPlayState();
   if (!silent) {
-    setStatus(wasConnected ? 'Matchmaking cancelled.' : 'Stopped searching.');
+    const bucketText = normalizeQuickPlayBucketValue(bucket) ? ` $${formatQuickPlayBucket(bucket)}` : '';
+    setStatus(wasConnected ? `Matchmaking${bucketText} cancelled.` : `Stopped searching${bucketText}.`);
   } else {
     render();
   }
@@ -1711,6 +1823,7 @@ async function claimChallenge(id) {
 
 function logout() {
   resetQuickPlayState();
+  state.matchChatDraft = '';
   if (state.socket) state.socket.disconnect();
   state.socket = null;
   state.token = null;
@@ -1793,6 +1906,7 @@ function syncNotificationOverlay() {
                 (n) => `
             <div class="notif-item">
               <div>${n.message}</div>
+              <div class="muted notif-time">${formatNotificationTime(n.createdAt)}</div>
               ${
                 n.type === 'friend_challenge'
                   ? `<div class="row">
@@ -2156,7 +2270,9 @@ function renderHome() {
   };
   const quickPlayBtn = document.getElementById('quickPlayBtn');
   quickPlayBtn.onclick = () => {
-    joinQuickPlayQueue();
+    if (quickPlayIsActive()) return;
+    state.quickPlay.bucketPickerOpen = true;
+    render();
   };
   if (!quickPlaySearching && !quickPlayConnected && document.activeElement === document.body) {
     quickPlayBtn.focus({ preventScroll: true });
@@ -2601,7 +2717,7 @@ function renderNotifications() {
                 (n) => `
             <div class="notif-item">
               <div>${n.message}</div>
-              <div class="muted">${new Date(n.createdAt).toLocaleString()}</div>
+              <div class="muted notif-time">${formatNotificationTime(n.createdAt)}</div>
               ${
                 n.type === 'friend_challenge'
                   ? `<div class="row">
@@ -2798,6 +2914,9 @@ function renderMatch() {
   const opponentConnected = match.disconnects[oppId]?.connected;
   const isBotOpponent = Boolean(match.participants?.[oppId]?.isBot);
   const isPvpMatch = !isBotOpponent;
+  const quickPlayBucketBet = normalizeQuickPlayBucketValue(match.quickPlayBucket);
+  const supportsBetChat = Boolean(isPvpMatch && !quickPlayBucketBet && match.matchType !== 'quickplay');
+  const betChatMessages = Array.isArray(match.chat) ? match.chat : [];
   const phaseLabelMap = {
     ROUND_INIT: 'Betting',
     DEAL: 'Dealing',
@@ -2858,7 +2977,9 @@ function renderMatch() {
                   <div class="bet-control">
                     <div class="bet-head">
                       <strong>Base Bet</strong>
-                      <span class="muted">Min ${minBet} / Max ${maxBet}</span>
+                      <span class="muted">
+                        ${quickPlayBucketBet ? `Quick Play fixed: $${quickPlayBucketBet.toLocaleString()}` : `Min ${minBet} / Max ${maxBet}`}
+                      </span>
                     </div>
                     <div class="bet-row">
                       <button id="betMinus" class="ghost" ${!canEditBet ? 'disabled' : ''}>-</button>
@@ -2894,6 +3015,34 @@ function renderMatch() {
                       </div>
                     </div>
                   </div>
+                  ${
+                    supportsBetChat
+                      ? `<div class="bet-chat card">
+                           <div class="bet-chat-head">
+                             <strong>Bet Chat</strong>
+                             <span class="muted">Lobby only</span>
+                           </div>
+                           <div class="bet-chat-log" id="betChatLog">
+                             ${
+                               betChatMessages.length
+                                 ? betChatMessages
+                                     .map(
+                                       (entry) => `<div class="bet-chat-line ${entry.userId === me.id ? 'mine' : ''}">
+                                         <span class="bet-chat-author">${entry.userId === me.id ? 'You' : entry.username || 'Opponent'}:</span>
+                                         <span>${entry.text}</span>
+                                       </div>`
+                                     )
+                                     .join('')
+                                 : '<div class="muted">Say hi before locking in your bet.</div>'
+                             }
+                           </div>
+                           <div class="bet-chat-compose">
+                             <input id="betChatInput" maxlength="140" placeholder="Message opponent..." />
+                             <button id="betChatSendBtn" class="ghost" type="button">Send</button>
+                           </div>
+                         </div>`
+                      : ''
+                  }
                 </div>
               </section>`
             : `<section class="match-main play-layout">
@@ -3086,6 +3235,31 @@ function renderMatch() {
       resetBetStateToLobby();
     };
   }
+  const betChatInput = document.getElementById('betChatInput');
+  const betChatSendBtn = document.getElementById('betChatSendBtn');
+  const sendBetChat = () => {
+    const draft = String(state.matchChatDraft || '').trim();
+    if (!draft) return;
+    emitMatchChat(draft);
+    state.matchChatDraft = '';
+    render();
+  };
+  if (betChatInput) {
+    betChatInput.value = state.matchChatDraft || '';
+    betChatInput.addEventListener('input', (event) => {
+      state.matchChatDraft = String(event.target.value || '').slice(0, 140);
+    });
+    betChatInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      sendBetChat();
+    });
+  }
+  if (betChatSendBtn) {
+    betChatSendBtn.onclick = () => {
+      sendBetChat();
+    };
+  }
   const emoteToggleBtn = document.getElementById('toggleEmoteBtn');
   if (emoteToggleBtn) {
     emoteToggleBtn.onclick = () => {
@@ -3232,6 +3406,7 @@ function syncQuickPlayOverlay() {
     Number.isFinite(Number(state.quickPlay.queuePosition)) && Number(state.quickPlay.queuePosition) > 0
       ? Number(state.quickPlay.queuePosition)
       : null;
+  const bucket = normalizeQuickPlayBucketValue(state.quickPlay.bucket) || normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket);
   const opponentName = state.quickPlay.opponentName || 'Opponent';
   mount.innerHTML = `
     <div class="quickplay-overlay-backdrop"></div>
@@ -3243,6 +3418,7 @@ function syncQuickPlayOverlay() {
       <p class="muted">
         ${isConnected ? `Connected with ${opponentName}. Loading bet confirmation...` : 'Looking for another player in the Quick Play queue.'}
       </p>
+      <div class="muted quickplay-bucket-note">Bucket: $${formatQuickPlayBucket(bucket)}</div>
       ${
         !isConnected
           ? `<div class="quickplay-loader-row">
@@ -3264,6 +3440,76 @@ function syncQuickPlayOverlay() {
   if (cancelBtn) {
     cancelBtn.onclick = () => {
       cancelQuickPlayQueue();
+    };
+  }
+}
+
+function syncQuickPlayBucketModal() {
+  let mount = document.getElementById('quickPlayBucketMount');
+  if (!mount) {
+    mount = document.createElement('div');
+    mount.id = 'quickPlayBucketMount';
+    document.body.appendChild(mount);
+  }
+
+  if (state.view !== 'home' || !state.quickPlay.bucketPickerOpen || quickPlayIsActive()) {
+    mount.innerHTML = '';
+    return;
+  }
+
+  const selectedBucket = normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) || 250;
+  mount.innerHTML = `
+    <div class="quickplay-picker-backdrop" id="quickPlayPickerBackdrop"></div>
+    <div class="quickplay-picker-panel card">
+      <h3>Quick Play Bet Bucket</h3>
+      <p class="muted">Pick a fixed bet. You only match with players in the same bucket.</p>
+      <div class="quickplay-bucket-grid" role="radiogroup" aria-label="Quick play bet bucket">
+        ${QUICK_PLAY_BUCKETS.map((bucket) => `
+          <button
+            type="button"
+            role="radio"
+            aria-checked="${selectedBucket === bucket}"
+            class="quickplay-bucket-btn ${selectedBucket === bucket ? 'is-selected' : ''}"
+            data-quickplay-bucket="${bucket}"
+          >
+            $${bucket.toLocaleString()}
+          </button>
+        `).join('')}
+      </div>
+      <div class="quickplay-picker-actions">
+        <button id="quickPlayPickerConfirmBtn" class="primary">Find Match</button>
+        <button id="quickPlayPickerCancelBtn" class="ghost">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  const backdrop = document.getElementById('quickPlayPickerBackdrop');
+  if (backdrop) {
+    backdrop.onclick = () => {
+      state.quickPlay.bucketPickerOpen = false;
+      render();
+    };
+  }
+  mount.querySelectorAll('[data-quickplay-bucket]').forEach((btn) => {
+    btn.onclick = () => {
+      const bucket = normalizeQuickPlayBucketValue(btn.dataset.quickplayBucket);
+      if (!bucket) return;
+      state.quickPlay.selectedBucket = bucket;
+      render();
+    };
+  });
+  const confirmBtn = document.getElementById('quickPlayPickerConfirmBtn');
+  if (confirmBtn) {
+    confirmBtn.onclick = () => {
+      const bucket = normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) || 250;
+      joinQuickPlayQueue({ bucket });
+    };
+  }
+  const cancelBtn = document.getElementById('quickPlayPickerCancelBtn');
+  if (cancelBtn) {
+    cancelBtn.onclick = () => {
+      state.quickPlay.bucketPickerOpen = false;
+      render();
     };
   }
 }
@@ -3299,6 +3545,7 @@ function render() {
   syncNotificationOverlay();
   syncRoundResultModal();
   syncPressureOverlay();
+  syncQuickPlayBucketModal();
   syncQuickPlayOverlay();
   syncTurnCountdownUI();
   if (enteringFriends && state.token) loadFriendsData();
@@ -3306,6 +3553,11 @@ function render() {
 
 (async function init() {
   window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.quickPlay.bucketPickerOpen) {
+      state.quickPlay.bucketPickerOpen = false;
+      render();
+      return;
+    }
     if (e.key === 'Escape' && state.notificationsOpen) {
       state.notificationsOpen = false;
       render();

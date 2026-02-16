@@ -40,13 +40,14 @@ const BOT_BET_LIMITS = {
   medium: { min: 100, max: 500 },
   normal: { min: 500, max: 2000 }
 };
+const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000];
 const DAILY_REWARD = 100;
 const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const DISCONNECT_TIMEOUT_MS = 60_000;
 const BOT_BET_CONFIRM_MIN_MS = 200;
 const BOT_BET_CONFIRM_MAX_MS = 600;
-const BOT_ACTION_DELAY_MIN_MS = 900;
-const BOT_ACTION_DELAY_MAX_MS = 1400;
+const BOT_ACTION_DELAY_MIN_MS = 700;
+const BOT_ACTION_DELAY_MAX_MS = 1200;
 const BOT_FIRST_ACTION_DELAY_MIN_MS = 2000;
 const BOT_FIRST_ACTION_DELAY_MAX_MS = 3000;
 const ROUND_REVEAL_MS = 2200;
@@ -128,6 +129,35 @@ for (const user of db.data.users) {
   if (!Array.isArray(user.notifications)) {
     user.notifications = [];
     dbTouched = true;
+  } else {
+    const existingNotifications = user.notifications;
+    const normalizedNotifications = existingNotifications
+      .filter((n) => n && typeof n === 'object')
+      .map((n) => ({
+        id: n.id || nanoid(10),
+        type: n.type || 'info',
+        message: n.message || '',
+        createdAt: n.createdAt || nowIso(),
+        action: n.action || null,
+        read: Boolean(n.read)
+      }))
+      .slice(0, 60);
+    const changed =
+      normalizedNotifications.length !== existingNotifications.length ||
+      normalizedNotifications.some((entry, idx) => {
+        const prev = existingNotifications[idx];
+        if (!prev || typeof prev !== 'object') return true;
+        return (
+          entry.id !== prev.id ||
+          entry.type !== prev.type ||
+          entry.message !== prev.message ||
+          entry.createdAt !== prev.createdAt ||
+          entry.read !== Boolean(prev.read) ||
+          entry.action !== (prev.action || null)
+        );
+      });
+    user.notifications = normalizedNotifications;
+    if (changed) dbTouched = true;
   }
   if (!user.authToken) {
     user.authToken = nanoid(36);
@@ -212,8 +242,8 @@ const botBetConfirmTimers = new Map();
 const roundPhaseTimers = new Map();
 const afkTurnTimers = new Map();
 const emoteCooldownByUser = new Map();
-const quickPlayQueue = [];
-const quickPlayQueuedUsers = new Set();
+const quickPlayQueuesByBucket = new Map();
+const quickPlayBucketByUser = new Map();
 let patchNotesCache = { at: 0, payload: null };
 
 const LOCAL_PATCH_NOTES = [
@@ -346,7 +376,7 @@ const RULES = {
   BLACKJACK_PAYOUT_MULTIPLIER: 1,
   NATURAL_BLACKJACK_BEATS_NON_BLACKJACK_21: true,
   PUSH_ON_EQUAL_TOTAL: true,
-  BOTH_BUST_IS_PUSH: true,
+  BOTH_BUST_IS_PUSH: false,
   SURRENDER_LOSS_FRACTION: 0.75,
   MAX_SPLITS: 3,
   MAX_HANDS_PER_PLAYER: 4,
@@ -368,6 +398,8 @@ function clampBet(amount, balance = MAX_BET_CAP, limits = { min: MIN_BET, max: M
 }
 
 function getMatchBetLimits(match) {
+  const quickPlayBucket = normalizeQuickPlayBucket(match?.quickPlayBucket);
+  if (quickPlayBucket) return { min: quickPlayBucket, max: quickPlayBucket };
   const botId = match?.playerIds?.find((id) => isBotPlayer(id));
   if (!botId) return { min: MIN_BET, max: MAX_BET_CAP };
   const difficulty = getBotDifficulty(match, botId);
@@ -648,23 +680,90 @@ function isUserInActiveMatch(userId) {
   return false;
 }
 
-function quickPlayQueuePosition(userId) {
-  const index = quickPlayQueue.findIndex((entry) => entry.userId === userId);
-  return index === -1 ? null : index + 1;
+function normalizeQuickPlayBucket(rawBucket) {
+  const numeric = Math.floor(Number(rawBucket));
+  if (!Number.isFinite(numeric)) return null;
+  return QUICK_PLAY_BUCKETS.includes(numeric) ? numeric : null;
+}
+
+function canJoinQuickPlayBucket(user, bucket) {
+  const normalized = normalizeQuickPlayBucket(bucket);
+  if (!user || !normalized) return false;
+  const chips = Math.max(0, Math.floor(Number(user.chips) || 0));
+  return chips >= normalized;
+}
+
+function getQuickPlayQueue(bucket) {
+  const normalized = normalizeQuickPlayBucket(bucket);
+  if (!normalized) return [];
+  if (!quickPlayQueuesByBucket.has(normalized)) {
+    quickPlayQueuesByBucket.set(normalized, []);
+  }
+  return quickPlayQueuesByBucket.get(normalized);
+}
+
+function quickPlayQueueStatus(userId) {
+  const bucket = quickPlayBucketByUser.get(userId) || null;
+  if (!bucket) {
+    return { bucket: null, queuePosition: null, queuedAt: null };
+  }
+  const queue = getQuickPlayQueue(bucket);
+  const index = queue.findIndex((entry) => entry.userId === userId);
+  if (index === -1) {
+    quickPlayBucketByUser.delete(userId);
+    return { bucket: null, queuePosition: null, queuedAt: null };
+  }
+  return {
+    bucket,
+    queuePosition: index + 1,
+    queuedAt: queue[index].queuedAt || null
+  };
+}
+
+function enqueueQuickPlayUser(userId, bucket) {
+  const normalized = normalizeQuickPlayBucket(bucket);
+  if (!normalized) return { error: 'Invalid quick play bucket' };
+  const currentBucket = quickPlayBucketByUser.get(userId);
+  if (currentBucket && currentBucket !== normalized) {
+    removeFromQuickPlayQueue(userId);
+  }
+  if (quickPlayBucketByUser.get(userId) === normalized) {
+    const queue = getQuickPlayQueue(normalized);
+    const existing = queue.find((entry) => entry.userId === userId) || null;
+    return {
+      ok: true,
+      queuedAt: existing?.queuedAt || nowIso(),
+      queuePosition: existing ? queue.indexOf(existing) + 1 : null,
+      bucket: normalized
+    };
+  }
+  const queue = getQuickPlayQueue(normalized);
+  const queuedAt = nowIso();
+  queue.push({ userId, bucket: normalized, queuedAt });
+  quickPlayBucketByUser.set(userId, normalized);
+  return {
+    ok: true,
+    queuedAt,
+    queuePosition: queue.length,
+    bucket: normalized
+  };
 }
 
 function removeFromQuickPlayQueue(userId) {
-  if (!quickPlayQueuedUsers.has(userId)) return false;
-  quickPlayQueuedUsers.delete(userId);
-  const idx = quickPlayQueue.findIndex((entry) => entry.userId === userId);
-  if (idx !== -1) quickPlayQueue.splice(idx, 1);
+  const bucket = quickPlayBucketByUser.get(userId);
+  if (!bucket) return false;
+  quickPlayBucketByUser.delete(userId);
+  const queue = getQuickPlayQueue(bucket);
+  const idx = queue.findIndex((entry) => entry.userId === userId);
+  if (idx !== -1) queue.splice(idx, 1);
   return idx !== -1;
 }
 
-function popNextQuickPlayEntry(excludeUserId = null) {
-  while (quickPlayQueue.length > 0) {
-    const entry = quickPlayQueue.shift();
-    quickPlayQueuedUsers.delete(entry.userId);
+function popNextQuickPlayEntry(bucket, excludeUserId = null) {
+  const queue = getQuickPlayQueue(bucket);
+  while (queue.length > 0) {
+    const entry = queue.shift();
+    quickPlayBucketByUser.delete(entry.userId);
     if (excludeUserId && entry.userId === excludeUserId) continue;
     if (!getUserById(entry.userId)) continue;
     if (isUserInActiveMatch(entry.userId)) continue;
@@ -673,12 +772,14 @@ function popNextQuickPlayEntry(excludeUserId = null) {
   return null;
 }
 
-function buildQuickPlayFoundPayload(match, userId) {
+function buildQuickPlayFoundPayload(match, userId, bucket) {
   const opponentId = match.playerIds.find((id) => id !== userId);
   const opponent = getUserById(opponentId);
   return {
     status: 'found',
     matchId: match.id,
+    bucket,
+    fixedBet: bucket,
     opponentId,
     opponentName: opponent?.username || 'Opponent',
     connectedAt: nowIso(),
@@ -686,23 +787,42 @@ function buildQuickPlayFoundPayload(match, userId) {
   };
 }
 
-async function processQuickPlayQueue() {
+async function processQuickPlayQueue(bucket) {
+  const normalizedBucket = normalizeQuickPlayBucket(bucket);
+  if (!normalizedBucket) return [];
   const matched = [];
   let touched = false;
-  while (quickPlayQueue.length >= 2) {
-    const first = popNextQuickPlayEntry();
+  const queue = getQuickPlayQueue(normalizedBucket);
+  while (queue.length >= 2) {
+    const first = popNextQuickPlayEntry(normalizedBucket);
     if (!first) break;
-    const second = popNextQuickPlayEntry(first.userId);
+    const second = popNextQuickPlayEntry(normalizedBucket, first.userId);
     if (!second) {
-      if (!quickPlayQueuedUsers.has(first.userId) && !isUserInActiveMatch(first.userId)) {
-        quickPlayQueue.push(first);
-        quickPlayQueuedUsers.add(first.userId);
+      if (!quickPlayBucketByUser.has(first.userId) && !isUserInActiveMatch(first.userId)) {
+        queue.push(first);
+        quickPlayBucketByUser.set(first.userId, normalizedBucket);
       }
       break;
     }
     const userA = getUserById(first.userId);
     const userB = getUserById(second.userId);
     if (!userA || !userB || userA.id === userB.id) continue;
+    if (!canJoinQuickPlayBucket(userA, normalizedBucket)) {
+      emitToUser(userA.id, 'matchmaking:error', { error: `Need at least ${normalizedBucket} chips for this Quick Play bucket` });
+      if (!quickPlayBucketByUser.has(userB.id) && !isUserInActiveMatch(userB.id)) {
+        queue.unshift(second);
+        quickPlayBucketByUser.set(userB.id, normalizedBucket);
+      }
+      continue;
+    }
+    if (!canJoinQuickPlayBucket(userB, normalizedBucket)) {
+      emitToUser(userB.id, 'matchmaking:error', { error: `Need at least ${normalizedBucket} chips for this Quick Play bucket` });
+      if (!quickPlayBucketByUser.has(userA.id) && !isUserInActiveMatch(userA.id)) {
+        queue.unshift(first);
+        quickPlayBucketByUser.set(userA.id, normalizedBucket);
+      }
+      continue;
+    }
 
     const lobby = {
       id: normalizeLobbyCode(nanoid(8)),
@@ -711,20 +831,21 @@ async function processQuickPlayQueue() {
       status: 'full',
       type: 'quickplay',
       stakeType: 'REAL',
+      quickPlayBucket: normalizedBucket,
       createdAt: nowIso()
     };
     db.data.lobbies.push(lobby);
-    const match = createMatch(lobby);
+    const match = createMatch(lobby, { quickPlayBucket: normalizedBucket });
     pushMatchState(match);
     touched = true;
 
     matched.push({
       userId: userA.id,
-      payload: buildQuickPlayFoundPayload(match, userA.id)
+      payload: buildQuickPlayFoundPayload(match, userA.id, normalizedBucket)
     });
     matched.push({
       userId: userB.id,
-      payload: buildQuickPlayFoundPayload(match, userB.id)
+      payload: buildQuickPlayFoundPayload(match, userB.id, normalizedBucket)
     });
   }
 
@@ -1032,9 +1153,11 @@ function buildClientState(match, viewerId) {
   return {
     id: match.id,
     lobbyId: match.lobbyId,
+    matchType: match.matchType || null,
     participants: match.participants,
     mode: match.mode || (isPracticeMatch(match) ? 'practice' : 'real'),
     isPractice: isPracticeMatch(match),
+    quickPlayBucket: normalizeQuickPlayBucket(match.quickPlayBucket),
     roundNumber: match.roundNumber,
     phase: match.phase,
     playerIds: match.playerIds,
@@ -1047,6 +1170,7 @@ function buildClientState(match, viewerId) {
     selectedBet: match.betSettings?.selectedBetById?.[viewerId] || BASE_BET,
     canEditBet:
       match.phase === PHASES.ROUND_INIT &&
+      !normalizeQuickPlayBucket(match.quickPlayBucket) &&
       viewerId === match.betControllerId &&
       !round.betConfirmedByPlayer?.[viewerId],
     canConfirmBet: match.phase === PHASES.ROUND_INIT && !round.betConfirmedByPlayer?.[viewerId],
@@ -1061,6 +1185,7 @@ function buildClientState(match, viewerId) {
     firstActionPlayerId: round.firstActionPlayerId,
     roundResult: round.resultByPlayer?.[viewerId] || null,
     resultChoiceByPlayer: round.resultChoiceByPlayer || {},
+    chat: Array.isArray(match.chat) ? match.chat : [],
     players,
     disconnects: match.playerIds.reduce((acc, pid) => {
       acc[pid] = {
@@ -1388,9 +1513,15 @@ function buildChallengePayload(user) {
 function startRound(match) {
   const [p1, p2] = match.playerIds;
   const betLimits = getMatchBetLimits(match);
+  const forcedQuickPlayBucket = normalizeQuickPlayBucket(match.quickPlayBucket);
   const controllerId = match.betControllerId || p1;
+  if (!match.betSettings) match.betSettings = { selectedBetById: {} };
+  if (forcedQuickPlayBucket) {
+    match.betSettings.selectedBetById[p1] = forcedQuickPlayBucket;
+    match.betSettings.selectedBetById[p2] = forcedQuickPlayBucket;
+  }
   const controllerBalance = getParticipantChips(match, controllerId);
-  const desiredBase = match.betSettings?.selectedBetById?.[controllerId] || BASE_BET;
+  const desiredBase = forcedQuickPlayBucket || match.betSettings?.selectedBetById?.[controllerId] || BASE_BET;
   const proposedBase = clampBet(desiredBase, controllerBalance || betLimits.min, betLimits);
   const baseBet = Math.max(betLimits.min, proposedBase || betLimits.min);
 
@@ -1541,7 +1672,7 @@ function resolveRound(match) {
     if (handA.surrendered && handB.surrendered) return 0;
     if (handA.surrendered) return -1;
     if (handB.surrendered) return 1;
-    if (handA.bust && handB.bust) return RULES.BOTH_BUST_IS_PUSH ? 0 : -1;
+    if (handA.bust && handB.bust) return -1;
     if (handA.bust) return -1;
     if (handB.bust) return 1;
 
@@ -1801,6 +1932,29 @@ function applyRoundResultChoice(match, playerId, choice) {
   return { ok: true, advanced: true, mode: everyoneNext ? 'next' : 'betting' };
 }
 
+function appendMatchChatMessage(match, userId, rawMessage) {
+  if (!match) return { error: 'Match not found' };
+  if (!match.playerIds.includes(userId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.ROUND_INIT) return { error: 'Chat is only available during bet confirmation' };
+  if (match.playerIds.some((id) => isBotPlayer(id))) return { error: 'Chat unavailable in bot matches' };
+  if (normalizeQuickPlayBucket(match.quickPlayBucket)) return { error: 'Chat unavailable in Quick Play bucket matches' };
+  const text = String(rawMessage || '').trim();
+  if (!text) return { error: 'Message required' };
+  const clipped = text.slice(0, 140);
+  if (!Array.isArray(match.chat)) match.chat = [];
+  const senderName = match.participants?.[userId]?.username || getUserById(userId)?.username || 'Player';
+  const message = {
+    id: nanoid(10),
+    userId,
+    username: senderName,
+    text: clipped,
+    createdAt: nowIso()
+  };
+  match.chat.push(message);
+  match.chat = match.chat.slice(-40);
+  return { ok: true, message, chat: match.chat };
+}
+
 function maybeEndRound(match) {
   const anyPlayable = match.playerIds.some((pid) => hasPlayableHand(match.round.players[pid]));
   if (!anyPlayable && !match.round.pendingPressure) {
@@ -2044,7 +2198,11 @@ function applyAction(match, playerId, action) {
     if (total > 21) {
       hand.bust = true;
       hand.locked = true;
-      progressTurn(match, playerId);
+      if (hasPlayableHand(state)) {
+        progressTurn(match, playerId);
+      } else {
+        resolveRound(match);
+      }
       return { ok: true };
     }
     if (total === 21) {
@@ -2099,7 +2257,11 @@ function applyAction(match, playerId, action) {
     if (total > 21) {
       hand.bust = true;
       hand.locked = true;
-      progressTurn(match, playerId);
+      if (hasPlayableHand(state)) {
+        progressTurn(match, playerId);
+      } else {
+        resolveRound(match);
+      }
       return { ok: true };
     }
     // Standard double-down: exactly one card, then forced stand.
@@ -2222,6 +2384,7 @@ function applyPressureDecision(match, playerId, decision) {
 function applyBaseBetSelection(match, playerId, amount) {
   if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
   if (match.phase !== PHASES.ROUND_INIT) return { error: 'Bet can only be changed before cards are dealt' };
+  if (normalizeQuickPlayBucket(match.quickPlayBucket)) return { error: 'Quick Play bucket bet is fixed for this match' };
   if (playerId !== match.betControllerId) return { error: 'Only the round owner can set base bet' };
   if (match.round.betConfirmedByPlayer?.[playerId]) return { error: 'Bet already confirmed for this round' };
   const betLimits = getMatchBetLimits(match);
@@ -2271,25 +2434,34 @@ function createMatch(lobby, options = {}) {
   const stakeType = resolveStakeType(lobby.stakeType);
   const mode = resolveMatchMode(stakeType);
   const isPractice = mode === 'practice';
+  const quickPlayBucket = normalizeQuickPlayBucket(options.quickPlayBucket || lobby.quickPlayBucket);
   const botId = playerIds.find((pid) => isBotPlayer(pid));
   const botDifficulty = botId ? options.botDifficultyById?.[botId] || 'normal' : null;
-  const betLimits = botDifficulty ? getBetLimitsForDifficulty(botDifficulty) : { min: MIN_BET, max: MAX_BET_CAP };
+  const betLimits = quickPlayBucket
+    ? { min: quickPlayBucket, max: quickPlayBucket }
+    : botDifficulty
+      ? getBetLimitsForDifficulty(botDifficulty)
+      : { min: MIN_BET, max: MAX_BET_CAP };
   const selectedBetById = {};
   for (const pid of playerIds) {
     if (isBotPlayer(pid)) {
       selectedBetById[pid] = betLimits.min;
     } else {
       const user = getUserById(pid);
-      selectedBetById[pid] = clampBet(
-        user?.selectedBet || BASE_BET,
-        isPractice ? STARTING_CHIPS : (user?.chips || STARTING_CHIPS),
-        betLimits
-      );
+      selectedBetById[pid] = quickPlayBucket
+        ? quickPlayBucket
+        : clampBet(
+          user?.selectedBet || BASE_BET,
+          isPractice ? STARTING_CHIPS : (user?.chips || STARTING_CHIPS),
+          betLimits
+        );
     }
   }
   const match = {
     id: nanoid(10),
     lobbyId: lobby.id,
+    matchType: lobby.type || 'lobby',
+    quickPlayBucket: quickPlayBucket || null,
     participants: buildParticipants(playerIds, options.botDifficultyById || {}),
     playerIds,
     startingPlayerIndex: 0,
@@ -2307,6 +2479,7 @@ function createMatch(lobby, options = {}) {
     round: null,
     betControllerId: lobby.ownerId,
     betSettings: { selectedBetById },
+    chat: [],
     bot: options.botDifficultyById
       ? {
           difficultyById: options.botDifficultyById,
@@ -2925,18 +3098,27 @@ app.post('/api/matchmaking/join', authMiddleware, async (req, res) => {
   if (isUserInActiveMatch(req.user.id)) {
     return res.status(409).json({ error: 'Already in an active match' });
   }
-  if (!quickPlayQueuedUsers.has(req.user.id)) {
-    quickPlayQueue.push({ userId: req.user.id, queuedAt: nowIso() });
-    quickPlayQueuedUsers.add(req.user.id);
+  const bucket = normalizeQuickPlayBucket(req.body?.bucket);
+  if (!bucket) {
+    return res.status(400).json({ error: `Invalid quick play bucket. Choose one of: ${QUICK_PLAY_BUCKETS.join(', ')}` });
   }
-  const matched = await processQuickPlayQueue();
+  if (!canJoinQuickPlayBucket(req.user, bucket)) {
+    return res.status(400).json({ error: `Need at least ${bucket} chips to enter this Quick Play bucket` });
+  }
+  const queued = enqueueQuickPlayUser(req.user.id, bucket);
+  if (queued.error) {
+    return res.status(400).json({ error: queued.error });
+  }
+  const matched = await processQuickPlayQueue(bucket);
   const found = matched.find((entry) => entry.userId === req.user.id);
   if (found) return res.json(found.payload);
-  const queued = quickPlayQueue.find((entry) => entry.userId === req.user.id) || null;
+  const status = quickPlayQueueStatus(req.user.id);
   return res.json({
     status: 'searching',
-    queuePosition: quickPlayQueuePosition(req.user.id),
-    queuedAt: queued?.queuedAt || nowIso()
+    bucket,
+    fixedBet: bucket,
+    queuePosition: status.queuePosition,
+    queuedAt: status.queuedAt || queued.queuedAt || nowIso()
   });
 });
 
@@ -2946,9 +3128,13 @@ app.post('/api/matchmaking/cancel', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
+  const status = quickPlayQueueStatus(req.user.id);
   return res.json({
-    status: quickPlayQueuedUsers.has(req.user.id) ? 'searching' : 'idle',
-    queuePosition: quickPlayQueuePosition(req.user.id)
+    status: status.bucket ? 'searching' : 'idle',
+    bucket: status.bucket,
+    fixedBet: status.bucket,
+    queuePosition: status.queuePosition,
+    queuedAt: status.queuedAt
   });
 });
 
@@ -3140,21 +3326,36 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('matchmaking:join', async () => {
+  socket.on('matchmaking:join', async (payload = {}) => {
     if (isUserInActiveMatch(userId)) {
       socket.emit('matchmaking:error', { error: 'Already in an active match' });
       return;
     }
-    if (!quickPlayQueuedUsers.has(userId)) {
-      quickPlayQueue.push({ userId, queuedAt: nowIso() });
-      quickPlayQueuedUsers.add(userId);
+    const bucket = normalizeQuickPlayBucket(payload.bucket);
+    if (!bucket) {
+      socket.emit('matchmaking:error', { error: `Invalid quick play bucket. Choose one of: ${QUICK_PLAY_BUCKETS.join(', ')}` });
+      return;
     }
-    const matched = await processQuickPlayQueue();
+    const user = getUserById(userId);
+    if (!canJoinQuickPlayBucket(user, bucket)) {
+      socket.emit('matchmaking:error', { error: `Need at least ${bucket} chips to enter this Quick Play bucket` });
+      return;
+    }
+    const queued = enqueueQuickPlayUser(userId, bucket);
+    if (queued.error) {
+      socket.emit('matchmaking:error', { error: queued.error });
+      return;
+    }
+    const matched = await processQuickPlayQueue(bucket);
     const found = matched.find((entry) => entry.userId === userId);
     if (found) return;
+    const status = quickPlayQueueStatus(userId);
     socket.emit('matchmaking:searching', {
       status: 'searching',
-      queuePosition: quickPlayQueuePosition(userId)
+      bucket,
+      fixedBet: bucket,
+      queuePosition: status.queuePosition,
+      queuedAt: status.queuedAt || queued.queuedAt || nowIso()
     });
   });
 
@@ -3242,6 +3443,22 @@ io.on('connection', (socket) => {
     pushMatchState(match);
     db.write();
     scheduleBotTurn(match);
+    return null;
+  });
+
+  socket.on('match:chat', (payload = {}) => {
+    const { matchId, text } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    const result = appendMatchChatMessage(match, userId, text);
+    if (result.error) return socket.emit('match:error', result);
+    for (const pid of match.playerIds) {
+      emitToUser(pid, 'match:chat', {
+        matchId: match.id,
+        message: result.message,
+        chat: result.chat
+      });
+    }
     return null;
   });
 

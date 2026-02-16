@@ -480,6 +480,23 @@ test('40 bot bust resolves round immediately without waiting for player action',
   assert.equal(m.round.resultByPlayer[botId].outcome, 'lose');
 });
 
+test('40b player bust on hit resolves round immediately as loss (no push)', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('K'), card('Q')], [false, true], 5, 0),
+    p2Hand: newHand([card('10'), card('9')], [false, true], 5, 0),
+    deck: [card('2', 'C')]
+  });
+  m.round.turnPlayerId = 'p1';
+
+  const res = applyAction(m, 'p1', 'hit');
+  assert.equal(res.ok, true);
+  assert.equal(m.round.players.p1.hands[0].bust, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.outcome, 'lose');
+  assert.notEqual(m.round.resultByPlayer.p1.outcome, 'push');
+  assert.equal(m.round.resultByPlayer.p2.outcome, 'win');
+});
+
 test('41 bot split first-hand bust advances to second bot hand', () => {
   const botId = 'bot:normal:t3';
   const m = {
