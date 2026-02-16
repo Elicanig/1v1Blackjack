@@ -177,6 +177,7 @@ const state = {
   freeClaimNextAt: null,
   freeClaimRemainingMs: 0,
   showMorePatchNotes: false,
+  statsMoreOpen: false,
   friendInvite: null,
   friendInviteRemainingMs: 0,
   lastRoundResultKey: '',
@@ -549,6 +550,50 @@ function claimableChallengesCount() {
     }
   }
   return count;
+}
+
+function deriveExpandedStats(me) {
+  const stats = me?.stats || {};
+  const history = Array.isArray(me?.betHistory) ? me.betHistory : [];
+  const historyWon = history.reduce((sum, item) => sum + Math.max(0, Number(item?.net) || 0), 0);
+  const historyLost = history.reduce((sum, item) => sum + Math.max(0, -(Number(item?.net) || 0)), 0);
+  const historyBiggestWin = history.reduce((max, item) => Math.max(max, Number(item?.net) || 0), 0);
+  const historyBiggestLoss = history.reduce((max, item) => Math.max(max, -(Number(item?.net) || 0)), 0);
+  const realBetSum = Number(stats.realBetSum) || history.reduce((sum, item) => sum + (Number(item?.bet) || 0), 0);
+  const realBetCount = Number(stats.realBetCount) || history.filter((item) => Number.isFinite(Number(item?.bet))).length;
+  const averageBet = realBetCount > 0 ? realBetSum / realBetCount : 0;
+
+  return {
+    splitsAttempted: Number(stats.splitsAttempted) || 0,
+    splitHandsWon: Number(stats.splitHandsWon) || 0,
+    splitHandsLost: Number(stats.splitHandsLost) || 0,
+    splitHandsPushed: Number(stats.splitHandsPushed) || 0,
+    doublesAttempted: Number(stats.doublesAttempted) || 0,
+    doubleHandsWon: Number(stats.doubleHandsWon) || 0,
+    doubleHandsLost: Number(stats.doubleHandsLost) || 0,
+    doubleHandsPushed: Number(stats.doubleHandsPushed) || 0,
+    surrenders: Number(stats.surrenders) || 0,
+    blackjacks: Number(stats.blackjacks) || 0,
+    busts: Number(stats.busts) || 0,
+    highestSafeTotal: Number(stats.highestSafeTotal) || 0,
+    maxCardsInWinningHand: Number(stats.maxCardsInWinningHand) || 0,
+    fourCard21s: Number(stats.fourCard21s) || 0,
+    fiveCard21s: Number(stats.fiveCard21s) || 0,
+    sixCard21s: Number(stats.sixCard21s) || 0,
+    sevenPlusCard21s: Number(stats.sevenPlusCard21s) || 0,
+    longestWinStreak: Number(stats.longestWinStreak) || 0,
+    longestLossStreak: Number(stats.longestLossStreak) || 0,
+    totalChipsWon: Number(stats.totalChipsWon) || historyWon,
+    totalChipsLost: Number(stats.totalChipsLost) || historyLost,
+    netChips: (Number(stats.totalChipsWon) || historyWon) - (Number(stats.totalChipsLost) || historyLost),
+    biggestHandWin: Number(stats.biggestHandWin) || historyBiggestWin,
+    biggestHandLoss: Number(stats.biggestHandLoss) || historyBiggestLoss,
+    averageBet,
+    handsPlayedBotPractice: Number(stats.handsPlayedBotPractice) || 0,
+    handsPlayedBotReal: Number(stats.handsPlayedBotReal) || 0,
+    handsPlayedPvpReal: Number(stats.handsPlayedPvpReal) || 0,
+    handsPlayedPvpFriendly: Number(stats.handsPlayedPvpFriendly) || 0
+  };
 }
 
 function updateChallengeResetCountdowns() {
@@ -1876,6 +1921,7 @@ function logout() {
   state.challengeResets = { hourly: null, daily: null, weekly: null };
   state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
   state.challengeResetRefreshInFlight = false;
+  state.statsMoreOpen = false;
   state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
   state.pressureGlow = { key: '', expiresAt: 0, seen: true };
   state.revealPin = false;
@@ -2167,6 +2213,7 @@ function renderHome() {
   const quickPlaySearching = state.quickPlay.status === 'searching';
   const quickPlayConnected = state.quickPlay.status === 'connected';
   const quickPlayLabel = quickPlayConnected ? 'Connecting...' : quickPlaySearching ? 'Searching...' : 'Quick Play';
+  const expandedStats = deriveExpandedStats(me);
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -2223,14 +2270,17 @@ function renderHome() {
           </section>
         </section>
         <section class="col card section reveal-panel glow-follow glow-follow--panel">
-        <h2>Stats</h2>
+        <div class="stats-head">
+          <h2>Stats</h2>
+          <button id="openStatsMoreBtn" class="ghost stats-more-btn" type="button">View more</button>
+        </div>
         <div class="kpis">
           <div class="kpi"><div class="muted">Total Matches</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
           <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon}</strong></div>
           <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost}</strong></div>
           <div class="kpi"><div class="muted">Pushes</div><strong>${me.stats.pushes || me.stats.handsPush || 0}</strong></div>
           <div class="kpi"><div class="muted">Blackjacks</div><strong>${me.stats.blackjacks || 0}</strong></div>
-          <div class="kpi"><div class="muted">6–7 Dealt</div><strong>${me.stats.sixSevenDealt || 0}</strong></div>
+          <div class="kpi"><div class="muted">6 7's dealt</div><strong>${me.stats.sixSevenDealt || 0}</strong></div>
         </div>
         <div class="free-claim-card">
           <div>
@@ -2302,6 +2352,65 @@ function renderHome() {
         </section>
       </div>
     </main>
+    ${
+      state.statsMoreOpen
+        ? `<div class="modal" id="statsMoreModal">
+            <div class="modal-panel card stats-more-panel" role="dialog" aria-modal="true" aria-label="Expanded stats">
+              <div class="stats-more-head">
+                <h3>Detailed Stats</h3>
+                <button id="closeStatsMoreBtn" class="ghost" type="button">Close</button>
+              </div>
+              <div class="stats-more-scroll">
+                <section class="stats-more-group">
+                  <h4>Split + Double</h4>
+                  <div class="stats-more-list">
+                    <div><span>Splits attempted</span><strong>${expandedStats.splitsAttempted}</strong></div>
+                    <div><span>Split hands won / lost / pushed</span><strong>${expandedStats.splitHandsWon} / ${expandedStats.splitHandsLost} / ${expandedStats.splitHandsPushed}</strong></div>
+                    <div><span>Doubles attempted</span><strong>${expandedStats.doublesAttempted}</strong></div>
+                    <div><span>Double hands won / lost / pushed</span><strong>${expandedStats.doubleHandsWon} / ${expandedStats.doubleHandsLost} / ${expandedStats.doubleHandsPushed}</strong></div>
+                    <div><span>Surrenders</span><strong>${expandedStats.surrenders}</strong></div>
+                  </div>
+                </section>
+                <section class="stats-more-group">
+                  <h4>Card Outcomes</h4>
+                  <div class="stats-more-list">
+                    <div><span>Blackjacks (natural 21)</span><strong>${expandedStats.blackjacks}</strong></div>
+                    <div><span>Busts</span><strong>${expandedStats.busts}</strong></div>
+                    <div><span>Highest total without bust</span><strong>${expandedStats.highestSafeTotal}</strong></div>
+                    <div><span>Max cards in a winning hand</span><strong>${expandedStats.maxCardsInWinningHand}</strong></div>
+                    <div><span>4-card 21s</span><strong>${expandedStats.fourCard21s}</strong></div>
+                    <div><span>5-card 21s</span><strong>${expandedStats.fiveCard21s}</strong></div>
+                    <div><span>6-card 21s</span><strong>${expandedStats.sixCard21s}</strong></div>
+                    <div><span>7+ card 21s</span><strong>${expandedStats.sevenPlusCard21s}</strong></div>
+                    <div><span>Longest win streak</span><strong>${expandedStats.longestWinStreak}</strong></div>
+                    <div><span>Longest loss streak</span><strong>${expandedStats.longestLossStreak}</strong></div>
+                  </div>
+                </section>
+                <section class="stats-more-group">
+                  <h4>Chips + Betting (real-chip only)</h4>
+                  <div class="stats-more-list">
+                    <div><span>Total chips won</span><strong>${Number(expandedStats.totalChipsWon).toLocaleString()}</strong></div>
+                    <div><span>Total chips lost</span><strong>${Number(expandedStats.totalChipsLost).toLocaleString()}</strong></div>
+                    <div><span>Net chips</span><strong>${expandedStats.netChips >= 0 ? '+' : ''}${Number(expandedStats.netChips).toLocaleString()}</strong></div>
+                    <div><span>Biggest single-hand win</span><strong>${Number(expandedStats.biggestHandWin).toLocaleString()}</strong></div>
+                    <div><span>Biggest single-hand loss</span><strong>${Number(expandedStats.biggestHandLoss).toLocaleString()}</strong></div>
+                    <div><span>Average bet</span><strong>${expandedStats.averageBet > 0 ? expandedStats.averageBet.toFixed(1) : '0'}</strong></div>
+                  </div>
+                </section>
+                <section class="stats-more-group">
+                  <h4>Hands By Mode</h4>
+                  <div class="stats-more-list">
+                    <div><span>Hands played vs bots (practice)</span><strong>${expandedStats.handsPlayedBotPractice}</strong></div>
+                    <div><span>Hands played vs bots (real)</span><strong>${expandedStats.handsPlayedBotReal}</strong></div>
+                    <div><span>Hands played PvP (real)</span><strong>${expandedStats.handsPlayedPvpReal}</strong></div>
+                    <div><span>Hands played PvP (friendly)</span><strong>${expandedStats.handsPlayedPvpFriendly}</strong></div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
   `;
 
   bindShellNav();
@@ -2361,6 +2470,31 @@ function renderHome() {
   }
   const playBotBtn = document.getElementById('playBotBtn');
   if (playBotBtn) playBotBtn.onclick = () => startBotMatch();
+  const openStatsMoreBtn = document.getElementById('openStatsMoreBtn');
+  if (openStatsMoreBtn) {
+    openStatsMoreBtn.onclick = () => {
+      state.statsMoreOpen = true;
+      render();
+    };
+  }
+  const statsMoreModal = document.getElementById('statsMoreModal');
+  if (statsMoreModal) {
+    statsMoreModal.onclick = () => {
+      state.statsMoreOpen = false;
+      render();
+    };
+  }
+  const closeStatsMoreBtn = document.getElementById('closeStatsMoreBtn');
+  if (closeStatsMoreBtn) {
+    closeStatsMoreBtn.onclick = () => {
+      state.statsMoreOpen = false;
+      render();
+    };
+  }
+  const statsMorePanel = app.querySelector('.stats-more-panel');
+  if (statsMorePanel) {
+    statsMorePanel.onclick = (event) => event.stopPropagation();
+  }
 
   const claimBtn = document.getElementById('claimFreeBtn');
   if (claimBtn) claimBtn.onclick = claimFree100;

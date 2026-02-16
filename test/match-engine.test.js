@@ -16,6 +16,7 @@ import {
   refreshChallengesForUser,
   recordChallengeEventForMatch,
   buildChallengePayload,
+  countWinningSplitHandsForPlayer,
   getBotObservation,
   chooseBotActionFromObservation
 } from '../server.js';
@@ -603,4 +604,31 @@ test('45 bot chooses from observed legal actions only', () => {
     const action = chooseBotActionFromObservation(observation, 'normal');
     assert.equal(['hit', 'stand'].includes(action), true);
   }
+});
+
+test('46 split-win counter counts a single split hand win', () => {
+  const outcomes = [
+    { winner: 'p1', loser: 'p2', amount: 25, handIndex: 0, winnerHandWasSplit: true },
+    { winner: 'p2', loser: 'p1', amount: 25, handIndex: 1, winnerHandWasSplit: false }
+  ];
+  assert.equal(countWinningSplitHandsForPlayer(outcomes, 'p1'), 1);
+});
+
+test('47 split-win counter counts re-split wins separately', () => {
+  const outcomes = [
+    { winner: 'p1', loser: 'p2', amount: 25, handIndex: 0, winnerHandWasSplit: true },
+    { winner: 'p1', loser: 'p2', amount: 25, handIndex: 1, winnerHandWasSplit: true },
+    { winner: 'p2', loser: 'p1', amount: 25, handIndex: 2, winnerHandWasSplit: false }
+  ];
+  assert.equal(countWinningSplitHandsForPlayer(outcomes, 'p1'), 2);
+});
+
+test('48 split-win counter supports multiple split-hand wins in one round', () => {
+  const outcomes = [
+    { winner: 'p1', loser: 'p2', amount: 25, handIndex: 0, winnerHandWasSplit: true },
+    { winner: 'p1', loser: 'p2', amount: 25, handIndex: 1, winnerHandWasSplit: true },
+    { winner: 'p1', loser: 'p2', amount: 25, handIndex: 2, winnerHandWasSplit: true },
+    { winner: null, loser: null, amount: 0, handIndex: 3, winnerHandWasSplit: false }
+  ];
+  assert.equal(countWinningSplitHandsForPlayer(outcomes, 'p1'), 3);
 });

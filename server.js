@@ -186,25 +186,19 @@ for (const user of db.data.users) {
     user.stats = {};
     dbTouched = true;
   }
-  if (user.stats.pushes === undefined) {
+  if (user.stats.pushes === undefined && user.stats.handsPush !== undefined) {
     user.stats.pushes = user.stats.handsPush || 0;
     dbTouched = true;
   }
-  if (user.stats.handsPush === undefined) {
+  if (user.stats.handsPush === undefined && user.stats.pushes !== undefined) {
     user.stats.handsPush = user.stats.pushes || 0;
     dbTouched = true;
   }
-  if (user.stats.handsPlayed === undefined) {
-    user.stats.handsPlayed = 0;
-    dbTouched = true;
-  }
-  if (user.stats.blackjacks === undefined) {
-    user.stats.blackjacks = 0;
-    dbTouched = true;
-  }
-  if (user.stats.sixSevenDealt === undefined) {
-    user.stats.sixSevenDealt = 0;
-    dbTouched = true;
+  for (const [key, defaultValue] of Object.entries(USER_STATS_DEFAULTS)) {
+    if (user.stats[key] === undefined) {
+      user.stats[key] = defaultValue;
+      dbTouched = true;
+    }
   }
   if (!user.challengeSets) {
     user.challengeSets = {};
@@ -392,6 +386,49 @@ const RULES = {
   MAX_HANDS_PER_PLAYER: 4,
   MAX_DOUBLES_PER_HAND: 1,
   ALL_IN_ON_INSUFFICIENT_BASE_BET: true
+};
+
+const USER_STATS_DEFAULTS = {
+  matchesPlayed: 0,
+  roundsWon: 0,
+  roundsLost: 0,
+  handsWon: 0,
+  handsLost: 0,
+  pushes: 0,
+  handsPush: 0,
+  handsPlayed: 0,
+  blackjacks: 0,
+  sixSevenDealt: 0,
+  splitsAttempted: 0,
+  splitHandsWon: 0,
+  splitHandsLost: 0,
+  splitHandsPushed: 0,
+  doublesAttempted: 0,
+  doubleHandsWon: 0,
+  doubleHandsLost: 0,
+  doubleHandsPushed: 0,
+  surrenders: 0,
+  busts: 0,
+  highestSafeTotal: 0,
+  maxCardsInWinningHand: 0,
+  fourCard21s: 0,
+  fiveCard21s: 0,
+  sixCard21s: 0,
+  sevenPlusCard21s: 0,
+  longestWinStreak: 0,
+  longestLossStreak: 0,
+  currentWinStreak: 0,
+  currentLossStreak: 0,
+  totalChipsWon: 0,
+  totalChipsLost: 0,
+  biggestHandWin: 0,
+  biggestHandLoss: 0,
+  realBetSum: 0,
+  realBetCount: 0,
+  handsPlayedBotPractice: 0,
+  handsPlayedBotReal: 0,
+  handsPlayedPvpReal: 0,
+  handsPlayedPvpFriendly: 0
 };
 
 function getBetLimitsForDifficulty(difficulty = 'normal') {
@@ -976,6 +1013,14 @@ function matchHistoryModeLabel(match) {
     return isPracticeMatch(match) ? 'Bot Practice' : 'Bot Real';
   }
   return isPracticeMatch(match) ? 'Friendly PvP' : 'Challenge PvP';
+}
+
+function countWinningSplitHandsForPlayer(outcomes, playerId) {
+  if (!Array.isArray(outcomes) || !playerId) return 0;
+  return outcomes.reduce((count, out) => {
+    if (!out || out.winner !== playerId) return count;
+    return count + (out.winnerHandWasSplit ? 1 : 0);
+  }, 0);
 }
 
 function creditUserBankroll(user, rewardChips) {
@@ -1719,14 +1764,14 @@ function resolveRound(match) {
       chipsDelta[bId] += amount;
       handA.outcome = 'loss';
       handB.outcome = handB.outcome || 'win';
-      outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx });
+      outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handB?.wasSplitHand) });
     } else if (handB.surrendered) {
       const amount = Math.floor(handB.bet * RULES.SURRENDER_LOSS_FRACTION);
       chipsDelta[aId] += amount;
       chipsDelta[bId] -= amount;
       handA.outcome = 'win';
       handB.outcome = 'loss';
-      outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx });
+      outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
     } else {
       const result = compareHands(handA, handB);
       const pot = Math.min(handA.bet, handB.bet);
@@ -1738,18 +1783,18 @@ function resolveRound(match) {
         chipsDelta[bId] -= amount;
         handA.outcome = 'win';
         handB.outcome = handB.outcome || 'loss';
-        outcomes.push({ winner: aId, loser: bId, amount, splitWin: handA.wasSplitHand, handIndex: idx });
+        outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
       } else if (result < 0) {
         const amount = handBNatural && !handANatural ? Math.floor(pot * 1.5) : pot;
         chipsDelta[aId] -= amount;
         chipsDelta[bId] += amount;
         handA.outcome = 'loss';
         handB.outcome = handB.outcome || 'win';
-        outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx });
+        outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handB?.wasSplitHand) });
       } else {
         handA.outcome = 'push';
         if (!handB.outcome) handB.outcome = 'push';
-        outcomes.push({ winner: null, loser: null, amount: 0, handIndex: idx });
+        outcomes.push({ winner: null, loser: null, amount: 0, handIndex: idx, winnerHandWasSplit: false });
       }
     }
   }
@@ -1763,35 +1808,100 @@ function resolveRound(match) {
     [bId]: getParticipantChips(match, bId)
   };
 
-  function applyHandOutcomeStats(user, ownId, out) {
+  function applyHandOutcomeStats(user, ownId, out, hand) {
     if (!user) return;
-    user.stats.handsPlayed = (user.stats.handsPlayed || 0) + 1;
-    recordChallengeEvent(user, 'hand_played', 1);
-    if (out.winner === ownId) {
-      user.stats.handsWon += 1;
-      recordChallengeEvent(user, 'hand_won', 1);
-      if (out.splitWin) recordChallengeEvent(user, 'split_win', 1);
-    } else if (out.loser === ownId) {
-      user.stats.handsLost += 1;
-      recordChallengeEvent(user, 'hand_lost', 1);
+    const stats = user.stats || (user.stats = { ...USER_STATS_DEFAULTS });
+    const isBotOpponent = isBotPlayer(nextPlayerId(match, ownId));
+    if (isBotOpponent) {
+      if (isPracticeMatch(match)) stats.handsPlayedBotPractice = (stats.handsPlayedBotPractice || 0) + 1;
+      else stats.handsPlayedBotReal = (stats.handsPlayedBotReal || 0) + 1;
     } else {
-      user.stats.pushes = (user.stats.pushes || 0) + 1;
-      user.stats.handsPush = user.stats.pushes;
+      if (isPracticeMatch(match)) stats.handsPlayedPvpFriendly = (stats.handsPlayedPvpFriendly || 0) + 1;
+      else stats.handsPlayedPvpReal = (stats.handsPlayedPvpReal || 0) + 1;
+    }
+
+    if (!realMatch) return;
+
+    const ownWon = out.winner === ownId;
+    const ownLost = out.loser === ownId;
+    const ownPush = !ownWon && !ownLost;
+    const handCards = Array.isArray(hand?.cards) ? hand.cards : [];
+    const handBet = Math.max(0, Math.floor(Number(hand?.bet) || 0));
+    const handCardsCount = handCards.length;
+    const handSummary = handMeta(handCards);
+
+    stats.handsPlayed = (stats.handsPlayed || 0) + 1;
+    stats.realBetSum = (stats.realBetSum || 0) + handBet;
+    stats.realBetCount = (stats.realBetCount || 0) + 1;
+    recordChallengeEvent(user, 'hand_played', 1);
+
+    if (!handSummary.isBust) {
+      stats.highestSafeTotal = Math.max(stats.highestSafeTotal || 0, handSummary.total || 0);
+    }
+    if (handSummary.total === 21) {
+      if (handCardsCount === 4) stats.fourCard21s = (stats.fourCard21s || 0) + 1;
+      else if (handCardsCount === 5) stats.fiveCard21s = (stats.fiveCard21s || 0) + 1;
+      else if (handCardsCount === 6) stats.sixCard21s = (stats.sixCard21s || 0) + 1;
+      else if (handCardsCount >= 7) stats.sevenPlusCard21s = (stats.sevenPlusCard21s || 0) + 1;
+    }
+    if (hand?.bust) stats.busts = (stats.busts || 0) + 1;
+    if (hand?.surrendered) stats.surrenders = (stats.surrenders || 0) + 1;
+
+    if (ownWon) {
+      stats.handsWon = (stats.handsWon || 0) + 1;
+      stats.currentWinStreak = (stats.currentWinStreak || 0) + 1;
+      stats.currentLossStreak = 0;
+      stats.longestWinStreak = Math.max(stats.longestWinStreak || 0, stats.currentWinStreak || 0);
+      stats.totalChipsWon = (stats.totalChipsWon || 0) + (out.amount || 0);
+      stats.biggestHandWin = Math.max(stats.biggestHandWin || 0, out.amount || 0);
+      if (!hand?.bust) stats.maxCardsInWinningHand = Math.max(stats.maxCardsInWinningHand || 0, handCardsCount);
+      recordChallengeEvent(user, 'hand_won', 1);
+    } else if (ownLost) {
+      stats.handsLost = (stats.handsLost || 0) + 1;
+      stats.currentLossStreak = (stats.currentLossStreak || 0) + 1;
+      stats.currentWinStreak = 0;
+      stats.longestLossStreak = Math.max(stats.longestLossStreak || 0, stats.currentLossStreak || 0);
+      stats.totalChipsLost = (stats.totalChipsLost || 0) + (out.amount || 0);
+      stats.biggestHandLoss = Math.max(stats.biggestHandLoss || 0, out.amount || 0);
+      recordChallengeEvent(user, 'hand_lost', 1);
+    } else if (ownPush) {
+      stats.pushes = (stats.pushes || 0) + 1;
+      stats.handsPush = stats.pushes;
+      stats.currentWinStreak = 0;
+      stats.currentLossStreak = 0;
       recordChallengeEvent(user, 'push', 1);
+    }
+
+    if (hand?.wasSplitHand) {
+      if (ownWon) stats.splitHandsWon = (stats.splitHandsWon || 0) + 1;
+      else if (ownLost) stats.splitHandsLost = (stats.splitHandsLost || 0) + 1;
+      else if (ownPush) stats.splitHandsPushed = (stats.splitHandsPushed || 0) + 1;
+    }
+    if (hand?.doubled || (hand?.doubleCount || 0) > 0) {
+      if (ownWon) stats.doubleHandsWon = (stats.doubleHandsWon || 0) + 1;
+      else if (ownLost) stats.doubleHandsLost = (stats.doubleHandsLost || 0) + 1;
+      else if (ownPush) stats.doubleHandsPushed = (stats.doubleHandsPushed || 0) + 1;
     }
   }
 
+  for (const out of outcomes) {
+    const handA = a.hands[out.handIndex] || a.hands[0];
+    const handB = b.hands[out.handIndex] || b.hands[0];
+    applyHandOutcomeStats(userA, aId, out, handA);
+    applyHandOutcomeStats(userB, bId, out, handB);
+  }
+
   if (realMatch) {
-    for (const out of outcomes) {
-      applyHandOutcomeStats(userA, aId, out);
-      applyHandOutcomeStats(userB, bId, out);
-    }
+    const splitWinsA = countWinningSplitHandsForPlayer(outcomes, aId);
+    const splitWinsB = countWinningSplitHandsForPlayer(outcomes, bId);
+    if (userA && splitWinsA > 0) recordChallengeEvent(userA, 'split_win', splitWinsA);
+    if (userB && splitWinsB > 0) recordChallengeEvent(userB, 'split_win', splitWinsB);
   }
 
   if (realMatch) {
     for (const out of outcomes) {
       const handA = a.hands[out.handIndex] || a.hands[0];
-      const handB = b.hands[0];
+      const handB = b.hands[out.handIndex] || b.hands[0];
       if (userA) {
         if (out.winner === aId && handA && !handA.bust) recordSkillEvent(userA, 'win_no_bust', 1);
         if (handA?.naturalBlackjack) recordSkillEvent(userA, 'blackjack', 1);
@@ -1844,7 +1954,7 @@ function resolveRound(match) {
     for (let idx = 0; idx < outcomes.length; idx += 1) {
       const out = outcomes[idx];
       const handA = a.hands[out.handIndex] || a.hands[0];
-      const handB = b.hands[0];
+      const handB = b.hands[out.handIndex] || b.hands[0];
       appendBetHistory(userA, {
         mode: modeLabel,
         bet: handA?.bet || match.round.baseBet,
@@ -2388,6 +2498,10 @@ function applyAction(match, playerId, action) {
     hand.bet *= 2;
     hand.doubleCount = (hand.doubleCount || 0) + 1;
     hand.doubled = hand.doubleCount > 0;
+    if (isRealMatch(match) && !isBotPlayer(playerId)) {
+      const user = getUserById(playerId);
+      if (user) user.stats.doublesAttempted = (user.stats.doublesAttempted || 0) + 1;
+    }
     hand.cards.push(drawCard(match.round));
     hand.hidden.push(false);
     const total = handTotal(hand.cards);
@@ -2438,6 +2552,8 @@ function applyAction(match, playerId, action) {
     if (isRealMatch(match)) {
       const user = getUserById(playerId);
       if (user) {
+        user.stats.splitsAttempted = (user.stats.splitsAttempted || 0) + 1;
+        recordChallengeEvent(user, 'split', 1);
         if (isSixSevenStartingHand(newOne.cards)) user.stats.sixSevenDealt += 1;
         if (isSixSevenStartingHand(newTwo.cards)) user.stats.sixSevenDealt += 1;
         db.write();
@@ -2713,18 +2829,7 @@ function buildNewUser(username) {
     avatar: avatarUrl('adventurer', cleanUsername),
     bio: 'Ready for Blackjack Battle.',
     chips: STARTING_CHIPS,
-    stats: {
-      matchesPlayed: 0,
-      roundsWon: 0,
-      roundsLost: 0,
-      handsWon: 0,
-      handsLost: 0,
-      pushes: 0,
-      handsPush: 0,
-      handsPlayed: 0,
-      blackjacks: 0,
-      sixSevenDealt: 0
-    },
+    stats: { ...USER_STATS_DEFAULTS },
     friends: [],
     challengeSets: {},
     lastDailyClaimAt: null,
@@ -3731,6 +3836,7 @@ export {
   recordChallengeEventForMatch,
   buildChallengePayload,
   isRealMatch,
+  countWinningSplitHandsForPlayer,
   getBotObservation,
   chooseBotActionFromObservation
 };
