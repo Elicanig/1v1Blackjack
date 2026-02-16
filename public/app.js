@@ -80,6 +80,12 @@ const FAVORITE_STAT_DEFS = Object.freeze([
     read: (me) => Number(me?.stats?.blackjacks) || 0
   },
   {
+    key: 'SIX_SEVEN_DEALT',
+    label: "6-7's Dealt",
+    description: 'Initial two cards are 6 and 7 (any order).',
+    read: (me) => Number(me?.stats?.sixSevenDealt) || 0
+  },
+  {
     key: 'SPLITS_ATTEMPTED',
     label: 'Splits Attempted',
     description: 'Times you split a pair.',
@@ -456,12 +462,14 @@ const state = {
   rankedOverview: null,
   homeSections: {
     highRoller: false,
-    practice: false,
-    betHistory: true
+    practice: false
   },
   leaderboardExpanded: false,
   betHistoryModalOpen: false,
   favoriteStatModalOpen: false,
+  favoriteStatDraftKey: '',
+  rankTimelineModalOpen: false,
+  rankedForfeitModalOpen: false,
   network: {
     offlineMode: !navigator.onLine,
     lastCheckedAt: 0,
@@ -748,6 +756,36 @@ function rankTierMetaFromUser(user = {}) {
     label: RANKED_TIER_META[key]?.label || rankTierLabelFromUser(user),
     icon: RANKED_TIER_META[key]?.icon || '◆',
     fixedBet: Math.max(1, Math.floor(Number(RANKED_TIER_META[key]?.fixedBet) || Number(user.rankedFixedBet) || 50))
+  };
+}
+
+function rankTimelineData(user = {}) {
+  const rows = [...RANKED_TIER_ORDER].reverse().map((key, index, list) => {
+    const meta = RANKED_TIER_META[key];
+    const nextKey = list[index + 1];
+    const nextMeta = nextKey ? RANKED_TIER_META[nextKey] : null;
+    return {
+      key,
+      label: meta.label,
+      icon: meta.icon,
+      minElo: meta.minElo,
+      maxElo: nextMeta ? (nextMeta.minElo - 1) : null
+    };
+  });
+  const elo = Math.max(0, Math.floor(Number(user?.rankedElo) || 0));
+  const currentKey = rankTierKeyFromUser(user);
+  const currentIndex = rows.findIndex((row) => row.key === currentKey);
+  const nextTier = currentIndex >= 0 && currentIndex < rows.length - 1 ? rows[currentIndex + 1] : null;
+  const eloToNext = nextTier ? Math.max(0, nextTier.minElo - elo) : 0;
+  const scaleMax = Math.max(rows[rows.length - 1]?.minElo || 2000, elo, 2000) + 200;
+  const progress = Math.max(0, Math.min(1, elo / scaleMax));
+  return {
+    rows,
+    elo,
+    currentKey,
+    nextTier,
+    eloToNext,
+    progressPercent: Math.round(progress * 100)
   };
 }
 
@@ -1151,6 +1189,43 @@ function favoriteStatOptionsForUser(me) {
       valueText: typeof entry.format === 'function' ? entry.format(value) : value.toLocaleString()
     };
   });
+}
+
+function renderRankTimelineModal(user = state.me) {
+  if (!state.rankTimelineModalOpen) return '';
+  const timeline = rankTimelineData(user || {});
+  const nextLine = timeline.nextTier
+    ? `${timeline.eloToNext.toLocaleString()} Elo to ${timeline.nextTier.label}`
+    : 'Top rank reached';
+  return `
+    <div class="modal" id="rankTimelineModal">
+      <div class="modal-panel card rank-timeline-modal" role="dialog" aria-modal="true" aria-label="Rank progression">
+        <div class="stats-more-head">
+          <h3>Rank Progression</h3>
+          <button id="closeRankTimelineBtn" class="ghost" type="button">Close</button>
+        </div>
+        <div class="muted">Current Elo ${timeline.elo.toLocaleString()} • ${nextLine}</div>
+        <div class="rank-timeline-track-wrap">
+          <div class="rank-timeline-track">
+            <span class="rank-timeline-progress" style="width:${timeline.progressPercent}%"></span>
+          </div>
+          <div class="rank-timeline-marker" style="left:${timeline.progressPercent}%"></div>
+        </div>
+        <div class="rank-timeline-list">
+          ${timeline.rows
+            .map((row) => `<div class="rank-timeline-row ${row.key === timeline.currentKey ? 'is-current' : ''}">
+                <div class="rank-timeline-row-left">
+                  <span class="rank-tier-icon">${row.icon}</span>
+                  <strong>${row.label}</strong>
+                  ${renderRankTierBadge({ rankTierKey: row.key, rankedElo: row.minElo })}
+                </div>
+                <span class="muted">${row.maxElo === null ? `${row.minElo}+` : `${row.minElo}-${row.maxElo}`}</span>
+              </div>`)
+            .join('')}
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function updateChallengeResetCountdowns() {
@@ -1735,6 +1810,7 @@ function connectSocket() {
     resetQuickPlayState();
     resetRankedQueueState();
     state.matchChatDraft = '';
+    state.rankedForfeitModalOpen = false;
     state.currentMatch = null;
     state.currentLobby = null;
     state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -1862,11 +1938,14 @@ async function loadMe() {
     state.patchNotes = FALLBACK_PATCH_NOTES;
     state.patchNotesDeploy = null;
     state.appVersion = 'dev';
-    state.homeSections = { highRoller: false, practice: false, betHistory: true };
+    state.homeSections = { highRoller: false, practice: false };
     state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
     state.leaderboardExpanded = false;
     state.rankedOverview = null;
     state.favoriteStatModalOpen = false;
+    state.favoriteStatDraftKey = '';
+    state.rankTimelineModalOpen = false;
+    state.rankedForfeitModalOpen = false;
     render();
   }
 }
@@ -1876,6 +1955,14 @@ function clearQuery() {
 }
 
 function goToView(view) {
+  if (state.view !== view) {
+    state.rankTimelineModalOpen = false;
+    state.rankedForfeitModalOpen = false;
+    if (view !== 'profile') {
+      state.favoriteStatModalOpen = false;
+      state.favoriteStatDraftKey = '';
+    }
+  }
   state.view = view;
   state.error = '';
   if (view === 'notifications') {
@@ -2335,7 +2422,6 @@ async function saveProfile(form) {
   const avatarSeed = form.querySelector('[name="avatar_seed"]').value.trim();
   const customStatText = String(form.querySelector('[name="custom_stat_text"]')?.value || '').slice(0, 120);
   const selectedTitle = String(form.querySelector('[name="selected_title"]')?.value || '').trim();
-  const favoriteStatKey = normalizeFavoriteStatKey(String(form.querySelector('[name="favorite_stat_key"]')?.value || ''));
   try {
     const profileData = await api('/api/profile', {
       method: 'PUT',
@@ -2349,15 +2435,30 @@ async function saveProfile(form) {
       method: 'PATCH',
       body: JSON.stringify({ selectedTitle })
     });
-    await api('/api/profile/favorite-stat', {
-      method: 'PATCH',
-      body: JSON.stringify({ favoriteStatKey })
-    });
     const meData = await api('/api/me');
     state.me = meData.user || profileData.user;
     state.favoriteStatModalOpen = false;
+    state.favoriteStatDraftKey = '';
     setStatus('Profile saved.');
     loadLeaderboard({ silent: true });
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+async function saveFavoriteStatPreference(nextKey) {
+  if (!state.me) return;
+  const favoriteStatKey = normalizeFavoriteStatKey(nextKey);
+  try {
+    const data = await api('/api/profile/favorite-stat', {
+      method: 'PATCH',
+      body: JSON.stringify({ favoriteStatKey })
+    });
+    state.me = data?.user || { ...state.me, favoriteStatKey };
+    state.favoriteStatModalOpen = false;
+    state.favoriteStatDraftKey = '';
+    setStatus('Favorite stat updated.');
+    render();
   } catch (e) {
     setError(e.message);
   }
@@ -3031,12 +3132,15 @@ function logout() {
   state.challengeResets = { hourly: null, daily: null, weekly: null };
   state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
   state.challengeResetRefreshInFlight = false;
-  state.homeSections = { highRoller: false, practice: false, betHistory: true };
+  state.homeSections = { highRoller: false, practice: false };
   state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
   state.leaderboardExpanded = false;
   state.rankedOverview = null;
   state.betHistoryModalOpen = false;
   state.favoriteStatModalOpen = false;
+  state.favoriteStatDraftKey = '';
+  state.rankTimelineModalOpen = false;
+  state.rankedForfeitModalOpen = false;
   state.presenceByUser = {};
   state.statsMoreOpen = false;
   state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -3256,6 +3360,7 @@ function syncRoundResultModal() {
     doubledBet >= minBet &&
     doubledBet <= maxBetCap &&
     (result.isPractice || (bankroll >= doubledBet && opponentBankroll >= doubledBet));
+  const leaveLabel = rankedRound ? 'Forfeit Series' : (botRound ? 'Leave to Lobby' : 'Leave to Home');
   mount.innerHTML = `
     <div class="round-result-wrap">
       <div class="round-result-popup result-modal card">
@@ -3273,8 +3378,20 @@ function syncRoundResultModal() {
               Double or Nothing (${doubledBet.toLocaleString()})${pvpRound ? ' • both must accept' : ''}
             </button>
           </div>
-          <div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">${botRound ? 'Leave to Lobby' : 'Leave to Home'}</button></div>
+          <div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">${leaveLabel}</button></div>
         </div>
+        ${
+          rankedRound && state.rankedForfeitModalOpen
+            ? `<div class="round-result-forfeit-confirm">
+                 <strong>Forfeit Ranked Series?</strong>
+                 <p class="muted">This counts as an automatic loss and ends the series now.</p>
+                 <div class="row">
+                   <button id="confirmRoundResultForfeitBtn" class="warn" type="button">Forfeit Series</button>
+                   <button id="cancelRoundResultForfeitBtn" class="ghost" type="button">Cancel</button>
+                 </div>
+               </div>`
+            : ''
+        }
         ${seriesComplete ? '<div class="muted" style="margin-top:8px">Series complete. Returning to lobby...</div>' : (busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : '')}
       </div>
     </div>
@@ -3298,7 +3415,27 @@ function syncRoundResultModal() {
   const leaveBtn = document.getElementById('roundResultLeaveBtn');
   if (leaveBtn) {
     leaveBtn.onclick = () => {
+      if (rankedRound) {
+        state.rankedForfeitModalOpen = true;
+        render();
+        return;
+      }
       state.pendingNavAfterLeave = isOfflineMatchActive() ? 'home' : (botRound ? 'lobbies' : 'home');
+      leaveCurrentMatch({ showToast: true, refreshOnError: true });
+    };
+  }
+  const cancelRoundResultForfeitBtn = document.getElementById('cancelRoundResultForfeitBtn');
+  if (cancelRoundResultForfeitBtn) {
+    cancelRoundResultForfeitBtn.onclick = () => {
+      state.rankedForfeitModalOpen = false;
+      render();
+    };
+  }
+  const confirmRoundResultForfeitBtn = document.getElementById('confirmRoundResultForfeitBtn');
+  if (confirmRoundResultForfeitBtn) {
+    confirmRoundResultForfeitBtn.onclick = () => {
+      state.rankedForfeitModalOpen = false;
+      state.pendingNavAfterLeave = 'ranked';
       leaveCurrentMatch({ showToast: true, refreshOnError: true });
     };
   }
@@ -3451,9 +3588,11 @@ function renderHome() {
   const rankedDisabledReason = rankedCanQueue
     ? ''
     : (rankedOverview?.disabledReason || `Need ${rankedFixedBet.toLocaleString()} chips for ranked.`);
+  const handsPushed = Math.max(0, Math.floor(Number(me.stats.pushes ?? me.stats.handsPush) || 0));
+  const sixSevenDealt = Math.max(0, Math.floor(Number(me.stats.sixSevenDealt) || 0));
   const betHistoryPreview = (me.betHistory || []).slice(0, 6);
   const betHistoryAll = (me.betHistory || []).slice(0, 15);
-  const homeSections = state.homeSections || { highRoller: false, practice: false, betHistory: true };
+  const homeSections = state.homeSections || { highRoller: false, practice: false };
   const latest = notes[0];
   const rankWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
   const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
@@ -3487,7 +3626,10 @@ function renderHome() {
                 <strong>Ranked Summary</strong>
                 ${renderRankTierBadge(me)}
               </div>
-              <button id="goRankedHomeBtn" class="gold" ${!rankedCanQueue && !rankedSearching ? 'disabled' : ''}>Go to Ranked</button>
+              <div class="ranked-summary-actions">
+                <button id="viewRankHomeBtn" class="ghost" type="button">View Rank</button>
+                <button id="goRankedHomeBtn" class="gold" ${!rankedCanQueue && !rankedSearching ? 'disabled' : ''}>Go to Ranked</button>
+              </div>
             </div>
             <div class="muted">Elo ${rankedElo} • W-L ${rankWins}-${rankLosses} • Fixed bet ${rankedFixedBet.toLocaleString()}</div>
             ${
@@ -3567,57 +3709,8 @@ function renderHome() {
                 : ''
             }
           </section>
-        </section>
 
-        <section class="col card section reveal-panel glow-follow glow-follow--panel home-stats-col">
-          <div class="stats-head">
-            <h2>Stats</h2>
-            <button id="openStatsMoreBtn" class="ghost stats-more-btn" type="button">View more</button>
-          </div>
-          <div class="kpis compact-kpis">
-            <div class="kpi"><div class="muted">Total Matches</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
-            <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon}</strong></div>
-            <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost}</strong></div>
-            <div class="kpi"><div class="muted">Blackjacks</div><strong>${me.stats.blackjacks || 0}</strong></div>
-          </div>
-          <div class="free-claim-card">
-            <div>
-              <strong>Daily Streak</strong>
-              <div class="muted">Daily wins: ${dailyWinStreak} day${dailyWinStreak === 1 ? '' : 's'} • PvP ${pvpWins}-${pvpLosses}</div>
-              <div class="muted">Claim streak: ${me.streakCount || 0} • Next reward +${me.nextStreakReward || 50}</div>
-              <div class="muted" id="freeClaimCountdown">${state.freeClaimRemainingMs > 0 ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now'}</div>
-            </div>
-            <button class="gold" id="claimFreeBtn" ${state.freeClaimRemainingMs > 0 ? 'disabled' : ''}>${state.freeClaimRemainingMs > 0 ? 'On cooldown' : 'Claim +100'}</button>
-          </div>
-
-          <section class="recent-activity-card card">
-            <div class="recent-activity-head">
-              <h3>Recent Activity</h3>
-              <button class="ghost" data-home-toggle="betHistory">${homeSections.betHistory ? 'Hide' : 'Show'}</button>
-            </div>
-            ${
-              homeSections.betHistory
-                ? `<div class="bet-history-preview">
-                    ${
-                      betHistoryPreview.length
-                        ? betHistoryPreview
-                          .map(
-                            (h) => `<div class="history-row compact">
-                              <span>${new Date(h.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                              <span>${h.mode}</span>
-                              <span class="${h.net >= 0 ? 'gain' : 'loss'}">${h.net >= 0 ? '+' : ''}${h.net}</span>
-                            </div>`
-                          )
-                          .join('')
-                        : '<div class="muted">No real-chip hand history yet.</div>'
-                    }
-                    <div><button class="ghost" id="openBetHistoryModalBtn" ${betHistoryAll.length ? '' : 'disabled'}>View more</button></div>
-                  </div>`
-                : '<div class="muted">Bet history hidden.</div>'
-            }
-          </section>
-
-          <section class="leaderboard-card compact" aria-label="Global leaderboard">
+          <section class="leaderboard-card compact home-leaderboard-card" aria-label="Global leaderboard">
             <div class="leaderboard-head">
               <h3>Leaderboard Snapshot</h3>
               <button class="ghost leaderboard-expand-btn" id="toggleLeaderboardBtn" type="button">${leaderboardExpanded ? 'Collapse' : 'Expand'}</button>
@@ -3636,6 +3729,52 @@ function renderHome() {
                   `).join('')
                   : `<div class="muted">${state.leaderboard.loading ? 'Loading leaderboard...' : 'No leaderboard data yet.'}</div>`
               }
+            </div>
+          </section>
+        </section>
+
+        <section class="col card section reveal-panel glow-follow glow-follow--panel home-stats-col">
+          <div class="stats-head">
+            <h2>Stats</h2>
+            <button id="openStatsMoreBtn" class="ghost stats-more-btn" type="button">View more</button>
+          </div>
+          <div class="kpis compact-kpis">
+            <div class="kpi"><div class="muted">Matches Played</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
+            <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon || 0}</strong></div>
+            <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost || 0}</strong></div>
+            <div class="kpi"><div class="muted">Hands Pushed</div><strong>${handsPushed}</strong></div>
+            <div class="kpi"><div class="muted">Blackjacks Dealt</div><strong>${me.stats.blackjacks || 0}</strong></div>
+            <div class="kpi"><div class="muted">6-7&apos;s Dealt</div><strong>${sixSevenDealt}</strong></div>
+          </div>
+          <div class="free-claim-card">
+            <div>
+              <strong>Daily Streak</strong>
+              <div class="muted">Daily wins: ${dailyWinStreak} day${dailyWinStreak === 1 ? '' : 's'} • PvP ${pvpWins}-${pvpLosses}</div>
+              <div class="muted">Claim streak: ${me.streakCount || 0} • Next reward +${me.nextStreakReward || 50}</div>
+              <div class="muted" id="freeClaimCountdown">${state.freeClaimRemainingMs > 0 ? `Next claim in ${formatCooldown(state.freeClaimRemainingMs)}` : 'Available now'}</div>
+            </div>
+            <button class="gold" id="claimFreeBtn" ${state.freeClaimRemainingMs > 0 ? 'disabled' : ''}>${state.freeClaimRemainingMs > 0 ? 'On cooldown' : 'Claim +100'}</button>
+          </div>
+
+          <section class="recent-activity-card card">
+            <div class="recent-activity-head">
+              <h3>Recent Activity</h3>
+            </div>
+            <div class="bet-history-preview">
+              ${
+                betHistoryPreview.length
+                  ? betHistoryPreview
+                    .map(
+                      (h) => `<div class="history-row compact">
+                            <span>${new Date(h.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                            <span>${h.mode}</span>
+                            <span class="${h.net >= 0 ? 'gain' : 'loss'}">${h.net >= 0 ? '+' : ''}${h.net}</span>
+                          </div>`
+                    )
+                    .join('')
+                  : '<div class="muted">No real-chip hand history yet.</div>'
+              }
+              <div><button class="ghost" id="openBetHistoryModalBtn" ${betHistoryAll.length ? '' : 'disabled'}>View more</button></div>
             </div>
           </section>
         </section>
@@ -3763,6 +3902,7 @@ function renderHome() {
           </div>`
         : ''
     }
+    ${renderRankTimelineModal(me)}
   `;
 
   bindShellNav();
@@ -3782,6 +3922,13 @@ function renderHome() {
     goRankedHomeBtn.onclick = () => {
       goToView('ranked');
       loadRankedOverview({ silent: true });
+      render();
+    };
+  }
+  const viewRankHomeBtn = document.getElementById('viewRankHomeBtn');
+  if (viewRankHomeBtn) {
+    viewRankHomeBtn.onclick = () => {
+      state.rankTimelineModalOpen = true;
       render();
     };
   }
@@ -3931,6 +4078,24 @@ function renderHome() {
       render();
     };
   }
+  const rankTimelineModal = document.getElementById('rankTimelineModal');
+  if (rankTimelineModal) {
+    rankTimelineModal.onclick = () => {
+      state.rankTimelineModalOpen = false;
+      render();
+    };
+  }
+  const closeRankTimelineBtn = document.getElementById('closeRankTimelineBtn');
+  if (closeRankTimelineBtn) {
+    closeRankTimelineBtn.onclick = () => {
+      state.rankTimelineModalOpen = false;
+      render();
+    };
+  }
+  const rankTimelinePanel = app.querySelector('.rank-timeline-modal');
+  if (rankTimelinePanel) {
+    rankTimelinePanel.onclick = (event) => event.stopPropagation();
+  }
   syncFreeClaimUI();
 }
 
@@ -3950,6 +4115,7 @@ function renderProfile() {
   const favoriteStats = favoriteStatOptionsForUser(me);
   const selectedFavoriteKey = normalizeFavoriteStatKey(me.favoriteStatKey);
   const selectedFavorite = favoriteStats.find((entry) => entry.key === selectedFavoriteKey) || favoriteStats[0];
+  const favoriteDraftKey = normalizeFavoriteStatKey(state.favoriteStatDraftKey || selectedFavorite.key);
   app.innerHTML = `
     ${renderTopbar('Profile')}
     <main class="view-stack">
@@ -4023,7 +4189,6 @@ function renderProfile() {
             </div>
             <div class="profile-favorite-row">
               <label>Favorite Stat</label>
-              <input type="hidden" name="favorite_stat_key" value="${selectedFavorite.key}" />
               <div class="profile-favorite-selected">
                 <div>
                   <strong>${selectedFavorite.label}</strong>
@@ -4073,13 +4238,14 @@ function renderProfile() {
         ? `<div class="modal" id="favoriteStatModal">
             <div class="modal-panel card favorite-stat-modal" role="dialog" aria-modal="true" aria-label="Choose favorite stat">
               <div class="stats-more-head">
-                <h3>Pick Favorite Stat</h3>
-                <button id="closeFavoriteStatModalBtn" class="ghost" type="button">Close</button>
+                <h3>Choose Favorite Stat</h3>
+                <button id="closeFavoriteStatModalBtn" class="ghost" type="button">Cancel</button>
               </div>
+              <p class="muted">Pick one stat to display publicly on your profile.</p>
               <div class="favorite-stat-list">
                 ${favoriteStats
                   .map((entry) => `
-                    <button class="favorite-stat-option ${entry.key === selectedFavorite.key ? 'is-selected' : ''}" type="button" data-favorite-stat-select="${entry.key}">
+                    <button class="favorite-stat-option ${entry.key === favoriteDraftKey ? 'is-selected' : ''}" type="button" data-favorite-stat-select="${entry.key}">
                       <div class="favorite-stat-option-head">
                         <strong>${entry.label}</strong>
                         <span>${entry.valueText}</span>
@@ -4088,6 +4254,10 @@ function renderProfile() {
                     </button>
                   `)
                   .join('')}
+              </div>
+              <div class="row profile-favorite-modal-actions">
+                <button id="cancelFavoriteStatModalBtn" class="ghost" type="button">Cancel</button>
+                <button id="saveFavoriteStatModalBtn" class="primary" type="button">Save</button>
               </div>
             </div>
           </div>`
@@ -4116,6 +4286,7 @@ function renderProfile() {
   const openFavoriteStatModalBtn = document.getElementById('openFavoriteStatModalBtn');
   if (openFavoriteStatModalBtn) {
     openFavoriteStatModalBtn.onclick = () => {
+      state.favoriteStatDraftKey = selectedFavorite.key;
       state.favoriteStatModalOpen = true;
       render();
     };
@@ -4124,6 +4295,7 @@ function renderProfile() {
   if (favoriteStatModal) {
     favoriteStatModal.onclick = () => {
       state.favoriteStatModalOpen = false;
+      state.favoriteStatDraftKey = '';
       render();
     };
   }
@@ -4135,14 +4307,28 @@ function renderProfile() {
   if (closeFavoriteStatModalBtn) {
     closeFavoriteStatModalBtn.onclick = () => {
       state.favoriteStatModalOpen = false;
+      state.favoriteStatDraftKey = '';
       render();
+    };
+  }
+  const cancelFavoriteStatModalBtn = document.getElementById('cancelFavoriteStatModalBtn');
+  if (cancelFavoriteStatModalBtn) {
+    cancelFavoriteStatModalBtn.onclick = () => {
+      state.favoriteStatModalOpen = false;
+      state.favoriteStatDraftKey = '';
+      render();
+    };
+  }
+  const saveFavoriteStatModalBtn = document.getElementById('saveFavoriteStatModalBtn');
+  if (saveFavoriteStatModalBtn) {
+    saveFavoriteStatModalBtn.onclick = () => {
+      saveFavoriteStatPreference(state.favoriteStatDraftKey || selectedFavorite.key);
     };
   }
   app.querySelectorAll('[data-favorite-stat-select]').forEach((btn) => {
     btn.onclick = () => {
       const nextKey = normalizeFavoriteStatKey(btn.dataset.favoriteStatSelect);
-      state.me.favoriteStatKey = nextKey;
-      state.favoriteStatModalOpen = false;
+      state.favoriteStatDraftKey = nextKey;
       render();
     };
   });
@@ -4505,6 +4691,7 @@ function renderRanked() {
   const canContinue = currentRankedMatch || (Boolean(activeSeries) && canQueue);
   const actionLabel = currentRankedMatch || activeSeries ? 'Continue Series' : 'Start Ranked Series';
   const actionDisabled = (!canQueue && !canContinue) || offlineModeEnabled();
+  const forfeitDisabled = !currentRankedMatch || offlineModeEnabled();
 
   app.innerHTML = `
     ${renderTopbar('Ranked')}
@@ -4521,8 +4708,11 @@ function renderRanked() {
         <div class="ranked-hero-actions">
           <button id="rankedSeriesActionBtn" class="gold" ${actionDisabled || searching ? 'disabled' : ''}>${searching ? 'Searching...' : actionLabel}</button>
           ${searching ? '<button id="rankedSeriesCancelBtn" class="ghost">Cancel Search</button>' : ''}
+          <button id="viewRankRankedBtn" class="ghost" type="button">View Rank</button>
+          <button id="forfeitRankedSeriesBtn" class="warn" type="button" ${forfeitDisabled ? 'disabled' : ''}>Forfeit Series</button>
         </div>
         ${actionDisabled && !searching ? `<p class="muted ranked-disabled-note">${queueDisabledReason}</p>` : ''}
+        ${currentRankedMatch ? '<p class="muted">Ranked series can only be exited by explicit forfeit.</p>' : ''}
       </section>
 
       <section class="card section ranked-series-card">
@@ -4554,12 +4744,29 @@ function renderRanked() {
         <h3>Ranked Rules</h3>
         <ul class="patch-list">
           <li class="muted">Ranked is locked to your tier&apos;s fixed bet amount.</li>
-          <li class="muted">A series runs for 9 games and winner is decided by net chips.</li>
-          <li class="muted">If chips tie after 9, tiebreaker rounds continue until a non-push chip result.</li>
-          <li class="muted">Elo adjusts each game with a luck/variance multiplier.</li>
+          <li class="muted">Each series always plays 9 games. Leader after early games does not end the series.</li>
+          <li class="muted">Series winner is decided by net chips after game 9 (not game win count).</li>
+          <li class="muted">If chips tie after 9, tiebreakers continue until a non-zero chip swing decides the winner.</li>
+          <li class="muted">You cannot leave mid-series unless you explicitly forfeit.</li>
+          <li class="muted">Elo updates every ranked game and is variance-adjusted.</li>
         </ul>
       </section>
     </main>
+    ${
+      state.rankedForfeitModalOpen
+        ? `<div class="modal" id="rankedForfeitModal">
+            <div class="modal-panel card ranked-forfeit-modal" role="dialog" aria-modal="true" aria-label="Forfeit ranked series">
+              <h3>Forfeit Ranked Series?</h3>
+              <p class="muted">This counts as an automatic loss and ends the current series immediately.</p>
+              <div class="row">
+                <button id="confirmRankedForfeitBtn" class="warn" type="button">Forfeit Series</button>
+                <button id="cancelRankedForfeitBtn" class="ghost" type="button">Cancel</button>
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
+    ${renderRankTimelineModal({ rankedElo })}
   `;
 
   bindShellNav();
@@ -4577,6 +4784,65 @@ function renderRanked() {
   const rankedSeriesCancelBtn = document.getElementById('rankedSeriesCancelBtn');
   if (rankedSeriesCancelBtn) {
     rankedSeriesCancelBtn.onclick = () => cancelRankedQueue();
+  }
+  const viewRankRankedBtn = document.getElementById('viewRankRankedBtn');
+  if (viewRankRankedBtn) {
+    viewRankRankedBtn.onclick = () => {
+      state.rankTimelineModalOpen = true;
+      render();
+    };
+  }
+  const forfeitRankedSeriesBtn = document.getElementById('forfeitRankedSeriesBtn');
+  if (forfeitRankedSeriesBtn) {
+    forfeitRankedSeriesBtn.onclick = () => {
+      if (!currentRankedMatch) return;
+      state.rankedForfeitModalOpen = true;
+      render();
+    };
+  }
+  const rankedForfeitModal = document.getElementById('rankedForfeitModal');
+  if (rankedForfeitModal) {
+    rankedForfeitModal.onclick = () => {
+      state.rankedForfeitModalOpen = false;
+      render();
+    };
+  }
+  const rankedForfeitPanel = app.querySelector('.ranked-forfeit-modal');
+  if (rankedForfeitPanel) {
+    rankedForfeitPanel.onclick = (event) => event.stopPropagation();
+  }
+  const cancelRankedForfeitBtn = document.getElementById('cancelRankedForfeitBtn');
+  if (cancelRankedForfeitBtn) {
+    cancelRankedForfeitBtn.onclick = () => {
+      state.rankedForfeitModalOpen = false;
+      render();
+    };
+  }
+  const confirmRankedForfeitBtn = document.getElementById('confirmRankedForfeitBtn');
+  if (confirmRankedForfeitBtn) {
+    confirmRankedForfeitBtn.onclick = () => {
+      state.rankedForfeitModalOpen = false;
+      state.pendingNavAfterLeave = 'ranked';
+      leaveCurrentMatch({ showToast: true, refreshOnError: true });
+    };
+  }
+  const rankTimelineModal = document.getElementById('rankTimelineModal');
+  if (rankTimelineModal) {
+    rankTimelineModal.onclick = () => {
+      state.rankTimelineModalOpen = false;
+      render();
+    };
+  }
+  const closeRankTimelineBtn = document.getElementById('closeRankTimelineBtn');
+  if (closeRankTimelineBtn) {
+    closeRankTimelineBtn.onclick = () => {
+      state.rankTimelineModalOpen = false;
+      render();
+    };
+  }
+  const rankTimelinePanel = app.querySelector('.rank-timeline-modal');
+  if (rankTimelinePanel) {
+    rankTimelinePanel.onclick = (event) => event.stopPropagation();
   }
 }
 
@@ -4739,8 +5005,9 @@ function renderRules() {
             <h4>Ranked Series</h4>
             <ul class="rules-list">
               <li>Ranked bet amount is fixed by your rank tier.</li>
-              <li>A ranked series is 9 games; winner is highest net chips after game 9.</li>
+              <li>A ranked series is always 9 games; winner is highest net chips after game 9.</li>
               <li>If tied, unlimited tiebreakers continue until chip delta is non-zero.</li>
+              <li>Mid-series exit is forfeit-only and counts as an automatic loss.</li>
             </ul>
           </article>
           <article>
@@ -4952,6 +5219,7 @@ function renderMatch() {
   const emoteCoolingDown = Date.now() < state.emoteCooldownUntil;
   const canEditBet = Boolean(match.canEditBet);
   const canConfirmBet = Boolean(match.canConfirmBet);
+  const rankedMatch = String(match.matchType || '').toUpperCase() === 'RANKED';
   const myConfirmed = Boolean(match.betConfirmedByPlayer?.[me.id]);
   const oppConfirmed = Boolean(match.betConfirmedByPlayer?.[oppId]);
   const betBounds = getBetBounds(match);
@@ -4972,9 +5240,12 @@ function renderMatch() {
   const noPenaltyLeave =
     isBotOpponent &&
     (!match.stakesCommitted || match.phase === 'ROUND_INIT' || match.phase === 'RESULT' || match.phase === 'REVEAL');
-  const leaveWarningText = noPenaltyLeave
-    ? 'Leave to lobby. No additional chips are charged until a round starts.'
-    : 'You will forfeit this round and end the match.';
+  const leaveWarningText = rankedMatch
+    ? 'Forfeiting ends the ranked series immediately and counts as an automatic loss.'
+    : (noPenaltyLeave
+      ? 'Leave to lobby. No additional chips are charged until a round starts.'
+      : 'You will forfeit this round and end the match.');
+  const leaveActionLabel = rankedMatch ? 'Forfeit Series' : 'Leave Match';
   const pressureMine = waitingPressure ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const pressureOpp = pressure && pressure.opponentId === oppId ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const turnTimerState = getTurnTimerState(match);
@@ -5050,9 +5321,9 @@ function renderMatch() {
                                <button id="raiseBetBtn" class="gold" ${!isBetValid ? 'disabled' : ''}>Propose Raise</button>
                                <button id="lowerBetBtn" class="ghost" ${!isBetValid ? 'disabled' : ''}>Propose Lower</button>
                                <button id="resetNegotiationBtn" class="ghost" type="button">Reset negotiation</button>
-                               <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>`
+                               <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${leaveActionLabel}</button>`
                             : `<button id="confirmBetBtn" class="primary" ${!canConfirmBet || !isBetValid ? 'disabled' : ''}>Confirm Bet</button>
-                               <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave Match</button>`
+                               <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${leaveActionLabel}</button>`
                         }
                       </div>
                       <div class="muted">
@@ -5157,7 +5428,7 @@ function renderMatch() {
                     isPvpMatch
                       ? `<div class="actions actions-extra">
                            <button id="toggleEmoteBtn" class="ghost" type="button" ${emoteCoolingDown ? 'disabled' : ''}>🙂 Emote</button>
-                           <button id="leaveMatchBtn" class="ghost leave-btn" type="button">Leave</button>
+                          <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${rankedMatch ? 'Forfeit Series' : 'Leave'}</button>
                          </div>`
                       : ''
                   }
@@ -5184,10 +5455,10 @@ function renderMatch() {
                 ${
                   state.leaveMatchModal
                       ? `<div class="leave-inline">
-                        <strong>Leave Match?</strong>
+                        <strong>${rankedMatch ? 'Forfeit Ranked Series?' : 'Leave Match?'}</strong>
                         <p class="muted">${leaveWarningText}</p>
                         <div class="pressure-actions">
-                          <button id="confirmLeaveMatchBtn" class="warn">Leave Match</button>
+                          <button id="confirmLeaveMatchBtn" class="warn">${rankedMatch ? 'Forfeit Series' : 'Leave Match'}</button>
                           <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
                         </div>
                       </div>`
@@ -5214,10 +5485,10 @@ function renderMatch() {
         ${
           isBettingPhase && state.leaveMatchModal
             ? `<div class="leave-inline">
-                 <strong>Leave Match?</strong>
+                 <strong>${rankedMatch ? 'Forfeit Ranked Series?' : 'Leave Match?'}</strong>
                  <p class="muted">${leaveWarningText}</p>
                  <div class="pressure-actions">
-                   <button id="confirmLeaveMatchBtn" class="warn">Leave Match</button>
+                   <button id="confirmLeaveMatchBtn" class="warn">${rankedMatch ? 'Forfeit Series' : 'Leave Match'}</button>
                    <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
                  </div>
                </div>`
@@ -5379,7 +5650,8 @@ function renderMatch() {
   if (confirmLeaveMatchBtn) {
     confirmLeaveMatchBtn.onclick = () => {
       state.leaveMatchModal = false;
-      if (isBotMatchActive()) state.pendingNavAfterLeave = 'home';
+      if (rankedMatch) state.pendingNavAfterLeave = 'ranked';
+      else if (isBotMatchActive()) state.pendingNavAfterLeave = 'home';
       leaveCurrentMatch({ showToast: true, refreshOnError: true });
     };
   }

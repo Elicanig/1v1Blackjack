@@ -5,6 +5,7 @@ import {
   RULES,
   handTotal,
   handMeta,
+  isSixSevenStartingHand,
   canSplit,
   applyAction,
   applyBaseBetSelection,
@@ -140,6 +141,13 @@ test('05 handMeta marks bust', () => {
 test('06 handMeta marks natural blackjack', () => {
   const meta = handMeta([card('A'), card('K')]);
   assert.equal(meta.isNaturalBlackjack, true);
+});
+
+test('06b six-seven stat checks initial two-card hand only', () => {
+  assert.equal(isSixSevenStartingHand([card('6'), card('7')]), true);
+  assert.equal(isSixSevenStartingHand([card('7'), card('6')]), true);
+  assert.equal(isSixSevenStartingHand([card('6'), card('7'), card('2')]), false);
+  assert.equal(isSixSevenStartingHand([card('6'), card('8')]), false);
 });
 
 test('07 canSplit true on same rank pair', () => {

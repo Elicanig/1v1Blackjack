@@ -808,6 +808,13 @@ select:focus-visible {
   gap: 4px;
 }
 
+.ranked-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .ranked-disabled-note {
   color: #e4be8b;
 }
@@ -1103,6 +1110,10 @@ select:focus-visible {
   max-height: 196px;
 }
 
+.home-leaderboard-card .leaderboard-list.compact {
+  max-height: 240px;
+}
+
 .recent-activity-card {
   border-radius: 14px;
   border: 1px solid rgba(236, 241, 233, 0.1);
@@ -1167,6 +1178,12 @@ select:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.ranked-forfeit-modal {
+  width: min(480px, 94vw);
+  display: grid;
+  gap: 10px;
 }
 
 .ranked-series-card {
@@ -3045,6 +3062,10 @@ select:focus-visible {
   gap: 8px;
 }
 
+.profile-favorite-modal-actions {
+  justify-content: flex-end;
+}
+
 .profile-favorite-selected {
   border: 1px solid rgba(230, 238, 225, 0.16);
   border-radius: 10px;
@@ -3103,6 +3124,70 @@ select:focus-visible {
   justify-content: space-between;
   align-items: baseline;
   gap: 10px;
+}
+
+.rank-timeline-modal {
+  width: min(680px, 96vw);
+  display: grid;
+  gap: 10px;
+}
+
+.rank-timeline-track-wrap {
+  position: relative;
+  margin: 4px 0 2px;
+}
+
+.rank-timeline-track {
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(230, 238, 225, 0.16);
+  background: rgba(13, 25, 21, 0.7);
+  overflow: hidden;
+}
+
+.rank-timeline-progress {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, rgba(181, 120, 66, 0.9), rgba(205, 167, 100, 0.95), rgba(120, 164, 222, 0.95));
+}
+
+.rank-timeline-marker {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid rgba(15, 27, 23, 0.95);
+  background: #f0ddb4;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 2px rgba(205, 167, 100, 0.26);
+}
+
+.rank-timeline-list {
+  display: grid;
+  gap: 8px;
+}
+
+.rank-timeline-row {
+  border: 1px solid rgba(230, 238, 225, 0.14);
+  border-radius: 12px;
+  background: rgba(11, 24, 20, 0.64);
+  padding: 8px 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.rank-timeline-row.is-current {
+  border-color: rgba(205, 167, 100, 0.48);
+  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.16) inset;
+}
+
+.rank-timeline-row-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .titles-list {
@@ -3282,6 +3367,17 @@ select:focus-visible {
 .result-actions button {
   min-height: 42px;
   border-radius: 12px;
+}
+
+.round-result-forfeit-confirm {
+  margin-top: 12px;
+  border: 1px solid rgba(220, 132, 132, 0.32);
+  border-radius: 12px;
+  background: rgba(52, 18, 18, 0.5);
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+  text-align: left;
 }
 
 .result-double-btn {
@@ -3541,7 +3637,8 @@ select:focus-visible {
   }
 
   .profile-favorite-selected,
-  .favorite-stat-option-head {
+  .favorite-stat-option-head,
+  .rank-timeline-row {
     flex-direction: column;
     align-items: flex-start;
   }

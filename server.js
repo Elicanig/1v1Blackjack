@@ -104,6 +104,7 @@ const FAVORITE_STAT_KEYS = Object.freeze([
   'HANDS_LOST',
   'PUSHES',
   'BLACKJACKS',
+  'SIX_SEVEN_DEALT',
   'SPLITS_ATTEMPTED',
   'DOUBLES_ATTEMPTED',
   'SURRENDERS',
@@ -2223,7 +2224,8 @@ function recordRankedSeriesGame(match, {
   winnerId = null,
   loserId = null,
   netByPlayer = {},
-  eloResult = null
+  eloResult = null,
+  forfeit = false
 } = {}) {
   const series = ensureRankedSeriesForMatch(match);
   if (!series) return null;
@@ -2258,7 +2260,8 @@ function recordRankedSeriesGame(match, {
     eloDeltaP1: Math.floor(Number(eloResult?.deltaByPlayer?.[p1]) || 0),
     eloDeltaP2: Math.floor(Number(eloResult?.deltaByPlayer?.[p2]) || 0),
     varianceScore: Number(Number(eloResult?.varianceScore || 0).toFixed(4)),
-    varianceMultiplier: Number(Number(eloResult?.varianceMultiplier || 1).toFixed(4))
+    varianceMultiplier: Number(Number(eloResult?.varianceMultiplier || 1).toFixed(4)),
+    forfeit: Boolean(forfeit)
   };
   series.games.push(gameEntry);
 
@@ -2492,7 +2495,7 @@ function handMeta(cards) {
 }
 
 function isSixSevenStartingHand(cards) {
-  if (!Array.isArray(cards) || cards.length < 2) return false;
+  if (!Array.isArray(cards) || cards.length !== 2) return false;
   const a = cards[0]?.rank;
   const b = cards[1]?.rank;
   return (a === '6' && b === '7') || (a === '7' && b === '6');
@@ -4201,8 +4204,6 @@ function applyAction(match, playerId, action) {
       if (user) {
         user.stats.splitsAttempted = (user.stats.splitsAttempted || 0) + 1;
         recordChallengeEvent(user, 'split', 1);
-        if (isSixSevenStartingHand(newOne.cards)) user.stats.sixSevenDealt += 1;
-        if (isSixSevenStartingHand(newTwo.cards)) user.stats.sixSevenDealt += 1;
         db.write();
         emitUserUpdate(playerId);
       }
@@ -4649,10 +4650,11 @@ function calculateForfeitLossAmount(availableChips, exposureBet, baseBet = BASE_
   return Math.min(chips, desired);
 }
 
-function leaveMatchByForfeit(match, leaverId) {
+function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
   if (!match || !match.playerIds.includes(leaverId)) return { ok: false, error: 'Match not found or unauthorized' };
   const opponentId = match.playerIds.find((id) => id !== leaverId);
   const botMatch = isBotMatch(match);
+  const rankedMatch = String(match.matchType || '').toUpperCase() === 'RANKED';
   const leaverUser = !isBotPlayer(leaverId) ? getUserById(leaverId) : null;
   const opponentUser = !isBotPlayer(opponentId) ? getUserById(opponentId) : null;
   const roundStarted = Boolean(match.round?.stakesCommitted);
@@ -4660,6 +4662,7 @@ function leaveMatchByForfeit(match, leaverId) {
   let forfeited = false;
   let charged = false;
   let chargedAmount = 0;
+  let wrote = false;
 
   if (leaverUser && isRealMatch(match)) {
     const modeLabel = matchHistoryModeLabel(match);
@@ -4680,6 +4683,7 @@ function leaveMatchByForfeit(match, leaverId) {
           invalidateLeaderboardCache();
           charged = true;
           chargedAmount = additionalLoss;
+          wrote = true;
         }
         const totalLoss = Math.max(0, committed + additionalLoss);
         appendBetHistory(leaverUser, {
@@ -4690,15 +4694,18 @@ function leaveMatchByForfeit(match, leaverId) {
           notes: 'left bot match'
         });
         emitUserUpdate(leaverUser.id);
-        db.write();
+        wrote = true;
       }
     } else if (opponentUser) {
+      forfeited = true;
       const leaverExposure = (match.round?.players?.[leaverId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0);
       const opponentExposure = opponentId
         ? (match.round?.players?.[opponentId]?.hands || []).reduce((sum, hand) => sum + (hand.bet || 0), 0)
         : 0;
       const exposure = leaverExposure + opponentExposure;
       const award = calculateForfeitLossAmount(leaverUser.chips, exposure, match.round?.baseBet || BASE_BET);
+      charged = award > 0;
+      chargedAmount = award;
       leaverUser.chips = Math.max(0, leaverUser.chips - award);
       opponentUser.chips += award;
       invalidateLeaderboardCache();
@@ -4706,24 +4713,57 @@ function leaveMatchByForfeit(match, leaverId) {
       appendBetHistory(opponentUser, { mode: modeLabel, bet: award, result: 'Win', net: award, notes: 'opponent left' });
       emitUserUpdate(leaverUser.id);
       emitUserUpdate(opponentUser.id);
-      db.write();
+      wrote = true;
     }
   }
 
-  if (!botMatch && opponentId && String(match.matchType || '').toUpperCase() === 'RANKED') {
+  if (!botMatch && opponentId && rankedMatch && leaverUser && opponentUser) {
+    const activeSeries = ensureRankedSeriesForMatch(match);
+    const nextGameIndex = (activeSeries?.games?.length || 0) + 1;
+    const tiebreakerRound = nextGameIndex > RANKED_SERIES_TARGET_GAMES ? (nextGameIndex - RANKED_SERIES_TARGET_GAMES) : 0;
+    const netByPlayer = {
+      [leaverId]: -Math.max(0, Math.floor(Number(chargedAmount) || 0)),
+      [opponentId]: Math.max(0, Math.floor(Number(chargedAmount) || 0))
+    };
+    const eloResult = applyRankedEloResult(match, {
+      winnerId: opponentId,
+      loserId: leaverId,
+      outcomes: [],
+      tiebreakerRound
+    });
+    recordRankedSeriesGame(match, {
+      winnerId: opponentId,
+      loserId: leaverId,
+      netByPlayer,
+      eloResult,
+      forfeit: true
+    });
     finalizeRankedSeriesByForfeit(match, opponentId, leaverId);
+    emitUserUpdate(leaverUser.id);
+    emitUserUpdate(opponentUser.id);
+    wrote = true;
   }
 
-  const leaverReason = botMatch
+  if (wrote) db.write();
+
+  let leaverReason = botMatch
     ? preRoundBotExit
       ? 'You left before the next round started.'
       : 'You forfeited the match.'
-    : 'You left the match.';
-  const opponentReason = botMatch
+    : 'You forfeited the match.';
+  let opponentReason = botMatch
     ? preRoundBotExit
       ? 'Opponent left before the next round started.'
       : 'Opponent left — you win by forfeit.'
-    : 'Opponent left — you win by forfeit.';
+    : 'Opponent forfeited the match.';
+  if (rankedMatch) {
+    leaverReason = source === 'disconnect_timeout'
+      ? 'Disconnected too long — ranked series forfeited.'
+      : 'You forfeited the ranked series.';
+    opponentReason = source === 'disconnect_timeout'
+      ? 'Opponent disconnected too long and forfeited the ranked series.'
+      : 'Opponent forfeited the ranked series.';
+  }
 
   emitToUser(leaverId, 'match:ended', { reason: leaverReason });
   if (opponentId) emitToUser(opponentId, 'match:ended', { reason: opponentReason });
@@ -6119,26 +6159,7 @@ io.on('connection', (socket) => {
 
       const key = `${match.id}:${userId}`;
       const timer = setTimeout(() => {
-        const opponentId = match.playerIds.find((id) => id !== userId);
-        const loser = getUserById(userId);
-        const winner = getUserById(opponentId);
-        if (loser && winner) {
-          const penalty = Math.min(100, loser.chips);
-          loser.chips -= penalty;
-          winner.chips += penalty;
-          invalidateLeaderboardCache();
-          winner.stats.roundsWon += 1;
-          loser.stats.roundsLost += 1;
-          db.write();
-        }
-
-        io.to(activeSessions.get(opponentId)).emit('match:ended', {
-          reason: 'Opponent disconnected for over 60 seconds'
-        });
-        if (opponentId) {
-          finalizeRankedSeriesByForfeit(match, opponentId, userId);
-        }
-        cleanupMatch(match);
+        leaveMatchByForfeit(match, userId, { source: 'disconnect_timeout' });
         disconnectTimers.delete(key);
       }, DISCONNECT_TIMEOUT_MS);
 
@@ -6165,6 +6186,7 @@ export {
   buildDeck,
   handTotal,
   handMeta,
+  isSixSevenStartingHand,
   canSplit,
   applyAction,
   applyBaseBetSelection,
