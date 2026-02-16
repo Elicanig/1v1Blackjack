@@ -61,6 +61,55 @@ const STREAK_REWARDS = [50, 75, 100, 125, 150, 175, 200];
 const HOURLY_RESET_MS = 60 * 60 * 1000;
 const DAILY_RESET_MS = 24 * 60 * 60 * 1000;
 const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000;
+const USER_STATS_DEFAULTS = Object.freeze({
+  matchesPlayed: 0,
+  roundsWon: 0,
+  roundsLost: 0,
+  handsWon: 0,
+  handsLost: 0,
+  pushes: 0,
+  handsPush: 0,
+  handsPlayed: 0,
+  blackjacks: 0,
+  sixSevenDealt: 0,
+  splitsAttempted: 0,
+  splitHandsWon: 0,
+  splitHandsLost: 0,
+  splitHandsPushed: 0,
+  doublesAttempted: 0,
+  doubleHandsWon: 0,
+  doubleHandsLost: 0,
+  doubleHandsPushed: 0,
+  surrenders: 0,
+  busts: 0,
+  highestSafeTotal: 0,
+  maxCardsInWinningHand: 0,
+  fourCard21s: 0,
+  fiveCard21s: 0,
+  sixCard21s: 0,
+  sevenPlusCard21s: 0,
+  longestWinStreak: 0,
+  longestLossStreak: 0,
+  currentWinStreak: 0,
+  currentLossStreak: 0,
+  totalChipsWon: 0,
+  totalChipsLost: 0,
+  biggestHandWin: 0,
+  biggestHandLoss: 0,
+  realBetSum: 0,
+  realBetCount: 0,
+  handsPlayedBotPractice: 0,
+  handsPlayedBotReal: 0,
+  handsPlayedPvpReal: 0,
+  handsPlayedPvpFriendly: 0
+});
+
+function cloneUserStatsDefaults() {
+  if (typeof globalThis.structuredClone === 'function') {
+    return globalThis.structuredClone(USER_STATS_DEFAULTS);
+  }
+  return JSON.parse(JSON.stringify(USER_STATS_DEFAULTS));
+}
 
 const DATA_DIR = process.env.DATA_DIR || './data';
 const EMPTY_DB = {
@@ -183,7 +232,7 @@ for (const user of db.data.users) {
     dbTouched = true;
   }
   if (!user.stats) {
-    user.stats = {};
+    user.stats = cloneUserStatsDefaults();
     dbTouched = true;
   }
   if (user.stats.pushes === undefined && user.stats.handsPush !== undefined) {
@@ -386,49 +435,6 @@ const RULES = {
   MAX_HANDS_PER_PLAYER: 4,
   MAX_DOUBLES_PER_HAND: 1,
   ALL_IN_ON_INSUFFICIENT_BASE_BET: true
-};
-
-const USER_STATS_DEFAULTS = {
-  matchesPlayed: 0,
-  roundsWon: 0,
-  roundsLost: 0,
-  handsWon: 0,
-  handsLost: 0,
-  pushes: 0,
-  handsPush: 0,
-  handsPlayed: 0,
-  blackjacks: 0,
-  sixSevenDealt: 0,
-  splitsAttempted: 0,
-  splitHandsWon: 0,
-  splitHandsLost: 0,
-  splitHandsPushed: 0,
-  doublesAttempted: 0,
-  doubleHandsWon: 0,
-  doubleHandsLost: 0,
-  doubleHandsPushed: 0,
-  surrenders: 0,
-  busts: 0,
-  highestSafeTotal: 0,
-  maxCardsInWinningHand: 0,
-  fourCard21s: 0,
-  fiveCard21s: 0,
-  sixCard21s: 0,
-  sevenPlusCard21s: 0,
-  longestWinStreak: 0,
-  longestLossStreak: 0,
-  currentWinStreak: 0,
-  currentLossStreak: 0,
-  totalChipsWon: 0,
-  totalChipsLost: 0,
-  biggestHandWin: 0,
-  biggestHandLoss: 0,
-  realBetSum: 0,
-  realBetCount: 0,
-  handsPlayedBotPractice: 0,
-  handsPlayedBotReal: 0,
-  handsPlayedPvpReal: 0,
-  handsPlayedPvpFriendly: 0
 };
 
 function getBetLimitsForDifficulty(difficulty = 'normal') {
@@ -1810,7 +1816,7 @@ function resolveRound(match) {
 
   function applyHandOutcomeStats(user, ownId, out, hand) {
     if (!user) return;
-    const stats = user.stats || (user.stats = { ...USER_STATS_DEFAULTS });
+    const stats = user.stats || (user.stats = cloneUserStatsDefaults());
     const isBotOpponent = isBotPlayer(nextPlayerId(match, ownId));
     if (isBotOpponent) {
       if (isPracticeMatch(match)) stats.handsPlayedBotPractice = (stats.handsPlayedBotPractice || 0) + 1;
@@ -2829,7 +2835,7 @@ function buildNewUser(username) {
     avatar: avatarUrl('adventurer', cleanUsername),
     bio: 'Ready for Blackjack Battle.',
     chips: STARTING_CHIPS,
-    stats: { ...USER_STATS_DEFAULTS },
+    stats: cloneUserStatsDefaults(),
     friends: [],
     challengeSets: {},
     lastDailyClaimAt: null,
