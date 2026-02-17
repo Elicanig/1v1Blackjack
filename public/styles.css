@@ -2612,6 +2612,39 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.series-elo-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 82px;
+  border-radius: 999px;
+  border: 1px solid rgba(235, 244, 236, 0.2);
+  background: rgba(22, 41, 34, 0.68);
+  color: #d8e7db;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.series-elo-pill.is-pos {
+  color: #9ee7be;
+  border-color: rgba(76, 192, 131, 0.45);
+  background: rgba(30, 74, 51, 0.44);
+}
+
+.series-elo-pill.is-neg {
+  color: #ffb0ae;
+  border-color: rgba(210, 93, 84, 0.46);
+  background: rgba(84, 33, 31, 0.42);
+}
+
+.series-elo-pill.is-zero {
+  color: #dce7d7;
+}
+
 .mode-pill {
   display: inline-flex;
   align-items: center;

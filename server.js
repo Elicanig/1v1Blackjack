@@ -888,6 +888,9 @@ if (!Array.isArray(db.data.rankedSeries)) {
       series.game_index = 1;
       dbTouched = true;
     }
+    if (normalizedStatus === RANKED_SERIES_STATUS.IN_PROGRESS && ensureRankedSeriesStartBankrollSnapshots(series)) {
+      dbTouched = true;
+    }
   }
 }
 if (!db.data.botLearning || typeof db.data.botLearning !== 'object' || Array.isArray(db.data.botLearning)) {
@@ -3357,6 +3360,8 @@ function createRankedSeries(match) {
   const seriesId = nanoid(12);
   const betAmount = Math.max(1, Math.floor(Number(match.rankedBet || p1Meta?.bets?.min) || 50));
   const rankAtStart = p1Meta?.tierKey || rankedTierFromElo(RANKED_BASE_ELO).key;
+  const p1SeriesStartBankroll = Math.max(0, Math.floor(Number(getParticipantChips(match, p1)) || 0));
+  const p2SeriesStartBankroll = Math.max(0, Math.floor(Number(getParticipantChips(match, p2)) || 0));
   const series = {
     id: seriesId,
     seriesId,
@@ -3377,6 +3382,12 @@ function createRankedSeries(match) {
     tiebreakerCount: 0,
     p1ChipDelta: 0,
     p2ChipDelta: 0,
+    p1SeriesStartBankroll,
+    p2SeriesStartBankroll,
+    seriesStartBankrollByPlayer: {
+      [p1]: p1SeriesStartBankroll,
+      [p2]: p2SeriesStartBankroll
+    },
     games: [],
     status: RANKED_SERIES_STATUS.IN_PROGRESS,
     winnerId: null,
@@ -3414,17 +3425,86 @@ function ensureRankedSeriesForMatch(match, { createIfMissing = true } = {}) {
   if (series && !match.rankedSeriesId) {
     match.rankedSeriesId = series.id;
   }
-  if (series && isRankedSeriesInProgress(series)) return series;
+  if (series && isRankedSeriesInProgress(series)) {
+    ensureRankedSeriesStartBankrollSnapshots(series, match);
+    return series;
+  }
   if (series && !createIfMissing) return series;
   if (!createIfMissing) return null;
   series = createRankedSeries(match);
   return series;
 }
 
-function rankedSeriesSummaryForUser(series, userId) {
+function rankedSeriesCurrentBankrollForPlayer(series, playerId, match = null) {
+  if (!series || !playerId) return null;
+  if (match && Array.isArray(match.playerIds) && match.playerIds.includes(playerId)) {
+    const liveChips = Number(getParticipantChips(match, playerId));
+    return Number.isFinite(liveChips) ? Math.max(0, Math.floor(liveChips)) : null;
+  }
+  const user = getUserById(playerId);
+  const userChips = Number(user?.chips);
+  return Number.isFinite(userChips) ? Math.max(0, Math.floor(userChips)) : null;
+}
+
+function rankedSeriesCurrentBankrollMap(series, match = null) {
+  if (!series) return null;
+  const map = {};
+  const p1Bankroll = rankedSeriesCurrentBankrollForPlayer(series, series.p1, match);
+  const p2Bankroll = rankedSeriesCurrentBankrollForPlayer(series, series.p2, match);
+  if (Number.isFinite(Number(p1Bankroll))) map[series.p1] = Math.floor(Number(p1Bankroll));
+  if (Number.isFinite(Number(p2Bankroll))) map[series.p2] = Math.floor(Number(p2Bankroll));
+  return Object.keys(map).length ? map : null;
+}
+
+function ensureRankedSeriesStartBankrollSnapshots(series, match = null) {
+  if (!series || !series.p1 || !series.p2) return false;
+  let changed = false;
+  if (!series.seriesStartBankrollByPlayer || typeof series.seriesStartBankrollByPlayer !== 'object' || Array.isArray(series.seriesStartBankrollByPlayer)) {
+    series.seriesStartBankrollByPlayer = {};
+    changed = true;
+  }
+
+  const p1Current = rankedSeriesCurrentBankrollForPlayer(series, series.p1, match);
+  const p2Current = rankedSeriesCurrentBankrollForPlayer(series, series.p2, match);
+  const p1Delta = Math.floor(Number(series.p1ChipDelta) || 0);
+  const p2Delta = Math.floor(Number(series.p2ChipDelta) || 0);
+
+  const p1ExistingStart = Number(series.p1SeriesStartBankroll ?? series.seriesStartBankrollByPlayer?.[series.p1]);
+  const p2ExistingStart = Number(series.p2SeriesStartBankroll ?? series.seriesStartBankrollByPlayer?.[series.p2]);
+
+  const p1ResolvedStart = Number.isFinite(p1ExistingStart)
+    ? Math.max(0, Math.floor(p1ExistingStart))
+    : (Number.isFinite(Number(p1Current)) ? Math.max(0, Math.floor(Number(p1Current) - p1Delta)) : null);
+  const p2ResolvedStart = Number.isFinite(p2ExistingStart)
+    ? Math.max(0, Math.floor(p2ExistingStart))
+    : (Number.isFinite(Number(p2Current)) ? Math.max(0, Math.floor(Number(p2Current) - p2Delta)) : null);
+
+  if (Number.isFinite(Number(p1ResolvedStart)) && Number(series.p1SeriesStartBankroll) !== Number(p1ResolvedStart)) {
+    series.p1SeriesStartBankroll = Number(p1ResolvedStart);
+    changed = true;
+  }
+  if (Number.isFinite(Number(p2ResolvedStart)) && Number(series.p2SeriesStartBankroll) !== Number(p2ResolvedStart)) {
+    series.p2SeriesStartBankroll = Number(p2ResolvedStart);
+    changed = true;
+  }
+
+  if (Number.isFinite(Number(p1ResolvedStart)) && Number(series.seriesStartBankrollByPlayer?.[series.p1]) !== Number(p1ResolvedStart)) {
+    series.seriesStartBankrollByPlayer[series.p1] = Number(p1ResolvedStart);
+    changed = true;
+  }
+  if (Number.isFinite(Number(p2ResolvedStart)) && Number(series.seriesStartBankrollByPlayer?.[series.p2]) !== Number(p2ResolvedStart)) {
+    series.seriesStartBankrollByPlayer[series.p2] = Number(p2ResolvedStart);
+    changed = true;
+  }
+
+  return changed;
+}
+
+function rankedSeriesSummaryForUser(series, userId, { currentBankrollByPlayer = null } = {}) {
   if (!series || !userId) return null;
   const userIsP1 = series.p1 === userId;
   if (!userIsP1 && series.p2 !== userId) return null;
+  ensureRankedSeriesStartBankrollSnapshots(series);
   const status = normalizeRankedSeriesStatus(series.status);
   const targetGames = RANKED_SERIES_TARGET_GAMES;
   const games = Array.isArray(series.games) ? series.games : [];
@@ -3434,8 +3514,37 @@ function rankedSeriesSummaryForUser(series, userId) {
   const inTiebreaker = inProgress && completedMainGames >= targetGames && (Number(series.p1ChipDelta) === Number(series.p2ChipDelta));
   const canContinue = inProgress && (completedMainGames < targetGames || inTiebreaker);
   const nextGameIndex = Math.max(1, games.length + 1);
-  const yourChipDelta = userIsP1 ? Number(series.p1ChipDelta || 0) : Number(series.p2ChipDelta || 0);
-  const oppChipDelta = userIsP1 ? Number(series.p2ChipDelta || 0) : Number(series.p1ChipDelta || 0);
+  const opponentId = userIsP1 ? series.p2 : series.p1;
+  const storedYourChipDelta = Math.floor(userIsP1 ? Number(series.p1ChipDelta || 0) : Number(series.p2ChipDelta || 0));
+  const storedOppChipDelta = Math.floor(userIsP1 ? Number(series.p2ChipDelta || 0) : Number(series.p1ChipDelta || 0));
+  const bankrollMap = currentBankrollByPlayer || rankedSeriesCurrentBankrollMap(series);
+  const startByPlayer = (series.seriesStartBankrollByPlayer && typeof series.seriesStartBankrollByPlayer === 'object')
+    ? series.seriesStartBankrollByPlayer
+    : {};
+  const yourStartBankrollRaw = userIsP1 ? series.p1SeriesStartBankroll : series.p2SeriesStartBankroll;
+  const oppStartBankrollRaw = userIsP1 ? series.p2SeriesStartBankroll : series.p1SeriesStartBankroll;
+  const yourStartBankroll = Number.isFinite(Number(yourStartBankrollRaw ?? startByPlayer[userId]))
+    ? Math.max(0, Math.floor(Number(yourStartBankrollRaw ?? startByPlayer[userId])))
+    : null;
+  const opponentStartBankroll = Number.isFinite(Number(oppStartBankrollRaw ?? startByPlayer[opponentId]))
+    ? Math.max(0, Math.floor(Number(oppStartBankrollRaw ?? startByPlayer[opponentId])))
+    : null;
+  const yourCurrentBankroll = Number.isFinite(Number(bankrollMap?.[userId]))
+    ? Math.max(0, Math.floor(Number(bankrollMap[userId])))
+    : null;
+  const opponentCurrentBankroll = Number.isFinite(Number(bankrollMap?.[opponentId]))
+    ? Math.max(0, Math.floor(Number(bankrollMap[opponentId])))
+    : null;
+  const derivedYourChipDelta = Number.isFinite(Number(yourCurrentBankroll)) && Number.isFinite(Number(yourStartBankroll))
+    ? Math.floor(Number(yourCurrentBankroll) - Number(yourStartBankroll))
+    : null;
+  const derivedOppChipDelta = Number.isFinite(Number(opponentCurrentBankroll)) && Number.isFinite(Number(opponentStartBankroll))
+    ? Math.floor(Number(opponentCurrentBankroll) - Number(opponentStartBankroll))
+    : null;
+  let yourChipDelta = Number.isFinite(Number(derivedYourChipDelta)) ? Number(derivedYourChipDelta) : storedYourChipDelta;
+  let oppChipDelta = Number.isFinite(Number(derivedOppChipDelta)) ? Number(derivedOppChipDelta) : storedOppChipDelta;
+  if (!Number.isFinite(Number(oppChipDelta)) && Number.isFinite(Number(yourChipDelta))) oppChipDelta = -Number(yourChipDelta);
+  if (!Number.isFinite(Number(yourChipDelta)) && Number.isFinite(Number(oppChipDelta))) yourChipDelta = -Number(oppChipDelta);
   const markers = games.map((game) => ({
     gameIndex: Math.max(1, Math.floor(Number(game.gameIndex) || 1)),
     result: userIsP1 ? game.resultP1 : game.resultP2,
@@ -3463,6 +3572,14 @@ function rankedSeriesSummaryForUser(series, userId) {
     inTiebreaker,
     nextTiebreakerRound: inTiebreaker ? (tiebreakerRoundsPlayed + 1) : 0,
     nextGameIndex,
+    seriesStartBankroll: Number.isFinite(Number(yourStartBankroll)) ? Number(yourStartBankroll) : null,
+    currentSeriesBankroll: Number.isFinite(Number(yourCurrentBankroll)) ? Number(yourCurrentBankroll) : null,
+    currentSeriesNetDelta: Math.floor(Number(yourChipDelta) || 0),
+    liveEloDelta: Math.floor(Number(yourChipDelta) || 0),
+    opponentSeriesStartBankroll: Number.isFinite(Number(opponentStartBankroll)) ? Number(opponentStartBankroll) : null,
+    opponentCurrentSeriesBankroll: Number.isFinite(Number(opponentCurrentBankroll)) ? Number(opponentCurrentBankroll) : null,
+    opponentCurrentSeriesNetDelta: Math.floor(Number(oppChipDelta) || 0),
+    opponentLiveEloDelta: Math.floor(Number(oppChipDelta) || 0),
     yourChipDelta,
     opponentChipDelta: oppChipDelta,
     markers,
@@ -3873,8 +3990,13 @@ function buildClientState(match, viewerId) {
   const negotiationEnabled = isBetNegotiationEnabled(match);
   const negotiation = negotiationEnabled ? ensureBetNegotiation(match) : null;
   const fixedTableBet = normalizeQuickPlayBucket(match.quickPlayBucket) || Math.max(0, Math.floor(Number(match.rankedBet) || 0));
-  const rankedSeries = String(match.matchType || '').toUpperCase() === 'RANKED'
-    ? rankedSeriesSummaryForUser(ensureRankedSeriesForMatch(match, { createIfMissing: false }), viewerId)
+  const rankedSeriesSource = String(match.matchType || '').toUpperCase() === 'RANKED'
+    ? ensureRankedSeriesForMatch(match, { createIfMissing: false })
+    : null;
+  const rankedSeries = rankedSeriesSource
+    ? rankedSeriesSummaryForUser(rankedSeriesSource, viewerId, {
+        currentBankrollByPlayer: rankedSeriesCurrentBankrollMap(rankedSeriesSource, match)
+      })
     : null;
   const rankedSeriesHud = rankedSeries
     ? (() => {
