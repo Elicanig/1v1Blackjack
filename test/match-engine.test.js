@@ -247,24 +247,24 @@ test('16 surrender locks and marks surrendered', () => {
   assert.equal(hand.locked, true);
 });
 
-test('17 double doubles bet, draws one, locks hand, and creates pending pressure', () => {
+test('17 double doubles bet, draws one, and creates pending pressure', () => {
   const m = makeMatch({ deck: [card('3')] });
   const res = applyAction(m, 'p1', 'double');
   assert.equal(res.ok, true);
   const hand = m.round.players.p1.hands[0];
   assert.equal(hand.bet, 10);
-  assert.equal(hand.locked, true);
-  assert.equal(hand.stood, true);
+  assert.equal(hand.locked, false);
+  assert.equal(hand.stood, false);
   assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
   assert.ok(m.round.pendingPressure);
 });
 
-test('18 cannot double after taking another action', () => {
-  const m = makeMatch({ p1Hand: newHand([card('5'), card('4')], [false, true], 5, 0), deck: [card('2')] });
+test('18 re-double is allowed after another action while under cap', () => {
+  const m = makeMatch({ p1Hand: newHand([card('5'), card('4')], [false, true], 5, 0), deck: [card('2'), card('3')] });
   const hit = applyAction(m, 'p1', 'hit');
   assert.equal(hit.ok, true);
   const res = applyAction(m, 'p1', 'double');
-  assert.equal(res.error, 'Double is only available as your first action on this hand');
+  assert.equal(res.ok, true);
 });
 
 test('19 split creates two hands with hidden second cards', () => {
@@ -621,20 +621,22 @@ test('39bg high Elo expected series win stays bounded', () => {
   assert.equal(favoredWin.finalDelta <= 12, true);
 });
 
-test('39c double is blocked when pressure would exceed table max for opponent', () => {
+test('39c double is allowed even if opponent may have to surrender pressure', () => {
   const p1Hand = newHand([card('9'), card('2')], [false, true], 250, 0);
   const p2Hand = newHand([card('10'), card('7')], [false, true], 500, 0);
   const m = makeMatch({ p1Hand, p2Hand, deck: [card('3')] });
   const res = applyAction(m, 'p1', 'double');
-  assert.equal(res.error, 'Stake increase would exceed table max 500');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
 });
 
-test('39d split is blocked when pressure would exceed table max for opponent', () => {
+test('39d split is allowed even if opponent may have to surrender pressure', () => {
   const p1Hand = newHand([card('8'), card('8', 'D')], [false, true], 260, 0);
   const p2Hand = newHand([card('10'), card('7')], [false, true], 260, 0);
   const m = makeMatch({ p1Hand, p2Hand, deck: [card('4'), card('3')] });
   const res = applyAction(m, 'p1', 'split');
-  assert.equal(res.error, 'Stake increase would exceed table max 500');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
 });
 
 test('40 bot bust resolves round immediately without waiting for player action', () => {
@@ -948,6 +950,77 @@ test('41k ranked split is allowed under normal legality rules', () => {
   assert.equal(res.ok, true);
   assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
   assert.equal(m.round.players.p1.hands.length, 2);
+});
+
+test('41l split works when acting second in turn order', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('10'), card('7')], [false, true], 25, 0),
+    p2Hand: newHand([card('8'), card('8', 'D')], [false, true], 25, 0),
+    deck: [card('5', 'C'), card('4', 'S')]
+  });
+  const p1Stand = applyAction(m, 'p1', 'stand');
+  assert.equal(p1Stand.ok, true);
+  assert.equal(m.round.turnPlayerId, 'p2');
+  const p2Split = applyAction(m, 'p2', 'split');
+  assert.equal(p2Split.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+  assert.equal(m.round.players.p2.hands.length, 2);
+});
+
+test('41m re-double works up to cap and settlement uses final bet', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('5'), card('4')], [false, true], 5, 0),
+    p2Hand: newHand([card('10'), card('2')], [false, true], 5, 0),
+    deck: [card('2', 'H'), card('2', 'D')]
+  });
+
+  const d1 = applyAction(m, 'p1', 'double');
+  assert.equal(d1.ok, true);
+  assert.equal(m.round.players.p1.hands[0].bet, 10);
+  assert.equal(m.round.players.p1.hands[0].doubleCount, 1);
+  assert.equal(applyPressureDecision(m, 'p2', 'match').ok, true);
+  assert.equal(m.round.turnPlayerId, 'p1');
+
+  const d2 = applyAction(m, 'p1', 'double');
+  assert.equal(d2.ok, true);
+  assert.equal(m.round.players.p1.hands[0].bet, 20);
+  assert.equal(m.round.players.p1.hands[0].doubleCount, 2);
+  assert.equal(applyPressureDecision(m, 'p2', 'match').ok, true);
+  assert.equal(m.round.turnPlayerId, 'p1');
+
+  const d3 = applyAction(m, 'p1', 'double');
+  assert.equal(d3.error, 'Hand cannot double down');
+
+  assert.equal(applyAction(m, 'p1', 'stand').ok, true);
+  assert.equal(m.round.turnPlayerId, 'p2');
+  assert.equal(applyAction(m, 'p2', 'stand').ok, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, 20);
+});
+
+test('41n easy bots never choose split/double while normal and medium can', () => {
+  const splitOnly = {
+    phase: PHASES.ACTION_TURN,
+    allowedActions: ['split'],
+    bot: {
+      activeHandIndex: 0,
+      hands: [{ total: 16, isSoft: false, splitEligible: true, pairRank: '8' }]
+    },
+    opponent: { hands: [{ upcards: [{ rank: '6', suit: 'H' }] }] },
+    public: { baseBet: 25, mode: 'real' }
+  };
+  assert.equal(chooseBotActionFromObservation(splitOnly, 'normal'), 'split');
+  assert.equal(chooseBotActionFromObservation(splitOnly, 'medium'), 'split');
+  assert.equal(chooseBotActionFromObservation(splitOnly, 'easy'), 'stand');
+
+  const withEasyFallback = {
+    ...splitOnly,
+    allowedActions: ['hit', 'stand', 'double', 'split']
+  };
+  for (let i = 0; i < 40; i += 1) {
+    const action = chooseBotActionFromObservation(withEasyFallback, 'easy');
+    assert.equal(action === 'double' || action === 'split', false);
+  }
 });
 
 test('42 practice matches do not advance challenge progress, real matches do', () => {

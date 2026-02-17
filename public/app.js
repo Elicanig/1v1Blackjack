@@ -2221,7 +2221,7 @@ function canTriggerAction(action) {
   const hand = myState?.hands?.[myState.activeHandIndex || 0];
   if (!hand || hand.locked || hand.bust || hand.surrendered || hand.stood) return false;
   if (action === 'split' && !handCanSplit(hand, myState?.hands?.length || 0, match.maxHandsPerPlayer || 4)) return false;
-  if (action === 'double' && ((hand.actionCount || 0) > 0 || hand.doubled || (hand.doubleCount || 0) >= (match.maxDoublesPerHand || 1))) return false;
+  if (action === 'double' && (hand.doubleCount || 0) >= (match.maxDoublesPerHand || 1)) return false;
   if (action === 'surrender' && (hand.actionCount || 0) > 0) return false;
   return true;
 }
@@ -5901,7 +5901,7 @@ function renderMatch() {
                     <div class="actions actions-main">
                       <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
                       <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
-                      <button data-action="double" title="${canAct ? 'Double your bet and receive exactly one final card' : actionHint}" ${!canAct || (activeHand?.actionCount || 0) > 0 || activeHand?.doubled || (activeHand?.doubleCount || 0) >= (match.maxDoublesPerHand || 1) ? 'disabled' : ''}>Double</button>
+                      <button data-action="double" title="${canAct ? 'Double your bet and draw one card (re-double allowed while eligible)' : actionHint}" ${!canAct || (activeHand?.doubleCount || 0) >= (match.maxDoublesPerHand || 1) ? 'disabled' : ''}>Double</button>
                       <button data-action="split" title="${handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4) ? 'Split pair into two hands' : 'Split requires pair (max 4 hands)'}" ${!canAct || !handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4) ? 'disabled' : ''}>Split</button>
                       <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender ? 'disabled' : ''}>Surrender</button>
                     </div>

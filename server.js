@@ -5,6 +5,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
+import { randomInt as cryptoRandomInt } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createStorage } from './db/storage.js';
@@ -233,6 +234,12 @@ if (process.env.NODE_ENV !== 'test') {
       console.log(`[storage] Initialized new DB at DB_PATH=${DB_PATH}`);
     }
   }
+  if (String(process.env.DEBUG_BLACKJACK_RNG || '') === '1') {
+    // Dev-only Monte Carlo sanity check; expected single-hand natural blackjack rate is ~4.8%.
+    const rngSample = sampleBlackjackFrequency(10_000);
+    // eslint-disable-next-line no-console
+    console.log('[rng-sanity]', JSON.stringify(rngSample));
+  }
 }
 
 let dbTouched = false;
@@ -326,7 +333,7 @@ for (const user of db.data.users) {
   }
   // Non-destructive PIN migration: never replace existing hashes.
   if (!user.pinHash) {
-    const generatedPin = user.pin ? String(user.pin) : String(Math.floor(1000 + Math.random() * 9000));
+    const generatedPin = user.pin ? String(user.pin) : String(randomIntInclusive(1000, 9999));
     user.pin = generatedPin;
     user.pinHash = bcrypt.hashSync(generatedPin, 10);
     dbTouched = true;
@@ -704,7 +711,7 @@ const RULES = {
   SURRENDER_LOSS_FRACTION: 0.75,
   MAX_SPLITS: 3,
   MAX_HANDS_PER_PLAYER: 4,
-  MAX_DOUBLES_PER_HAND: 1,
+  MAX_DOUBLES_PER_HAND: 2,
   ALL_IN_ON_INSUFFICIENT_BASE_BET: true
 };
 
@@ -835,10 +842,25 @@ function buildParticipants(playerIds, botDifficultyById = {}) {
   }, {});
 }
 
+function secureRandomInt(minInclusive, maxExclusive) {
+  const lo = Math.floor(Number(minInclusive) || 0);
+  const hi = Math.floor(Number(maxExclusive) || lo);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return lo;
+  try {
+    return cryptoRandomInt(lo, hi);
+  } catch {
+    return lo + Math.floor(Math.random() * (hi - lo));
+  }
+}
+
+function secureRandomFloat() {
+  return secureRandomInt(0, 1_000_000_000) / 1_000_000_000;
+}
+
 function randomIntInclusive(min, max) {
   const lo = Math.max(0, Math.floor(Number(min) || 0));
   const hi = Math.max(lo, Math.floor(Number(max) || lo));
-  return lo + Math.floor(Math.random() * (hi - lo + 1));
+  return secureRandomInt(lo, hi + 1);
 }
 
 function ensureBotPacingState(round) {
@@ -2978,8 +3000,9 @@ function buildDeck() {
       deck.push({ rank, suit, id: nanoid(6) });
     }
   }
+  // Unbiased Fisher-Yates shuffle with crypto-backed random ints.
   for (let i = deck.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = secureRandomInt(0, i + 1);
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
   return deck;
@@ -2987,6 +3010,21 @@ function buildDeck() {
 
 function drawCard(round) {
   return round.deck.pop();
+}
+
+function sampleBlackjackFrequency(samples = 10_000) {
+  const count = Math.max(100, Math.floor(Number(samples) || 10_000));
+  let naturals = 0;
+  for (let i = 0; i < count; i += 1) {
+    const deck = buildDeck();
+    const hand = [deck.pop(), deck.pop()];
+    if (handMeta(hand).isNaturalBlackjack) naturals += 1;
+  }
+  return {
+    samples: count,
+    naturals,
+    rate: naturals / count
+  };
 }
 
 function newHand(cards, hidden, bet = BASE_BET, splitDepth = 0) {
@@ -3269,7 +3307,7 @@ function challengeExpiresAt(tier, from = new Date()) {
 function pickChallengeItems(tier, count) {
   const pool = [...(CHALLENGE_POOLS[tier] || [])];
   for (let i = pool.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = secureRandomInt(0, i + 1);
     [pool[i], pool[j]] = [pool[j], pool[i]];
   }
   return pool.slice(0, Math.min(count, pool.length));
@@ -4317,7 +4355,7 @@ function legalActionsForHand(hand, playerRoundState = null) {
   if (!hand || hand.locked || hand.stood || hand.bust || hand.surrendered) return [];
   const actions = ['hit', 'stand'];
   if ((hand.actionCount || 0) === 0) actions.push('surrender');
-  if ((hand.actionCount || 0) === 0 && !hand.doubled && (hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
+  if ((hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
   if (canSplit(hand, playerRoundState)) actions.push('split');
   return actions;
 }
@@ -4455,7 +4493,11 @@ function getBotDifficulty(match, botId) {
 function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   if (!observation || observation.phase !== PHASES.ACTION_TURN) return 'stand';
   if (process.env.NODE_ENV !== 'production') assertSafeBotObservation(observation);
-  const legal = Array.isArray(observation.allowedActions) ? observation.allowedActions : [];
+  const difficultyKey = String(difficulty || 'normal').trim().toLowerCase();
+  let legal = Array.isArray(observation.allowedActions) ? observation.allowedActions : [];
+  if (difficultyKey === 'easy') {
+    legal = legal.filter((action) => action !== 'double' && action !== 'split');
+  }
   if (!legal.length) return 'stand';
 
   const activeHandIndex = observation.bot?.activeHandIndex ?? 0;
@@ -4466,12 +4508,12 @@ function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   let ideal = basicStrategyActionFromObservation(hand, opponentUpCardTotal);
   if (!legal.includes(ideal)) ideal = legal[0];
 
-  const accuracy = difficulty === 'easy' ? 0.45 : difficulty === 'medium' ? 0.75 : 0.94;
-  if (Math.random() <= accuracy) return ideal;
+  const accuracy = difficultyKey === 'easy' ? 0.45 : difficultyKey === 'medium' ? 0.75 : 0.94;
+  if (secureRandomFloat() <= accuracy) return ideal;
 
   const alternatives = legal.filter((a) => a !== ideal);
   if (!alternatives.length) return ideal;
-  return alternatives[Math.floor(Math.random() * alternatives.length)];
+  return alternatives[randomIntInclusive(0, alternatives.length - 1)];
 }
 
 function basicStrategyActionFromObservation(hand, up) {
@@ -4520,7 +4562,7 @@ function chooseBotPressureDecisionFromObservation(observation, difficulty = 'nor
   if (pressure.delta >= 10) chance -= 0.05;
   chance = Math.max(0.1, Math.min(0.95, chance));
   if (!pressure.canMatch) return 'surrender';
-  return Math.random() < chance ? 'match' : 'surrender';
+  return secureRandomFloat() < chance ? 'match' : 'surrender';
 }
 
 function scheduleBotBetConfirm(match) {
@@ -4536,7 +4578,7 @@ function scheduleBotBetConfirm(match) {
     botBetConfirmTimers.delete(key);
   }
 
-  const delay = BOT_BET_CONFIRM_MIN_MS + Math.floor(Math.random() * (BOT_BET_CONFIRM_MAX_MS - BOT_BET_CONFIRM_MIN_MS + 1));
+  const delay = randomIntInclusive(BOT_BET_CONFIRM_MIN_MS, BOT_BET_CONFIRM_MAX_MS);
   const timer = setTimeout(() => {
     if (!matches.has(match.id)) return;
     if (match.phase !== PHASES.ROUND_INIT) return;
@@ -4719,24 +4761,13 @@ function applyAction(match, playerId, action) {
   }
 
   if (normalizedAction === 'double') {
-    if ((hand.actionCount || 0) > 0) return { error: 'Double is only available as your first action on this hand' };
-    if (hand.locked || hand.doubled || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
+    if (hand.locked || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     const delta = hand.bet;
     if (!canAffordIncrement(match, playerId, delta)) return { error: 'Insufficient chips to double' };
     if (hand.bet * 2 > betLimits.max) return { error: `Bet cannot exceed ${betLimits.max} for this table` };
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
-    if (!isBotPlayer(opponentId)) {
-      const required = delta;
-      const targetHand = opponentState.hands[targetHandIndex] || opponentState.hands[0];
-      if (!canAffordIncrement(match, opponentId, required)) {
-        return { error: 'Opponent cannot match this stake increase right now' };
-      }
-      if ((targetHand?.bet || 0) + delta > betLimits.max) {
-        return { error: `Stake increase would exceed table max ${betLimits.max}` };
-      }
-    }
     hand.bet *= 2;
     hand.doubleCount = (hand.doubleCount || 0) + 1;
     hand.doubled = hand.doubleCount > 0;
@@ -4757,9 +4788,10 @@ function applyAction(match, playerId, action) {
       }
       return { ok: true };
     }
-    // Standard double-down: exactly one card, then forced stand.
-    hand.locked = true;
-    hand.stood = true;
+    if (total === 21) {
+      hand.locked = true;
+      hand.stood = true;
+    }
 
     match.round.pendingPressure = {
       initiatorId: playerId,
@@ -4778,15 +4810,6 @@ function applyAction(match, playerId, action) {
     if (!canSplit(hand, state)) return { error: 'Split unavailable' };
     if (!canAffordIncrement(match, playerId, hand.bet)) return { error: 'Insufficient chips to split' };
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
-    if (!isBotPlayer(opponentId)) {
-      const targetHand = opponentState.hands[targetHandIndex] || opponentState.hands[0];
-      if (!canAffordIncrement(match, opponentId, hand.bet)) {
-        return { error: 'Opponent cannot match this stake increase right now' };
-      }
-      if ((targetHand?.bet || 0) + hand.bet > betLimits.max) {
-        return { error: `Stake increase would exceed table max ${betLimits.max}` };
-      }
-    }
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     const [c1, c2] = hand.cards;
@@ -5407,7 +5430,7 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
 function buildNewUser(username) {
   const cleanUsername = String(username || '').trim();
   const usernameKey = normalizeUsername(cleanUsername);
-  const pin = String(Math.floor(1000 + Math.random() * 9000));
+  const pin = String(randomIntInclusive(1000, 9999));
   const user = {
     id: nanoid(),
     username: cleanUsername,
@@ -6873,6 +6896,7 @@ export {
   markNotificationsSeenForUser,
   notificationsForUser,
   levelRewardForLevel,
+  sampleBlackjackFrequency,
   getBotObservation,
   chooseBotActionFromObservation
 };
