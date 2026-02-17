@@ -693,6 +693,19 @@ for (const user of db.data.users) {
     user.skillChallenges = [];
     dbTouched = true;
   }
+  if (!user.skillChallengeState || typeof user.skillChallengeState !== 'object' || Array.isArray(user.skillChallengeState)) {
+    user.skillChallengeState = { expiresAt: null, history: [] };
+    dbTouched = true;
+  } else {
+    if (!Array.isArray(user.skillChallengeState.history)) {
+      user.skillChallengeState.history = [];
+      dbTouched = true;
+    }
+    if (user.skillChallengeState.expiresAt === undefined) {
+      user.skillChallengeState.expiresAt = null;
+      dbTouched = true;
+    }
+  }
   if (!user.headToHead || typeof user.headToHead !== 'object' || Array.isArray(user.headToHead)) {
     user.headToHead = {};
     dbTouched = true;
@@ -1022,12 +1035,39 @@ const CHALLENGE_POOLS = {
   ]
 };
 
-const SKILL_CHALLENGE_DEFS = [
-  { key: 'skill_win_no_bust', title: 'Clean Win', description: 'Win 2 hands without busting', goal: 2, rewardChips: 40, event: 'win_no_bust' },
-  { key: 'skill_stand_16', title: 'Disciplined Stand', description: 'Stand on 16+ three times', goal: 3, rewardChips: 35, event: 'stand_16_plus' },
-  { key: 'skill_blackjack', title: 'Natural Talent', description: 'Get a blackjack', goal: 1, rewardChips: 50, event: 'blackjack' },
-  { key: 'skill_practice_hands', title: 'Table Reps', description: 'Play 5 real-bet hands', goal: 5, rewardChips: 30, event: 'hand_played' }
+const SKILL_CHALLENGE_ACTIVE_COUNT = 4;
+const SKILL_CHALLENGE_NO_REPEAT_DAYS = 3;
+const SKILL_CHALLENGE_POOL = [
+  { key: 'skill_double_win_once', title: 'Double Clutch', description: 'Win one hand after doubling down.', goal: 1, rewardChips: 70, event: 'double_win', icon: 'DBL' },
+  { key: 'skill_double_win_twice', title: 'Double Discipline', description: 'Win two doubled hands.', goal: 2, rewardChips: 92, event: 'double_win', icon: 'DBL' },
+  { key: 'skill_split_win_once', title: 'Split Payoff', description: 'Win one split hand.', goal: 1, rewardChips: 76, event: 'split_win', icon: 'SPL' },
+  { key: 'skill_split_win_twice', title: 'Split Pressure', description: 'Win two split hands.', goal: 2, rewardChips: 98, event: 'split_win', icon: 'SPL' },
+  { key: 'skill_exact_20_win', title: 'Perfect Twenty', description: 'Win with an exact total of 20.', goal: 1, rewardChips: 72, event: 'exact_20_win', icon: '20' },
+  { key: 'skill_exact_20_win_twice', title: 'Twenty Twice', description: 'Win twice with exact 20.', goal: 2, rewardChips: 96, event: 'exact_20_win', icon: '20' },
+  { key: 'skill_five_card_win', title: 'Five Card Finish', description: 'Win with a 5-card hand.', goal: 1, rewardChips: 80, event: 'five_card_win', icon: '5C' },
+  { key: 'skill_low_total_win', title: 'Thin Margin', description: 'Win with 19 or less.', goal: 1, rewardChips: 72, event: 'low_total_win', icon: '19' },
+  { key: 'skill_low_total_win_twice', title: 'Low Total Duel', description: 'Win two hands with 19 or less.', goal: 2, rewardChips: 94, event: 'low_total_win', icon: '19' },
+  { key: 'skill_blackjack_once', title: 'Natural Edge', description: 'Get one natural blackjack.', goal: 1, rewardChips: 78, event: 'blackjack', icon: 'BJ' },
+  { key: 'skill_blackjack_twice', title: 'Natural Pair', description: 'Get two natural blackjacks.', goal: 2, rewardChips: 104, event: 'blackjack', icon: 'BJ' },
+  { key: 'skill_stand_16_twice', title: 'Disciplined Stand', description: 'Stand on 16+ twice.', goal: 2, rewardChips: 66, event: 'stand_16_plus', icon: 'STD' },
+  { key: 'skill_stand_16_triple', title: 'Calm Nerves', description: 'Stand on 16+ three times.', goal: 3, rewardChips: 82, event: 'stand_16_plus', icon: 'STD' },
+  { key: 'skill_controlled_hit_win', title: 'Controlled Risk', description: 'Win while hitting at most once.', goal: 1, rewardChips: 74, event: 'controlled_hit_win', icon: 'CTL' },
+  { key: 'skill_controlled_hit_win_twice', title: 'Tight Lines', description: 'Win two hands while hitting at most once.', goal: 2, rewardChips: 98, event: 'controlled_hit_win', icon: 'CTL' },
+  { key: 'skill_win_vs_ace_up', title: 'Ace Hunter', description: 'Win when opponent shows an Ace upcard.', goal: 1, rewardChips: 84, event: 'win_vs_ace_up', icon: 'ACE' },
+  { key: 'skill_win_vs_ace_up_twice', title: 'Ace Punisher', description: 'Win twice when opponent shows an Ace.', goal: 2, rewardChips: 108, event: 'win_vs_ace_up', icon: 'ACE' },
+  { key: 'skill_surrender_once', title: 'Tactical Fold', description: 'Use surrender once to minimize loss.', goal: 1, rewardChips: 58, event: 'surrender_used', icon: 'SUR' },
+  { key: 'skill_clean_win_pair', title: 'Clean Sequence', description: 'Win two hands without busting.', goal: 2, rewardChips: 72, event: 'win_no_bust', icon: 'CLN' },
+  { key: 'skill_clean_win_triple', title: 'Clean Control', description: 'Win three hands without busting.', goal: 3, rewardChips: 96, event: 'win_no_bust', icon: 'CLN' },
+  { key: 'skill_push_once', title: 'Deadlock', description: 'Record one push hand.', goal: 1, rewardChips: 54, event: 'push', icon: 'PSH' },
+  { key: 'skill_push_twice', title: 'Table Standoff', description: 'Record two push hands.', goal: 2, rewardChips: 70, event: 'push', icon: 'PSH' },
+  { key: 'skill_round_win_once', title: 'Round Closer', description: 'Win one full round by chips.', goal: 1, rewardChips: 68, event: 'round_won', icon: 'RND' },
+  { key: 'skill_round_win_twice', title: 'Round Controller', description: 'Win two rounds by chips.', goal: 2, rewardChips: 92, event: 'round_won', icon: 'RND' },
+  { key: 'skill_bot_medium_win', title: 'Beat Medium Bot', description: 'Win a round versus a Medium bot.', goal: 1, rewardChips: 88, event: 'bot_medium_round_win', icon: 'BOT' },
+  { key: 'skill_bot_normal_win', title: 'Beat Normal Bot', description: 'Win a round versus a Normal bot.', goal: 1, rewardChips: 104, event: 'bot_normal_round_win', icon: 'BOT' },
+  { key: 'skill_ranked_round_win', title: 'Ranked Take', description: 'Win one ranked round by net chips.', goal: 1, rewardChips: 96, event: 'ranked_round_win', icon: 'RKG' },
+  { key: 'skill_ranked_round_win_twice', title: 'Ranked Pressure', description: 'Win two ranked rounds by net chips.', goal: 2, rewardChips: 118, event: 'ranked_round_win', icon: 'RKG' }
 ];
+const SKILL_CHALLENGE_DEF_MAP = new Map(SKILL_CHALLENGE_POOL.map((def) => [def.key, def]));
 
 const BOT_ACCURACY = {
   easy: 0.5,
@@ -3684,6 +3724,7 @@ function newHand(cards, hidden, bet = BASE_BET, splitDepth = 0) {
     locked: false,
     surrendered: false,
     actionCount: 0,
+    hitCount: 0,
     bust: false,
     doubled: false,
     doubleCount: 0,
@@ -4057,89 +4098,206 @@ function recordChallengeEventForMatch(match, user, event, amount = 1) {
   return true;
 }
 
-function ensureSkillChallenges(user) {
+function skillChallengeExpiresAt(from = new Date()) {
+  const startMs = new Date(from).getTime();
+  if (!Number.isFinite(startMs)) return new Date(Date.now() + DAILY_RESET_MS).toISOString();
+  return new Date(startMs + DAILY_RESET_MS).toISOString();
+}
+
+function normalizeSkillChallengeHistoryEntries(history = [], nowMs = Date.now()) {
+  const horizonMs = nowMs - (14 * DAILY_RESET_MS);
+  return (Array.isArray(history) ? history : [])
+    .map((entry) => {
+      const key = String(entry?.key || '').trim();
+      const selectedMs = new Date(entry?.selectedAt || '').getTime();
+      if (!key || !SKILL_CHALLENGE_DEF_MAP.has(key)) return null;
+      if (!Number.isFinite(selectedMs)) return null;
+      if (selectedMs < horizonMs || selectedMs > nowMs + DAILY_RESET_MS) return null;
+      return {
+        key,
+        selectedAt: new Date(selectedMs).toISOString()
+      };
+    })
+    .filter(Boolean)
+    .slice(-200);
+}
+
+function pickSkillChallengeDefsForUser(user, count, nowMs = Date.now()) {
+  const target = Math.max(1, Math.floor(Number(count) || SKILL_CHALLENGE_ACTIVE_COUNT));
+  const state = user.skillChallengeState || { history: [] };
+  const recentCutoffMs = nowMs - (SKILL_CHALLENGE_NO_REPEAT_DAYS * DAILY_RESET_MS);
+  const recentKeys = new Set(
+    (Array.isArray(state.history) ? state.history : [])
+      .map((entry) => {
+        const key = String(entry?.key || '').trim();
+        const selectedMs = new Date(entry?.selectedAt || '').getTime();
+        if (!key || !SKILL_CHALLENGE_DEF_MAP.has(key)) return null;
+        if (!Number.isFinite(selectedMs) || selectedMs < recentCutoffMs) return null;
+        return key;
+      })
+      .filter(Boolean)
+  );
+  const shuffled = [...SKILL_CHALLENGE_POOL];
+  for (let i = shuffled.length - 1; i > 0; i -= 1) {
+    const j = secureRandomInt(0, i + 1);
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const selected = [];
+  for (const def of shuffled) {
+    if (selected.length >= target) break;
+    if (recentKeys.has(def.key)) continue;
+    selected.push(def);
+  }
+  if (selected.length < target) {
+    for (const def of shuffled) {
+      if (selected.length >= target) break;
+      if (selected.some((entry) => entry.key === def.key)) continue;
+      selected.push(def);
+    }
+  }
+  return selected;
+}
+
+function ensureSkillChallenges(user, force = false) {
+  let changed = false;
   if (!Array.isArray(user.skillChallenges)) {
     user.skillChallenges = [];
+    changed = true;
   }
-  if (user.skillChallenges.length === 0) {
-    user.skillChallenges = SKILL_CHALLENGE_DEFS.map((def) => ({
-      id: def.key,
+  if (!user.skillChallengeState || typeof user.skillChallengeState !== 'object' || Array.isArray(user.skillChallengeState)) {
+    user.skillChallengeState = { expiresAt: null, history: [] };
+    changed = true;
+  }
+  if (!Array.isArray(user.skillChallengeState.history)) {
+    user.skillChallengeState.history = [];
+    changed = true;
+  }
+
+  const nowMs = Date.now();
+  const normalizedHistory = normalizeSkillChallengeHistoryEntries(user.skillChallengeState.history, nowMs);
+  if (normalizedHistory.length !== user.skillChallengeState.history.length) {
+    user.skillChallengeState.history = normalizedHistory;
+    changed = true;
+  }
+
+  const expiresMs = new Date(user.skillChallengeState.expiresAt || '').getTime();
+  const hasStructuredChallenges = user.skillChallenges.length > 0 && user.skillChallenges.every((item) => {
+    const key = String(item?.key || '').trim();
+    if (!key || !SKILL_CHALLENGE_DEF_MAP.has(key)) return false;
+    const expMs = new Date(item?.expiresAt || '').getTime();
+    return Number.isFinite(expMs);
+  });
+  const shouldRotate = force || !hasStructuredChallenges || !Number.isFinite(expiresMs) || expiresMs <= nowMs;
+
+  if (shouldRotate) {
+    const selectedDefs = pickSkillChallengeDefsForUser(user, SKILL_CHALLENGE_ACTIVE_COUNT, nowMs);
+    const expiresAt = skillChallengeExpiresAt(new Date(nowMs));
+    const selectedAt = new Date(nowMs).toISOString();
+    user.skillChallenges = selectedDefs.map((def) => ({
+      id: `skill_${nanoid(8)}`,
       key: def.key,
+      tier: 'skill',
       title: def.title,
       description: def.description,
       goal: def.goal,
       progress: 0,
       rewardChips: def.rewardChips,
       event: def.event,
+      icon: def.icon || 'SKL',
+      expiresAt,
+      resetAt: expiresAt,
       completedAt: null,
       claimed: false,
       claimedAt: null
     }));
+    user.skillChallengeState.expiresAt = expiresAt;
+    user.skillChallengeState.lastRotatedAt = selectedAt;
+    user.skillChallengeState.poolSize = SKILL_CHALLENGE_POOL.length;
+    user.skillChallengeState.activeCount = user.skillChallenges.length;
+    user.skillChallengeState.history = normalizeSkillChallengeHistoryEntries(
+      [...user.skillChallengeState.history, ...selectedDefs.map((def) => ({ key: def.key, selectedAt }))],
+      nowMs
+    );
     return true;
   }
-  let changed = false;
-  for (const def of SKILL_CHALLENGE_DEFS) {
-    const existing = user.skillChallenges.find((item) => item.key === def.key || item.id === def.key);
-    if (!existing) {
-      user.skillChallenges.push({
-        id: def.key,
-        key: def.key,
-        title: def.title,
-        description: def.description,
-        goal: def.goal,
-        progress: 0,
-        rewardChips: def.rewardChips,
-        event: def.event,
-        completedAt: null,
-        claimed: false,
-        claimedAt: null
-      });
-      changed = true;
-      continue;
-    }
-    if (existing.id !== def.key) {
-      existing.id = def.key;
-      changed = true;
-    }
-    if (existing.key !== def.key) {
-      existing.key = def.key;
+
+  const activeResetAt = Number.isFinite(expiresMs)
+    ? new Date(expiresMs).toISOString()
+    : skillChallengeExpiresAt(new Date(nowMs));
+  if (user.skillChallengeState.expiresAt !== activeResetAt) {
+    user.skillChallengeState.expiresAt = activeResetAt;
+    changed = true;
+  }
+  const poolSize = SKILL_CHALLENGE_POOL.length;
+  const activeCount = user.skillChallenges.length;
+  if (user.skillChallengeState.poolSize !== poolSize) {
+    user.skillChallengeState.poolSize = poolSize;
+    changed = true;
+  }
+  if (user.skillChallengeState.activeCount !== activeCount) {
+    user.skillChallengeState.activeCount = activeCount;
+    changed = true;
+  }
+
+  for (const item of user.skillChallenges) {
+    const def = SKILL_CHALLENGE_DEF_MAP.get(String(item?.key || '').trim());
+    if (!def) continue;
+    if (item.title !== def.title) {
+      item.title = def.title;
       changed = true;
     }
-    if (existing.title !== def.title) {
-      existing.title = def.title;
+    if (item.description !== def.description) {
+      item.description = def.description;
       changed = true;
     }
-    if (existing.description !== def.description) {
-      existing.description = def.description;
+    if (item.goal !== def.goal) {
+      item.goal = def.goal;
       changed = true;
     }
-    if (existing.goal !== def.goal) {
-      existing.goal = def.goal;
+    if (item.rewardChips !== def.rewardChips) {
+      item.rewardChips = def.rewardChips;
       changed = true;
     }
-    if (existing.rewardChips !== def.rewardChips) {
-      existing.rewardChips = def.rewardChips;
+    if (item.event !== def.event) {
+      item.event = def.event;
       changed = true;
     }
-    if (existing.event !== def.event) {
-      existing.event = def.event;
+    if (item.icon !== def.icon) {
+      item.icon = def.icon;
       changed = true;
     }
-    const normalizedProgress = Math.max(0, Math.min(existing.goal, Math.floor(Number(existing.progress) || 0)));
-    if (existing.progress !== normalizedProgress) {
-      existing.progress = normalizedProgress;
+    if (item.tier !== 'skill') {
+      item.tier = 'skill';
       changed = true;
     }
-    if (existing.claimed === undefined) {
-      existing.claimed = Boolean(existing.claimedAt);
+    const goal = Math.max(1, Math.floor(Number(item.goal) || 1));
+    const normalizedProgress = Math.max(0, Math.min(goal, Math.floor(Number(item.progress) || 0)));
+    if (item.goal !== goal) {
+      item.goal = goal;
       changed = true;
     }
-    if (existing.claimed && !existing.claimedAt) {
-      existing.claimedAt = nowIso();
+    if (item.progress !== normalizedProgress) {
+      item.progress = normalizedProgress;
       changed = true;
     }
-    if (existing.progress >= existing.goal && !existing.completedAt) {
-      existing.completedAt = nowIso();
+    if (!item.expiresAt) {
+      item.expiresAt = activeResetAt;
+      changed = true;
+    }
+    if (!item.resetAt) {
+      item.resetAt = item.expiresAt;
+      changed = true;
+    }
+    if (item.claimed === undefined) {
+      item.claimed = Boolean(item.claimedAt);
+      changed = true;
+    }
+    if (item.claimed && !item.claimedAt) {
+      item.claimedAt = nowIso();
+      changed = true;
+    }
+    if (item.progress >= item.goal && !item.completedAt) {
+      item.completedAt = nowIso();
       changed = true;
     }
   }
@@ -4161,10 +4319,15 @@ function recordSkillEvent(user, event, amount = 1) {
 
 function buildChallengePayload(user) {
   const now = new Date();
+  const skillResetAt =
+    user.skillChallengeState?.expiresAt ||
+    (Array.isArray(user.skillChallenges) ? user.skillChallenges.find((item) => item?.expiresAt)?.expiresAt : null) ||
+    skillChallengeExpiresAt(now);
   const resets = {
     hourly: user.challengeSets?.hourly?.expiresAt || challengeExpiresAt('hourly', now),
     daily: user.challengeSets?.daily?.expiresAt || challengeExpiresAt('daily', now),
-    weekly: user.challengeSets?.weekly?.expiresAt || challengeExpiresAt('weekly', now)
+    weekly: user.challengeSets?.weekly?.expiresAt || challengeExpiresAt('weekly', now),
+    skill: skillResetAt
   };
   const challenges = {
     hourly: (user.challengeSets?.hourly?.items || []).map((item) => ({
@@ -4182,9 +4345,13 @@ function buildChallengePayload(user) {
       expiresAt: item.expiresAt || resets.weekly,
       resetAt: item.resetAt || item.expiresAt || resets.weekly
     })),
-    skill: (user.skillChallenges || []).map((item) => ({ ...item }))
+    skill: (user.skillChallenges || []).map((item) => ({
+      ...item,
+      expiresAt: item.expiresAt || resets.skill,
+      resetAt: item.resetAt || item.expiresAt || resets.skill
+    }))
   };
-  const challengeList = [...challenges.hourly, ...challenges.daily, ...challenges.weekly];
+  const challengeList = [...challenges.hourly, ...challenges.daily, ...challenges.weekly, ...challenges.skill];
   return {
     challenges,
     challengeList,
@@ -4192,8 +4359,12 @@ function buildChallengePayload(user) {
     hourlyResetAt: resets.hourly,
     dailyResetAt: resets.daily,
     weeklyResetAt: resets.weekly,
+    skillResetAt: resets.skill,
     nextDailyResetAt: resets.daily,
-    nextWeeklyResetAt: resets.weekly
+    nextWeeklyResetAt: resets.weekly,
+    nextSkillResetAt: resets.skill,
+    skillPoolSize: SKILL_CHALLENGE_POOL.length,
+    activeSkillCount: challenges.skill.length
   };
 }
 
@@ -4498,7 +4669,7 @@ function resolveRound(match) {
     bankrollAfter
   });
 
-  function applyHandOutcomeStats(user, ownId, out, hand) {
+  function applyHandOutcomeStats(user, ownId, out, hand, opponentHand) {
     if (!user) return;
     const stats = user.stats || (user.stats = cloneUserStatsDefaults());
     const isBotOpponent = isBotPlayer(nextPlayerId(match, ownId));
@@ -4551,6 +4722,17 @@ function resolveRound(match) {
       stats.biggestHandWin = Math.max(stats.biggestHandWin || 0, out.amount || 0);
       if (!hand?.bust) stats.maxCardsInWinningHand = Math.max(stats.maxCardsInWinningHand || 0, handCardsCount);
       recordChallengeEvent(user, 'hand_won', 1);
+      recordSkillEvent(user, 'hand_won', 1);
+      if ((hand?.doubleCount || 0) > 0) recordSkillEvent(user, 'double_win', 1);
+      if (hand?.wasSplitHand) recordSkillEvent(user, 'split_win', 1);
+      if ((handSummary.total || 0) === 20) recordSkillEvent(user, 'exact_20_win', 1);
+      if (handCardsCount >= 5 && !handSummary.isBust) recordSkillEvent(user, 'five_card_win', 1);
+      if ((handSummary.total || 0) <= 19) recordSkillEvent(user, 'low_total_win', 1);
+      const opponentUpCard = Array.isArray(opponentHand?.cards) ? opponentHand.cards[0] : null;
+      if (opponentUpCard?.rank === 'A') recordSkillEvent(user, 'win_vs_ace_up', 1);
+      if (Math.max(0, Math.floor(Number(hand?.hitCount) || 0)) <= 1) {
+        recordSkillEvent(user, 'controlled_hit_win', 1);
+      }
     } else if (ownLost) {
       stats.handsLost = (stats.handsLost || 0) + 1;
       const nextStreak = streakCountsAfterOutcome({
@@ -4564,6 +4746,7 @@ function resolveRound(match) {
       stats.totalChipsLost = (stats.totalChipsLost || 0) + (out.amount || 0);
       stats.biggestHandLoss = Math.max(stats.biggestHandLoss || 0, out.amount || 0);
       recordChallengeEvent(user, 'hand_lost', 1);
+      recordSkillEvent(user, 'hand_lost', 1);
     } else if (ownPush) {
       stats.pushes = (stats.pushes || 0) + 1;
       stats.handsPush = stats.pushes;
@@ -4575,6 +4758,7 @@ function resolveRound(match) {
       stats.currentWinStreak = nextStreak.winStreak;
       stats.currentLossStreak = nextStreak.lossStreak;
       recordChallengeEvent(user, 'push', 1);
+      recordSkillEvent(user, 'push', 1);
     }
 
     if (hand?.wasSplitHand) {
@@ -4592,8 +4776,8 @@ function resolveRound(match) {
   for (const out of outcomes) {
     const handA = a.hands[out.handIndex] || a.hands[0];
     const handB = b.hands[out.handIndex] || b.hands[0];
-    applyHandOutcomeStats(userA, aId, out, handA);
-    applyHandOutcomeStats(userB, bId, out, handB);
+    applyHandOutcomeStats(userA, aId, out, handA, handB);
+    applyHandOutcomeStats(userB, bId, out, handB, handA);
   }
 
   if (realMatch) {
@@ -4639,12 +4823,14 @@ function resolveRound(match) {
     if (userA) {
       userA.stats.roundsWon += 1;
       recordChallengeEvent(userA, 'round_won', 1);
+      recordSkillEvent(userA, 'round_won', 1);
     }
     if (userB) userB.stats.roundsLost += 1;
   } else if (realMatch && netA < 0) {
     if (userB) {
       userB.stats.roundsWon += 1;
       recordChallengeEvent(userB, 'round_won', 1);
+      recordSkillEvent(userB, 'round_won', 1);
     }
     if (userA) userA.stats.roundsLost += 1;
   }
@@ -4655,6 +4841,21 @@ function resolveRound(match) {
   const winnerUser = winnerId ? getUserById(winnerId) : null;
   const loserUser = loserId ? getUserById(loserId) : null;
   const rankedRound = String(match.matchType || '').toUpperCase() === 'RANKED' && realMatch;
+  if (realMatch && rankedRound) {
+    if (netA > 0 && userA) recordSkillEvent(userA, 'ranked_round_win', 1);
+    if (netA < 0 && userB) recordSkillEvent(userB, 'ranked_round_win', 1);
+  }
+  if (realMatch && isBotMatch(match)) {
+    const botId = match.playerIds.find((id) => isBotPlayer(id));
+    const difficulty = botId ? getBotDifficulty(match, botId) : '';
+    if (difficulty === 'medium') {
+      if (netA > 0 && !isBotPlayer(aId) && userA) recordSkillEvent(userA, 'bot_medium_round_win', 1);
+      if (netA < 0 && !isBotPlayer(bId) && userB) recordSkillEvent(userB, 'bot_medium_round_win', 1);
+    } else if (difficulty === 'normal') {
+      if (netA > 0 && !isBotPlayer(aId) && userA) recordSkillEvent(userA, 'bot_normal_round_win', 1);
+      if (netA < 0 && !isBotPlayer(bId) && userB) recordSkillEvent(userB, 'bot_normal_round_win', 1);
+    }
+  }
   const outcomeForA = netA > 0 ? 'win' : netA < 0 ? 'loss' : 'push';
   const outcomeForB = netA < 0 ? 'win' : netA > 0 ? 'loss' : 'push';
   if (realMatch && userA) {
@@ -5431,6 +5632,7 @@ function applyAction(match, playerId, action) {
     recordHumanActionForBotLearning(match, playerId, normalizedAction);
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
+    hand.hitCount = (hand.hitCount || 0) + 1;
     hand.cards.push(drawCard(match.round));
     hand.hidden.push(false);
     const total = handTotal(hand.cards);
@@ -5477,6 +5679,10 @@ function applyAction(match, playerId, action) {
     hand.actionCount = (hand.actionCount || 0) + 1;
     hand.surrendered = true;
     hand.locked = true;
+    if (isRealMatch(match) && !isBotPlayer(playerId)) {
+      const user = getUserById(playerId);
+      if (user) recordSkillEvent(user, 'surrender_used', 1);
+    }
     progressTurn(match, playerId);
     return { ok: true };
   }
@@ -5495,7 +5701,11 @@ function applyAction(match, playerId, action) {
     hand.doubled = hand.doubleCount > 0;
     if (isRealMatch(match) && !isBotPlayer(playerId)) {
       const user = getUserById(playerId);
-      if (user) user.stats.doublesAttempted = (user.stats.doublesAttempted || 0) + 1;
+      if (user) {
+        user.stats.doublesAttempted = (user.stats.doublesAttempted || 0) + 1;
+        recordChallengeEvent(user, 'double', 1);
+        recordSkillEvent(user, 'double', 1);
+      }
     }
     hand.cards.push(drawCard(match.round));
     hand.hidden.push(false);
@@ -5552,6 +5762,7 @@ function applyAction(match, playerId, action) {
       if (user) {
         user.stats.splitsAttempted = (user.stats.splitsAttempted || 0) + 1;
         recordChallengeEvent(user, 'split', 1);
+        recordSkillEvent(user, 'split', 1);
         db.write();
         emitUserUpdate(playerId);
       }
@@ -6183,6 +6394,7 @@ function buildNewUser(username) {
     lastStreakClaimAt: null,
     streakCount: 0,
     skillChallenges: [],
+    skillChallengeState: { expiresAt: null, history: [] },
     xp: 0,
     lastLevelRewarded: 0,
     pvpWins: 0,
@@ -6334,8 +6546,12 @@ app.get('/api/me', authMiddleware, async (req, res) => {
     hourlyResetAt: challengeData.hourlyResetAt,
     dailyResetAt: challengeData.dailyResetAt,
     weeklyResetAt: challengeData.weeklyResetAt,
+    skillResetAt: challengeData.skillResetAt,
     nextDailyResetAt: challengeData.nextDailyResetAt,
-    nextWeeklyResetAt: challengeData.nextWeeklyResetAt
+    nextWeeklyResetAt: challengeData.nextWeeklyResetAt,
+    nextSkillResetAt: challengeData.nextSkillResetAt,
+    skillPoolSize: challengeData.skillPoolSize,
+    activeSkillCount: challengeData.activeSkillCount
   });
 });
 
@@ -7255,19 +7471,27 @@ app.post('/api/daily-claim', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/challenges', authMiddleware, async (req, res) => {
+  const nowMs = Date.now();
+  const eventsSnapshot = eventsSnapshotPayload(nowMs);
   const refreshed = refreshChallengesForUser(req.user);
   const refreshedSkills = ensureSkillChallenges(req.user);
   if (refreshed || refreshedSkills) await db.write();
   const payload = buildChallengePayload(req.user);
   return res.json({
+    serverNow: eventsSnapshot.serverNow,
+    activeEvents: eventsSnapshot.activeEvents,
     challenges: payload.challenges,
     challengeList: payload.challengeList,
     challengeResets: payload.challengeResets,
     hourlyResetAt: payload.hourlyResetAt,
     dailyResetAt: payload.dailyResetAt,
     weeklyResetAt: payload.weeklyResetAt,
+    skillResetAt: payload.skillResetAt,
     nextDailyResetAt: payload.nextDailyResetAt,
-    nextWeeklyResetAt: payload.nextWeeklyResetAt
+    nextWeeklyResetAt: payload.nextWeeklyResetAt,
+    nextSkillResetAt: payload.nextSkillResetAt,
+    skillPoolSize: payload.skillPoolSize,
+    activeSkillCount: payload.activeSkillCount
   });
 });
 
@@ -7661,6 +7885,7 @@ export {
   advanceToNextPlayableHand,
   serializeMatchFor,
   refreshChallengesForUser,
+  ensureSkillChallenges,
   recordChallengeEventForMatch,
   buildChallengePayload,
   isRealMatch,

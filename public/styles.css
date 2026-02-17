@@ -25,8 +25,8 @@
   --card: rgba(13, 24, 21, 0.78);
   --card2: rgba(16, 30, 26, 0.72);
   --text: #f5f6f0;
-  --muted: #b1c0b7;
-  --muted-strong: #c3d1c9;
+  --muted: #bccac2;
+  --muted-strong: #cedbd3;
   --gold: #cda764;
   --gold2: #ebc987;
   --gold3: #f1d9a8;
@@ -41,6 +41,7 @@
   --t-fast: 120ms;
   --t: 200ms;
   --t-slow: 350ms;
+  --control-height: 40px;
 
   /* compatibility aliases */
   --space-1: var(--s-1);
@@ -536,7 +537,8 @@ button {
   appearance: none;
   border: 1px solid var(--outline);
   border-radius: 999px;
-  padding: 9px 14px;
+  min-height: var(--control-height);
+  padding: 9px 15px;
   background: linear-gradient(180deg, rgba(30, 47, 41, 0.82), rgba(18, 33, 28, 0.78));
   color: var(--text);
   cursor: pointer;
@@ -546,6 +548,10 @@ button {
   overflow: hidden;
   font-weight: 560;
   letter-spacing: 0.01em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 .glow-follow {
@@ -762,6 +768,7 @@ select {
   border-radius: var(--r-sm);
   border: 1px solid var(--outline);
   padding: 10px 12px;
+  min-height: 40px;
   background: rgba(12, 25, 21, 0.72);
   color: var(--text);
   transition: border-color var(--t-fast) ease, box-shadow var(--t-fast) ease;
@@ -787,6 +794,11 @@ select:focus-visible {
 .section {
   padding: clamp(18px, 2vw, 26px);
   /* Keep section metrics static to prevent click-triggered flash/shift during full view re-renders. */
+}
+
+.section > h2:first-child,
+.section > h3:first-child {
+  margin-bottom: 10px;
 }
 
 .kpis {
@@ -1923,7 +1935,8 @@ select:focus-visible {
   justify-content: space-between;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2);
+  min-height: 72px;
+  padding: 12px 13px;
   margin-bottom: var(--space-1);
   border-radius: var(--r-sm);
   background:
@@ -2072,6 +2085,7 @@ select:focus-visible {
 
 #app[data-view='challenges'] .challenge {
   border-radius: 12px;
+  align-items: center;
 }
 
 #app[data-view='challenges'] .challenge > div {
@@ -2086,6 +2100,142 @@ select:focus-visible {
   margin: -4px 0 10px;
   font-size: 0.8rem;
   letter-spacing: 0.02em;
+}
+
+#app[data-view='challenges'] .challenge-tier {
+  display: grid;
+  gap: 10px;
+}
+
+.challenge-tier-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.challenge-tier-meta {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.challenge-tier-rotation {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(205, 167, 100, 0.35);
+  background: rgba(30, 25, 13, 0.44);
+  color: #f1ddb6;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  padding: 4px 10px;
+}
+
+#app[data-view='challenges'] .challenge-reset-note {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+#app[data-view='challenges'] .challenge-card {
+  align-items: center;
+  gap: 12px;
+}
+
+.challenge-card-main {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 8px;
+}
+
+.challenge-card-top {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.challenge-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid rgba(205, 167, 100, 0.42);
+  background: rgba(31, 26, 13, 0.52);
+  color: #f2deb8;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+
+.challenge-copy {
+  min-width: 0;
+}
+
+.challenge-copy .muted {
+  margin-top: 2px;
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.challenge-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(236, 242, 234, 0.2);
+  padding: 3px 9px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.challenge-status.is-progress {
+  color: #d5dfda;
+  background: rgba(20, 34, 29, 0.56);
+}
+
+.challenge-status.is-complete {
+  color: #f4deb0;
+  background: rgba(53, 40, 16, 0.52);
+  border-color: rgba(205, 167, 100, 0.48);
+}
+
+.challenge-status.is-claimed {
+  color: #bfe8d8;
+  background: rgba(18, 49, 40, 0.52);
+  border-color: rgba(77, 174, 139, 0.42);
+}
+
+.challenge-progress-track {
+  position: relative;
+  overflow: hidden;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(16, 33, 28, 0.74);
+  border: 1px solid rgba(236, 242, 234, 0.12);
+}
+
+.challenge-progress-track span {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(205, 167, 100, 0.78), rgba(241, 217, 168, 0.98));
+  transition: width 180ms ease;
+}
+
+.challenge-progress-meta {
+  font-size: 0.8rem;
 }
 
 .claim-wiggle {
@@ -3969,21 +4119,21 @@ select:focus-visible {
 }
 
 .profile-accordion-body {
-  padding: 12px;
+  padding: 14px;
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .profile-two-col {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.9fr);
-  gap: 12px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 16px;
 }
 
 .profile-form-grid {
   display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
-  gap: 10px 12px;
+  grid-template-columns: 136px minmax(0, 1fr);
+  gap: 12px 12px;
   align-items: center;
 }
 
@@ -3997,19 +4147,21 @@ select:focus-visible {
   border: 1px solid rgba(230, 238, 225, 0.14);
   border-radius: 10px;
   background: rgba(10, 20, 17, 0.62);
-  padding: 10px;
+  padding: 12px;
   display: grid;
-  gap: 8px;
+  gap: 10px;
   align-content: start;
 }
 
 .profile-deck-skin-preview {
   border-radius: 10px;
   border: 1px solid rgba(230, 238, 225, 0.14);
-  background: rgba(11, 23, 19, 0.78);
-  padding: 10px 12px;
+  background:
+    radial-gradient(300px 160px at 85% -10%, rgba(205, 167, 100, 0.2), transparent 68%),
+    rgba(11, 23, 19, 0.8);
+  padding: 12px;
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .profile-deck-skin-preview-head {
@@ -4020,22 +4172,33 @@ select:focus-visible {
 }
 
 .profile-deck-skin-cards {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(205, 167, 100, 0.18);
+  background:
+    radial-gradient(180px 90px at 20% 18%, rgba(255, 255, 255, 0.08), transparent 70%),
+    radial-gradient(220px 140px at 86% 0%, rgba(205, 167, 100, 0.14), transparent 72%),
+    linear-gradient(180deg, rgba(7, 26, 21, 0.76), rgba(6, 18, 15, 0.74));
 }
 
 .profile-sample-card {
   border-radius: 10px;
-  min-height: 88px;
+  width: clamp(84px, 25%, 110px);
+  aspect-ratio: 5 / 7;
   border: 1px solid rgba(8, 17, 13, 0.48);
   box-shadow: 0 10px 18px rgba(2, 7, 5, 0.32), 0 1px 0 rgba(255, 255, 255, 0.12) inset;
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   font-family: var(--font-card);
-  font-size: 1.18rem;
+  font-size: 1.22rem;
 }
 
 .profile-sample-card-corner {
@@ -4053,8 +4216,8 @@ select:focus-visible {
 
 .profile-deck-skin-library {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 10px;
 }
 
 .profile-deck-skin-chip {
@@ -4063,21 +4226,23 @@ select:focus-visible {
   border-radius: 10px;
   border: 1px solid rgba(230, 238, 225, 0.14);
   background: rgba(12, 23, 19, 0.68);
-  padding: 8px 10px;
+  padding: 10px 11px;
   display: grid;
-  gap: 2px;
-  min-height: 52px;
+  gap: 4px;
+  min-height: 62px;
+  align-content: center;
 }
 
 .profile-deck-skin-chip span {
-  font-size: 0.83rem;
+  font-size: 0.88rem;
   font-weight: 700;
   color: var(--text-strong);
 }
 
 .profile-deck-skin-chip small {
-  font-size: 0.73rem;
-  color: var(--text-muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+  color: var(--muted-strong);
 }
 
 .profile-deck-skin-chip.is-locked {
@@ -5078,6 +5243,34 @@ select:focus-visible {
     justify-content: space-between;
   }
 
+  .challenge-tier-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .challenge-tier-meta {
+    justify-items: start;
+  }
+
+  #app[data-view='challenges'] .challenge-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #app[data-view='challenges'] .challenge-card > button {
+    width: 100%;
+  }
+
+  .challenge-card-top {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .challenge-status {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
   .hands {
     min-height: 118px;
   }
@@ -5242,6 +5435,14 @@ select:focus-visible {
 
   .profile-deck-skin-library {
     grid-template-columns: 1fr;
+  }
+
+  .profile-deck-skin-cards {
+    justify-content: center;
+  }
+
+  .profile-sample-card {
+    width: clamp(82px, 29vw, 102px);
   }
 
   .title-current-card {

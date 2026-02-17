@@ -16,6 +16,7 @@ import {
   hasPlayableHand,
   advanceToNextPlayableHand,
   refreshChallengesForUser,
+  ensureSkillChallenges,
   recordChallengeEventForMatch,
   buildChallengePayload,
   countWinningSplitHandsForPlayer,
@@ -1101,13 +1102,32 @@ test('42 practice matches do not advance challenge progress, real matches do', (
 });
 
 test('43 challenge payload includes reset timestamps for countdown UI', () => {
-  const user = { challengeSets: {}, skillChallenges: [] };
+  const user = { challengeSets: {}, skillChallenges: [], skillChallengeState: { expiresAt: null, history: [] } };
   refreshChallengesForUser(user, true);
+  ensureSkillChallenges(user, true);
   const payload = buildChallengePayload(user);
   assert.ok(payload.challengeResets.daily);
   assert.ok(payload.challengeResets.weekly);
+  assert.ok(payload.challengeResets.skill);
+  assert.equal(payload.skillPoolSize >= 25, true);
+  assert.equal(payload.activeSkillCount, user.skillChallenges.length);
   assert.equal(Number.isFinite(new Date(payload.nextDailyResetAt).getTime()), true);
   assert.equal(Number.isFinite(new Date(payload.nextWeeklyResetAt).getTime()), true);
+  assert.equal(Number.isFinite(new Date(payload.nextSkillResetAt).getTime()), true);
+});
+
+test('43b skill challenges rotate daily and avoid immediate repeats', () => {
+  const user = { challengeSets: {}, skillChallenges: [], skillChallengeState: { expiresAt: null, history: [] } };
+  ensureSkillChallenges(user, true);
+  assert.equal(user.skillChallenges.length, 4);
+  const firstKeys = user.skillChallenges.map((entry) => entry.key);
+  assert.equal(new Set(firstKeys).size, firstKeys.length);
+
+  user.skillChallengeState.expiresAt = new Date(Date.now() - 1000).toISOString();
+  ensureSkillChallenges(user);
+  const secondKeys = user.skillChallenges.map((entry) => entry.key);
+  assert.equal(secondKeys.length, 4);
+  assert.equal(secondKeys.some((key) => firstKeys.includes(key)), false);
 });
 
 test('44 bot observation excludes deck and hidden opponent cards', () => {

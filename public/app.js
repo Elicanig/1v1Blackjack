@@ -452,11 +452,12 @@ const state = {
   toasts: [],
   challenges: { hourly: [], daily: [], weekly: [], skill: [] },
   challengeClaimPendingById: {},
+  challengeMeta: { skillPoolSize: 0, activeSkillCount: 0 },
   serverClockOffsetMs: 0,
   activeEvents: [],
   eventDetailsModalId: null,
-  challengeResets: { hourly: null, daily: null, weekly: null },
-  challengeResetRemainingMs: { hourly: 0, daily: 0, weekly: 0 },
+  challengeResets: { hourly: null, daily: null, weekly: null, skill: null },
+  challengeResetRemainingMs: { hourly: 0, daily: 0, weekly: 0, skill: 0 },
   challengeResetRefreshInFlight: false,
   view: initialViewFromPath(),
   socket: null,
@@ -1445,6 +1446,7 @@ function challengeResetText(tier) {
   if (tier === 'hourly') return `Resets in ${formatMinutesSeconds(remaining)}`;
   if (tier === 'daily') return `Resets in ${formatCooldown(remaining)}`;
   if (tier === 'weekly') return `Resets in ${formatWeeklyCountdown(remaining)}`;
+  if (tier === 'skill') return `Refreshes in ${formatCooldown(remaining)}`;
   return `Resets in ${formatCooldown(remaining)}`;
 }
 
@@ -1693,13 +1695,13 @@ function renderRankTimelineModal(user = state.me) {
 function updateChallengeResetCountdowns() {
   const prev = { ...state.challengeResetRemainingMs };
   const next = { hourly: 0, daily: 0, weekly: 0 };
-  for (const tier of ['hourly', 'daily', 'weekly']) {
+  for (const tier of ['hourly', 'daily', 'weekly', 'skill']) {
     const resetAt = state.challengeResets?.[tier];
     const targetMs = resetAt ? new Date(resetAt).getTime() : 0;
     next[tier] = Number.isFinite(targetMs) && targetMs > 0 ? Math.max(0, targetMs - Date.now()) : 0;
   }
   state.challengeResetRemainingMs = next;
-  return ['hourly', 'daily', 'weekly'].some((tier) => prev[tier] > 0 && next[tier] <= 0);
+  return ['hourly', 'daily', 'weekly', 'skill'].some((tier) => prev[tier] > 0 && next[tier] <= 0);
 }
 
 function syncChallengeCountdownUI() {
@@ -1730,7 +1732,16 @@ function applyChallengesPayload(challenges, resets, resetHints = {}) {
       toValidIso(resets?.weekly) ||
       toValidIso(resetHints?.weeklyResetAt) ||
       toValidIso(resetHints?.nextWeeklyResetAt) ||
-      deriveTierResetAtFromChallenges(groups, 'weekly')
+      deriveTierResetAtFromChallenges(groups, 'weekly'),
+    skill:
+      toValidIso(resets?.skill) ||
+      toValidIso(resetHints?.skillResetAt) ||
+      toValidIso(resetHints?.nextSkillResetAt) ||
+      deriveTierResetAtFromChallenges(groups, 'skill')
+  };
+  state.challengeMeta = {
+    skillPoolSize: Math.max(0, Math.floor(Number(resetHints?.skillPoolSize) || 0)),
+    activeSkillCount: Math.max(0, Math.floor(Number(resetHints?.activeSkillCount) || 0))
   };
   updateChallengeResetCountdowns();
 }
@@ -2337,8 +2348,12 @@ async function loadMe() {
       hourlyResetAt: data.hourlyResetAt,
       dailyResetAt: data.dailyResetAt,
       weeklyResetAt: data.weeklyResetAt,
+      skillResetAt: data.skillResetAt,
       nextDailyResetAt: data.nextDailyResetAt,
-      nextWeeklyResetAt: data.nextWeeklyResetAt
+      nextWeeklyResetAt: data.nextWeeklyResetAt,
+      nextSkillResetAt: data.nextSkillResetAt,
+      skillPoolSize: data.skillPoolSize,
+      activeSkillCount: data.activeSkillCount
     });
     state.freeClaimed = !Boolean(data.freeClaimAvailable);
     state.freeClaimedAt = null;
@@ -2415,8 +2430,9 @@ async function loadMe() {
     state.activeEvents = [];
     state.eventDetailsModalId = null;
     state.challenges = { hourly: [], daily: [], weekly: [], skill: [] };
-    state.challengeResets = { hourly: null, daily: null, weekly: null };
-    state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
+    state.challengeMeta = { skillPoolSize: 0, activeSkillCount: 0 };
+    state.challengeResets = { hourly: null, daily: null, weekly: null, skill: null };
+    state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0, skill: 0 };
     state.challengeResetRefreshInFlight = false;
     state.challengeClaimPendingById = {};
     state.freeClaimed = false;
@@ -3684,12 +3700,17 @@ async function claimFree100() {
 async function loadChallenges() {
   try {
     const data = await api('/api/challenges');
+    applyEventsSnapshot(data.serverNow, data.activeEvents || state.activeEvents);
     applyChallengesPayload(data.challenges, data.challengeResets, {
       hourlyResetAt: data.hourlyResetAt,
       dailyResetAt: data.dailyResetAt,
       weeklyResetAt: data.weeklyResetAt,
+      skillResetAt: data.skillResetAt,
       nextDailyResetAt: data.nextDailyResetAt,
-      nextWeeklyResetAt: data.nextWeeklyResetAt
+      nextWeeklyResetAt: data.nextWeeklyResetAt,
+      nextSkillResetAt: data.nextSkillResetAt,
+      skillPoolSize: data.skillPoolSize,
+      activeSkillCount: data.activeSkillCount
     });
     render();
   } catch (e) {
@@ -3817,8 +3838,9 @@ function logout() {
   state.currentLobby = null;
   state.challenges = { hourly: [], daily: [], weekly: [], skill: [] };
   state.challengeClaimPendingById = {};
-  state.challengeResets = { hourly: null, daily: null, weekly: null };
-  state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
+  state.challengeMeta = { skillPoolSize: 0, activeSkillCount: 0 };
+  state.challengeResets = { hourly: null, daily: null, weekly: null, skill: null };
+  state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0, skill: 0 };
   state.challengeResetRefreshInFlight = false;
   state.homeSections = { highRoller: false, practice: false };
   state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
@@ -6265,49 +6287,90 @@ function renderRanked() {
 function renderChallenges() {
   const groups = state.challenges || { hourly: [], daily: [], weekly: [], skill: [] };
   const claimPending = state.challengeClaimPendingById || {};
-  const resetTiers = new Set(['hourly', 'daily', 'weekly']);
-  const renderTier = (label, key) => `
-    <div class="card section" style="margin-top:1rem">
-      <h3>${label}</h3>
-      ${
-        resetTiers.has(key)
-          ? `<div class="muted challenge-reset-note" data-challenge-reset-tier="${key}">${challengeResetText(key)}</div>`
-          : ''
-      }
+  const resetTiers = new Set(['hourly', 'daily', 'weekly', 'skill']);
+  const skillPoolSize = Math.max(
+    0,
+    Math.floor(Number(state.challengeMeta?.skillPoolSize) || Number(groups.skill?.length) || 0)
+  );
+  const challengeStatusLabel = (challenge) => {
+    const goal = Math.max(1, Math.floor(Number(challenge?.goal) || 1));
+    const progress = Math.max(0, Math.floor(Number(challenge?.progress) || 0));
+    const claimed = Boolean(challenge?.claimed || challenge?.claimedAt);
+    if (claimed) return 'Claimed';
+    if (progress >= goal) return 'Completed';
+    return 'In Progress';
+  };
+  const challengeIcon = (challenge) => {
+    const raw = String(challenge?.icon || '').trim().toUpperCase();
+    if (raw) return raw.slice(0, 4);
+    return String(challenge?.title || 'SKL').trim().slice(0, 3).toUpperCase();
+  };
+  const renderTier = (label, key, options = {}) => `
+    <section class="card section challenge-tier">
+      <div class="challenge-tier-head">
+        <h3>${label}</h3>
+        <div class="challenge-tier-meta">
+          ${
+            options.dailyRotation
+              ? `<span class="challenge-tier-rotation">Daily rotation${skillPoolSize >= 25 ? ' • Pool 25+' : skillPoolSize > 0 ? ` • Pool ${skillPoolSize}` : ''}</span>`
+              : ''
+          }
+          ${
+            resetTiers.has(key)
+              ? `<span class="muted challenge-reset-note" data-challenge-reset-tier="${key}">${challengeResetText(key)}</span>`
+              : ''
+          }
+        </div>
+      </div>
       ${
         (groups[key] || [])
-          .map(
-            (c) => `
-          <div class="challenge ${c.progress >= c.goal && !c.claimed && !c.claimedAt ? 'challenge-ready' : ''}">
-            <div>
-              <div><strong>${c.title}</strong></div>
-              <div class="muted">${c.description}</div>
-              <div class="muted">${c.progress}/${c.goal} • Reward ${c.rewardChips} chips</div>
-            </div>
-            <button
-              class="${c.progress >= c.goal && !c.claimed && !c.claimedAt && !claimPending[c.id] ? 'claim-wiggle' : ''}"
-              data-claim="${c.id}"
-              ${c.claimed || c.claimedAt || c.progress < c.goal || claimPending[c.id] ? 'disabled' : ''}
-            >${
-              claimPending[c.id]
-                ? '<span class="btn-spinner" aria-hidden="true"></span>Claiming...'
-                : (c.claimed || c.claimedAt ? 'Claimed' : 'Claim')
-            }</button>
-          </div>
-        `
-          )
+          .map((c) => {
+            const goal = Math.max(1, Math.floor(Number(c?.goal) || 1));
+            const progress = Math.max(0, Math.floor(Number(c?.progress) || 0));
+            const percent = Math.max(0, Math.min(100, Math.round((progress / goal) * 100)));
+            const claimed = Boolean(c?.claimed || c?.claimedAt);
+            const ready = progress >= goal && !claimed;
+            const statusClass = claimed ? 'is-claimed' : ready ? 'is-complete' : 'is-progress';
+            return `
+              <article class="challenge challenge-card ${ready ? 'challenge-ready' : ''}">
+                <div class="challenge-card-main">
+                  <div class="challenge-card-top">
+                    <span class="challenge-icon">${challengeIcon(c)}</span>
+                    <div class="challenge-copy">
+                      <div><strong>${c.title}</strong></div>
+                      <div class="muted">${c.description}</div>
+                    </div>
+                    <span class="challenge-status ${statusClass}">${challengeStatusLabel(c)}</span>
+                  </div>
+                  <div class="challenge-progress-track" role="presentation">
+                    <span style="width:${percent}%"></span>
+                  </div>
+                  <div class="muted challenge-progress-meta">${progress}/${goal} • Reward ${Math.max(0, Math.floor(Number(c.rewardChips) || 0)).toLocaleString()} chips</div>
+                </div>
+                <button
+                  class="${ready && !claimPending[c.id] ? 'claim-wiggle' : ''}"
+                  data-claim="${c.id}"
+                  ${claimed || progress < goal || claimPending[c.id] ? 'disabled' : ''}
+                >${
+                  claimPending[c.id]
+                    ? '<span class="btn-spinner" aria-hidden="true"></span>Claiming...'
+                    : (claimed ? 'Claimed' : 'Claim')
+                }</button>
+              </article>
+            `;
+          })
           .join('') || '<p class="muted">No active challenges.</p>'
       }
-    </div>
+    </section>
   `;
   app.innerHTML = `
     ${renderTopbar('Challenges')}
     <main class="view-stack">
       <p class="muted">Only real-chip matches count toward challenge progress.</p>
-      ${renderTier('Hourly Challenges', 'hourly')}
+      ${renderTier('Daily Skill Challenges', 'skill', { dailyRotation: true })}
       ${renderTier('Daily Challenges', 'daily')}
+      ${renderTier('Hourly Challenges', 'hourly')}
       ${renderTier('Weekly Challenges', 'weekly')}
-      ${renderTier('Skill Challenges', 'skill')}
     </main>
   `;
   bindShellNav();
