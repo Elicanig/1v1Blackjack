@@ -806,6 +806,11 @@ select:focus-visible {
   gap: 8px;
 }
 
+.home-stats-col .home-xp-card {
+  margin-top: -3px;
+  margin-bottom: 10px;
+}
+
 .home-xp-head {
   display: flex;
   align-items: baseline;
@@ -948,6 +953,10 @@ select:focus-visible {
 .home-play-col,
 .home-stats-col {
   gap: 16px;
+}
+
+.home-stats-col .stats-head {
+  margin-top: 2px;
 }
 
 .ranked-summary-card {
@@ -1316,6 +1325,10 @@ select:focus-visible {
 .bet-history-preview {
   display: grid;
   gap: 4px;
+}
+
+.recent-activity-more {
+  margin-top: 8px;
 }
 
 .history-row.compact {

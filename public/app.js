@@ -4634,7 +4634,7 @@ function renderHome() {
                     .join('')
                   : '<div class="muted">No real-chip hand history yet.</div>'
               }
-              <div><button class="ghost" id="openBetHistoryModalBtn" ${betHistoryAll.length ? '' : 'disabled'}>View more</button></div>
+              <div class="recent-activity-more"><button class="ghost" id="openBetHistoryModalBtn" ${betHistoryAll.length ? '' : 'disabled'}>View more</button></div>
             </div>
           </section>
         </section>
