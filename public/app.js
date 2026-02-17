@@ -5191,107 +5191,115 @@ function renderFriends() {
   const inviteExpired = inviteRemaining <= 0;
   app.innerHTML = `
     ${renderTopbar('Friends')}
-    <main class="view-stack">
-      <div class="row">
-      <div class="col card section">
-        <h3>Send Friend Request</h3>
-        <form id="friendForm" class="row friend-request-form">
-          <input name="friend_username" placeholder="Friend username" />
-          <button class="primary" type="submit">Request</button>
-        </form>
-        <div class="invite-link-tools">
-          <div class="row invite-link-actions">
-            <button id="inviteLinkBtn" class="primary" type="button">Generate Friend Invite Link</button>
-            <button id="regenInviteLinkBtn" class="ghost" type="button">Regenerate</button>
-          </div>
-          ${
-            state.friendInvite
-              ? `<div class="grid" style="margin-top:0.55rem">
-                  <input value="${state.friendInvite.url}" readonly />
-                  <div class="row">
-                    <button id="copyInviteLinkBtn" class="ghost" type="button" ${inviteExpired ? 'disabled' : ''}>Copy</button>
-                    <span class="muted" id="inviteCountdown">${inviteExpired ? 'Expired' : `Expires in ${formatInviteCountdown(inviteRemaining)}`}</span>
-                    <span class="muted">(${new Date(state.friendInvite.expiresAt).toLocaleTimeString()})</span>
-                  </div>
-                </div>`
-              : ''
-          }
+    <main class="view-stack friends-view">
+      <div class="friends-layout">
+      <section class="col card section friends-panel friends-panel-left">
+        <div class="friends-panel-head">
+          <h3>Send Friend Request</h3>
+          <form id="friendForm" class="row friend-request-form">
+            <input name="friend_username" placeholder="Friend username" />
+            <button class="primary" type="submit">Request</button>
+          </form>
         </div>
-        <h3 style="margin-top:1rem">Incoming Friend Challenges</h3>
-        ${
-          state.incomingFriendChallenges.length
-            ? state.incomingFriendChallenges
-                .map(
-                  (c) => `<div class="friend challenge-invite">
-                    <div>
-                      <strong>${c.fromUsername}</strong>
-                      <div class="muted">Bet ${c.bet} chips ${c.message ? `• "${c.message}"` : ''}</div>
-                      <div class="muted">Expires ${new Date(c.expiresAt).toLocaleTimeString()}</div>
-                    </div>
+        <div class="friends-panel-scroll friends-left-scroll">
+          <div class="invite-link-tools">
+            <div class="row invite-link-actions">
+              <button id="inviteLinkBtn" class="primary" type="button">Generate Friend Invite Link</button>
+              <button id="regenInviteLinkBtn" class="ghost" type="button">Regenerate</button>
+            </div>
+            ${
+              state.friendInvite
+                ? `<div class="grid" style="margin-top:0.55rem">
+                    <input value="${state.friendInvite.url}" readonly />
                     <div class="row">
-                      <button class="primary" data-challenge-accept="${c.id}">Accept</button>
-                      <button class="warn" data-challenge-decline="${c.id}">Decline</button>
+                      <button id="copyInviteLinkBtn" class="ghost" type="button" ${inviteExpired ? 'disabled' : ''}>Copy</button>
+                      <span class="muted" id="inviteCountdown">${inviteExpired ? 'Expired' : `Expires in ${formatInviteCountdown(inviteRemaining)}`}</span>
+                      <span class="muted">(${new Date(state.friendInvite.expiresAt).toLocaleTimeString()})</span>
                     </div>
                   </div>`
-                )
-                .join('')
-            : '<p class="muted">No incoming challenges.</p>'
-        }
-        <h3 style="margin-top:1rem">Incoming Requests</h3>
-        ${
-          state.incomingRequests.length
-            ? state.incomingRequests
-                .map(
-                  (r) => `
-            <div class="friend">
-              <div><strong>${r.username}</strong></div>
-              <div class="row">
-                <button class="primary" data-accept="${r.id}">Accept</button>
-                <button class="warn" data-decline="${r.id}">Decline</button>
-              </div>
-            </div>
-          `
-                )
-                .join('')
-            : '<p class="muted">No incoming requests.</p>'
-        }
-      </div>
-      <div class="col card section">
-        <h3>Friend List</h3>
-        <p class="muted">Overall PvP: ${Math.max(0, Math.floor(Number(state.me?.pvpWins) || 0))}-${Math.max(0, Math.floor(Number(state.me?.pvpLosses) || 0))}</p>
-        ${(state.friends || []).length === 0 ? '<p class="muted">No friends yet.</p>' : ''}
-        ${(state.friends || [])
-          .map(
-            (f) => {
-              const presence = resolveFriendPresence(f);
-              return `
-          <div class="friend">
-            <div>
-              <div style="display:flex;align-items:center;gap:8px">
-                ${
-                  f.avatarUrl || f.avatar
-                    ? `<img src="${f.avatarUrl || f.avatar}" alt="${f.username} avatar" style="width:26px;height:26px;border-radius:999px;border:1px solid rgba(255,255,255,0.16)" />`
-                    : `<span style="width:26px;height:26px;border-radius:999px;display:inline-grid;place-items:center;background:rgba(255,255,255,0.12)">${(f.username || '?').slice(0, 1).toUpperCase()}</span>`
-                }
-                <span class="status-dot status-${presence.presenceKey}"></span>
-                <strong>${f.username}</strong>
-                ${renderRankTierBadge(f)}
-                ${renderBadgePill(f.dynamicBadge)}
-                <span class="muted">Lv ${Math.max(1, Math.floor(Number(f.level) || 1))}</span>
-              </div>
-              <div class="muted">${presence.label} • ${f.chips} chips</div>
-              <div class="muted">You: ${Math.max(0, Number(f.headToHead?.wins) || 0)}-${Math.max(0, Number(f.headToHead?.losses) || 0)} vs ${f.username}${f.selectedTitle ? ` • ${f.selectedTitle}` : ''}</div>
-              ${f.customStatText ? `<div class="muted">Stat: ${f.customStatText}</div>` : ''}
-            </div>
-            <div class="row">
-              <button data-invite-open="${f.username}">Invite</button>
-            </div>
-          </div>
-        `;
+                : ''
             }
-          )
-          .join('')}
-        <h3 style="margin-top:1rem">Outgoing Pending</h3>
+          </div>
+          <h3 class="friends-subhead">Incoming Friend Challenges</h3>
+          ${
+            state.incomingFriendChallenges.length
+              ? state.incomingFriendChallenges
+                  .map(
+                    (c) => `<div class="friend challenge-invite">
+                      <div>
+                        <strong>${c.fromUsername}</strong>
+                        <div class="muted">Bet ${c.bet} chips ${c.message ? `• "${c.message}"` : ''}</div>
+                        <div class="muted">Expires ${new Date(c.expiresAt).toLocaleTimeString()}</div>
+                      </div>
+                      <div class="row">
+                        <button class="primary" data-challenge-accept="${c.id}">Accept</button>
+                        <button class="warn" data-challenge-decline="${c.id}">Decline</button>
+                      </div>
+                    </div>`
+                  )
+                  .join('')
+              : '<p class="muted">No incoming challenges.</p>'
+          }
+          <h3 class="friends-subhead">Incoming Requests</h3>
+          ${
+            state.incomingRequests.length
+              ? state.incomingRequests
+                  .map(
+                    (r) => `
+              <div class="friend">
+                <div><strong>${r.username}</strong></div>
+                <div class="row">
+                  <button class="primary" data-accept="${r.id}">Accept</button>
+                  <button class="warn" data-decline="${r.id}">Decline</button>
+                </div>
+              </div>
+            `
+                  )
+                  .join('')
+              : '<p class="muted">No incoming requests.</p>'
+          }
+        </div>
+      </section>
+      <section class="col card section friends-panel friends-panel-right">
+        <div class="friends-panel-head">
+          <h3>Friend List</h3>
+          <p class="muted">Overall PvP: ${Math.max(0, Math.floor(Number(state.me?.pvpWins) || 0))}-${Math.max(0, Math.floor(Number(state.me?.pvpLosses) || 0))}</p>
+        </div>
+        <div class="friends-list-scroll">
+          ${(state.friends || []).length === 0 ? '<p class="muted">No friends yet.</p>' : ''}
+          ${(state.friends || [])
+            .map(
+              (f) => {
+                const presence = resolveFriendPresence(f);
+                return `
+            <div class="friend">
+              <div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  ${
+                    f.avatarUrl || f.avatar
+                      ? `<img src="${f.avatarUrl || f.avatar}" alt="${f.username} avatar" style="width:26px;height:26px;border-radius:999px;border:1px solid rgba(255,255,255,0.16)" />`
+                      : `<span style="width:26px;height:26px;border-radius:999px;display:inline-grid;place-items:center;background:rgba(255,255,255,0.12)">${(f.username || '?').slice(0, 1).toUpperCase()}</span>`
+                  }
+                  <span class="status-dot status-${presence.presenceKey}"></span>
+                  <strong>${f.username}</strong>
+                  ${renderRankTierBadge(f)}
+                  ${renderBadgePill(f.dynamicBadge)}
+                  <span class="muted">Lv ${Math.max(1, Math.floor(Number(f.level) || 1))}</span>
+                </div>
+                <div class="muted">${presence.label} • ${f.chips} chips</div>
+                <div class="muted">You: ${Math.max(0, Number(f.headToHead?.wins) || 0)}-${Math.max(0, Number(f.headToHead?.losses) || 0)} vs ${f.username}${f.selectedTitle ? ` • ${f.selectedTitle}` : ''}</div>
+                ${f.customStatText ? `<div class="muted">Stat: ${f.customStatText}</div>` : ''}
+              </div>
+              <div class="row">
+                <button data-invite-open="${f.username}">Invite</button>
+              </div>
+            </div>
+          `;
+              }
+            )
+            .join('')}
+        </div>
+        <h3 class="friends-subhead">Outgoing Pending</h3>
         ${
           state.outgoingRequests.length
             ? state.outgoingRequests
@@ -5299,7 +5307,7 @@ function renderFriends() {
                 .join('')
             : '<p class="muted">No pending requests.</p>'
         }
-      </div>
+      </section>
       </div>
 
     </main>
