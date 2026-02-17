@@ -277,6 +277,15 @@ test('18 re-double is allowed after another action while under cap', () => {
   assert.equal(res.ok, true);
 });
 
+test('18b hit is blocked after a hand has doubled', () => {
+  const m = makeMatch({ p1Hand: newHand([card('5'), card('4')], [false, true], 5, 0), deck: [card('2', 'S')] });
+  const doubled = applyAction(m, 'p1', 'double');
+  assert.equal(doubled.ok, true);
+  assert.equal(applyPressureDecision(m, 'p2', 'match').ok, true);
+  const hit = applyAction(m, 'p1', 'hit');
+  assert.equal(hit.error, 'Hit unavailable after doubling; stand or double again');
+});
+
 test('19 split creates two hands with hidden second cards', () => {
   const m = makeMatch({ p1Hand: newHand([card('8'), card('8', 'D')], [false, true], 5, 0), deck: [card('4'), card('3')] });
   const res = applyAction(m, 'p1', 'split');

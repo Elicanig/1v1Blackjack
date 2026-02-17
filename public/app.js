@@ -484,6 +484,14 @@ const state = {
   favoriteStatModalOpen: false,
   favoriteStatDraftKey: '',
   favoriteStatFilter: '',
+  profileSections: {
+    identity: true,
+    progress: true,
+    social: true,
+    titles: false,
+    security: false
+  },
+  profileSaving: false,
   rankTimelineModalOpen: false,
   rankedForfeitModalOpen: false,
   pendingSeriesResult: null,
@@ -2149,6 +2157,8 @@ async function loadMe() {
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
     state.favoriteStatFilter = '';
+    state.profileSections = { identity: true, progress: true, social: true, titles: false, security: false };
+    state.profileSaving = false;
     state.rankTimelineModalOpen = false;
     state.rankedForfeitModalOpen = false;
     state.pendingSeriesResult = null;
@@ -2318,6 +2328,7 @@ function canTriggerAction(action) {
   const myState = match.players?.[me.id];
   const hand = myState?.hands?.[myState.activeHandIndex || 0];
   if (!hand || hand.locked || hand.bust || hand.surrendered || hand.stood) return false;
+  if (action === 'hit' && (hand.doubleCount || 0) >= 1) return false;
   if (action === 'split' && !handCanSplit(hand, myState?.hands?.length || 0, match.maxHandsPerPlayer || 4)) return false;
   if (action === 'double' && (hand.doubleCount || 0) >= (match.maxDoublesPerHand || 1)) return false;
   if (action === 'surrender' && (hand.actionCount || 0) > 0) return false;
@@ -2647,32 +2658,50 @@ async function handleAuth(mode, form) {
 }
 
 async function saveProfile(form) {
+  if (state.profileSaving) return;
   const avatarStyle = form.querySelector('[name="avatar_style"]').value.trim();
   const avatarSeed = form.querySelector('[name="avatar_seed"]').value.trim();
   const customStatText = String(form.querySelector('[name="custom_stat_text"]')?.value || '').slice(0, 120);
   const selectedTitle = String(form.querySelector('[name="selected_title"]')?.value || '').trim();
+  const saveBtn = form.querySelector('#saveProfileBtn');
+  const saveBtnText = saveBtn ? saveBtn.innerHTML : '';
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Saving...';
+  }
+  state.profileSaving = true;
   try {
     const profileData = await api('/api/profile', {
       method: 'PUT',
       body: JSON.stringify({ avatarStyle, avatarSeed })
     });
-    await api('/api/profile/custom-stat', {
+    const customStatData = await api('/api/profile/custom-stat', {
       method: 'PATCH',
       body: JSON.stringify({ customStatText })
     });
-    await api('/api/profile/title', {
+    const titleData = await api('/api/profile/title', {
       method: 'PATCH',
       body: JSON.stringify({ selectedTitle })
     });
-    const meData = await api('/api/me');
-    state.me = meData.user || profileData.user;
+    const updatedUser = titleData?.user || customStatData?.user || profileData?.user || null;
+    if (updatedUser) {
+      state.me = { ...state.me, ...updatedUser };
+    }
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
     state.favoriteStatFilter = '';
-    setStatus('Profile saved.');
+    pushToast('Profile saved.');
     loadLeaderboard({ silent: true });
   } catch (e) {
     setError(e.message);
+  } finally {
+    state.profileSaving = false;
+    if (state.view === 'profile') {
+      render();
+    } else if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.innerHTML = saveBtnText;
+    }
   }
 }
 
@@ -4083,11 +4112,11 @@ function renderHome() {
           ? `<section class="card section split-tens-event-banner">
               <div class="split-tens-event-copy">
                 <strong>LIMITED EVENT: Split Tens</strong>
-                <div class="muted">Rule change: 10/10 can be split.</div>
+                <div class="muted">10/10 can be split for 24 hours.</div>
               </div>
               <div class="split-tens-event-meta">
                 <div class="split-tens-event-countdown" id="splitTensCountdownHome">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</div>
-                <button class="ghost" id="openSplitTensDetailsBtn" type="button">View Details</button>
+                <button class="ghost" id="openSplitTensDetailsBtn" type="button">Details</button>
               </div>
             </section>`
           : ''
@@ -4673,6 +4702,21 @@ function renderProfile() {
     : favoriteStats;
   const coreFavoriteStats = filteredFavoriteStats.filter((entry) => CORE_FAVORITE_STAT_KEYS.has(entry.key));
   const otherFavoriteStats = filteredFavoriteStats.filter((entry) => !CORE_FAVORITE_STAT_KEYS.has(entry.key));
+  const defaultProfileSections = {
+    identity: true,
+    progress: true,
+    social: true,
+    titles: false,
+    security: false
+  };
+  if (!state.profileSections || typeof state.profileSections !== 'object') {
+    state.profileSections = { ...defaultProfileSections };
+  } else {
+    for (const [key, isOpen] of Object.entries(defaultProfileSections)) {
+      if (typeof state.profileSections[key] !== 'boolean') state.profileSections[key] = isOpen;
+    }
+  }
+  const sectionOpen = state.profileSections;
   const renderFavoriteStatRows = (entries = []) => entries.map((entry) => `
     <button class="favorite-stat-option ${entry.key === favoriteDraftKey ? 'is-selected' : ''}" type="button" data-favorite-stat-select="${entry.key}">
       <div class="favorite-stat-option-head">
@@ -4682,121 +4726,125 @@ function renderProfile() {
       <div class="muted">${entry.description}</div>
     </button>
   `).join('');
+  const renderProfileSection = (key, title, body) => {
+    const open = Boolean(sectionOpen[key]);
+    return `
+      <section class="profile-accordion-section profile-group">
+        <button class="profile-accordion-toggle" data-profile-toggle="${key}" type="button" aria-expanded="${open}">
+          <span>${title}</span>
+          <span class="muted">${open ? 'Hide' : 'Show'}</span>
+        </button>
+        ${open ? `<div class="profile-accordion-body">${body}</div>` : ''}
+      </section>
+    `;
+  };
+  const identityBody = `
+    <div class="profile-two-col">
+      <div class="profile-form-grid">
+        <label>Username</label>
+        <input value="${me.username}" disabled />
+        <label>Avatar Style</label>
+        <select name="avatar_style">
+          ${['adventurer', 'pixel-art', 'bottts', 'fun-emoji']
+            .map((s) => `<option value="${s}" ${me.avatarStyle === s ? 'selected' : ''}>${s}</option>`)
+            .join('')}
+        </select>
+        <label>Avatar Seed</label>
+        <input name="avatar_seed" value="${me.avatarSeed || me.username}" />
+      </div>
+      <div class="profile-preview-card">
+        <label>Preview</label>
+        <div class="profile-preview-row">
+          <img src="${preview}" alt="avatar preview" class="profile-avatar-preview" />
+          <span class="muted">Generated automatically</span>
+        </div>
+      </div>
+    </div>
+  `;
+  const progressBody = `
+    <div class="profile-progress">
+      <div class="profile-progress-head">
+        <strong>Level ${level}</strong>
+        <span class="muted">${Math.max(0, Math.floor(Number(me.xpToNextLevel) || 0)).toLocaleString()} XP to next level</span>
+      </div>
+      <div class="xp-track"><span class="xp-fill" style="width:${levelPercent}%"></span></div>
+    </div>
+    <div class="profile-summary-grid">
+      <div class="profile-summary-item"><span class="muted">Rank</span><strong>${rankTier}</strong></div>
+      <div class="profile-summary-item"><span class="muted">Elo</span><strong>${rankElo.toLocaleString()}</strong></div>
+      <div class="profile-summary-item"><span class="muted">Ranked W-L</span><strong>${rankWins}-${rankLosses}</strong></div>
+      <div class="profile-summary-item"><span class="muted">Leaderboard</span><strong>${me.leaderboardRank ? `#${me.leaderboardRank}` : 'Unranked'}</strong></div>
+    </div>
+  `;
+  const socialBody = `
+    <div class="profile-form-grid">
+      <label>Custom Stat (public)</label>
+      <input name="custom_stat_text" maxlength="60" value="${me.customStatText || ''}" placeholder="Favorite Bet: 250" />
+    </div>
+    <div class="profile-favorite-row">
+      <label>Favorite Stat</label>
+      <div class="profile-favorite-selected">
+        <div>
+          <strong>${selectedFavorite.label}</strong>
+          <div class="muted">${selectedFavorite.description}</div>
+        </div>
+        <div class="profile-favorite-value">${selectedFavorite.valueText}</div>
+      </div>
+      <button id="openFavoriteStatModalBtn" class="primary profile-favorite-open-btn" type="button">Choose Favorite Stat</button>
+    </div>
+  `;
+  const titlesBody = `
+    <div class="titles-equip">
+      <label>Displayed Title</label>
+      <select name="selected_title">
+        ${TITLE_DEFS.map((entry) => {
+          if (!entry.key) return '<option value="">None</option>';
+          const unlocked = unlockedSet.has(entry.key);
+          return `<option value="${entry.key}" ${me.selectedTitleKey === entry.key ? 'selected' : ''} ${unlocked ? '' : 'disabled'}>${entry.label}${unlocked ? '' : ' (Locked)'}</option>`;
+        }).join('')}
+      </select>
+      <div class="titles-list">
+        ${TITLE_DEFS.filter((entry) => entry.key).map((entry) => {
+          const unlocked = unlockedSet.has(entry.key);
+          return `<div class="title-row ${unlocked ? 'unlocked' : 'locked'}" title="${unlocked ? 'Unlocked' : entry.unlockHint}">
+            <span>${unlocked ? '✓' : '🔒'} ${entry.label}</span>
+            <span class="muted">${unlocked ? 'Ready to equip' : entry.unlockHint}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  `;
+  const securityBody = `
+    <div class="profile-security-row">
+      <strong>Login PIN:</strong>
+      <span>${state.revealPin ? me.pin || '****' : me.pinMasked || '****'}</span>
+      <button id="togglePinBtn" class="ghost" type="button">${state.revealPin ? 'Hide PIN' : 'Show PIN'}</button>
+      <button id="copyPinBtnProfile" class="ghost" type="button">Copy PIN</button>
+    </div>
+  `;
   app.innerHTML = `
     ${renderTopbar('Profile')}
     <main class="view-stack">
-      <div class="card section">
+      <div class="card section profile-shell">
         <div class="row profile-name-row" style="align-items:center;gap:8px;margin-bottom:8px">
           <strong>${me.username}</strong>
           ${renderRankTierBadge(me)}
           ${renderBadgePill(me.dynamicBadge)}
           ${me.selectedTitle ? `<span class="nameplate-title">${me.selectedTitle}</span>` : ''}
         </div>
-        <form id="profileForm" class="grid">
-          <section class="profile-group">
-            <h3>Identity</h3>
-            <div class="row">
-              <div class="col">
-                <label>Username</label>
-                <input value="${me.username}" disabled />
-              </div>
-              <div class="col">
-                <label>Avatar Style</label>
-                <select name="avatar_style">
-                  ${['adventurer', 'pixel-art', 'bottts', 'fun-emoji']
-                    .map((s) => `<option value="${s}" ${me.avatarStyle === s ? 'selected' : ''}>${s}</option>`)
-                    .join('')}
-                </select>
-              </div>
-            </div>
-            <div class="row">
-              <div class="col">
-                <label>Avatar Seed</label>
-                <input name="avatar_seed" value="${me.avatarSeed || me.username}" />
-              </div>
-              <div class="col">
-                <label>Preview</label>
-                <div style="display:flex;align-items:center;gap:10px">
-                  <img src="${preview}" alt="avatar preview" style="width:44px;height:44px;border-radius:999px;border:1px solid rgba(255,255,255,0.15)" />
-                  <span class="muted">Generated automatically</span>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="profile-group">
-            <h3>Progress</h3>
-            <div class="profile-progress">
-              <div class="profile-progress-head">
-                <strong>Level ${level}</strong>
-                <span class="muted">${Math.max(0, Math.floor(Number(me.xpToNextLevel) || 0)).toLocaleString()} XP to next level</span>
-              </div>
-              <div class="xp-track"><span class="xp-fill" style="width:${levelPercent}%"></span></div>
-            </div>
-            <div class="row">
-              <div class="col">
-                <label>Rank</label>
-                <div class="muted">${rankTier} • Elo ${rankElo}</div>
-              </div>
-              <div class="col">
-                <label>Ranked W-L</label>
-                <div class="muted">${rankWins}-${rankLosses}</div>
-              </div>
-            </div>
-          </section>
-
-          <section class="profile-group">
-            <h3>Social</h3>
-            <div class="row">
-              <div class="col">
-                <label>Custom Stat (public)</label>
-                <input name="custom_stat_text" maxlength="60" value="${me.customStatText || ''}" placeholder="Favorite Bet: 250" />
-              </div>
-            </div>
-            <div class="profile-favorite-row">
-              <label>Favorite Stat</label>
-              <div class="profile-favorite-selected">
-                <div>
-                  <strong>${selectedFavorite.label}</strong>
-                  <div class="muted">${selectedFavorite.description}</div>
-                </div>
-                <div class="profile-favorite-value">${selectedFavorite.valueText}</div>
-              </div>
-              <button id="openFavoriteStatModalBtn" class="ghost" type="button">Choose Favorite Stat</button>
-            </div>
-            <div class="titles-equip">
-              <label>Displayed Title</label>
-              <select name="selected_title">
-                ${TITLE_DEFS.map((entry) => {
-                  if (!entry.key) return '<option value="">None</option>';
-                  const unlocked = unlockedSet.has(entry.key);
-                  return `<option value="${entry.key}" ${me.selectedTitleKey === entry.key ? 'selected' : ''} ${unlocked ? '' : 'disabled'}>${entry.label}${unlocked ? '' : ' (Locked)'}</option>`;
-                }).join('')}
-              </select>
-              <div class="titles-list">
-                ${TITLE_DEFS.filter((entry) => entry.key).map((entry) => {
-                  const unlocked = unlockedSet.has(entry.key);
-                  return `<div class="title-row ${unlocked ? 'unlocked' : 'locked'}" title="${unlocked ? 'Unlocked' : entry.unlockHint}">
-                    <span>${unlocked ? '✓' : '🔒'} ${entry.label}</span>
-                    <span class="muted">${unlocked ? 'Ready to equip' : entry.unlockHint}</span>
-                  </div>`;
-                }).join('')}
-              </div>
-            </div>
-          </section>
-
-          <section class="profile-group">
-            <h3>Security</h3>
-            <div class="row" style="align-items:center;gap:10px">
-              <strong>Login PIN:</strong>
-              <span>${state.revealPin ? me.pin || '****' : me.pinMasked || '****'}</span>
-              <button id="togglePinBtn" class="ghost" type="button">${state.revealPin ? 'Hide PIN' : 'Show PIN'}</button>
-              <button id="copyPinBtnProfile" class="ghost" type="button">Copy PIN</button>
-            </div>
-          </section>
-          <button class="primary" type="submit">Save Profile</button>
+        <form id="profileForm" class="profile-form">
+          ${renderProfileSection('identity', 'Identity', identityBody)}
+          ${renderProfileSection('progress', 'Progress & Rank', progressBody)}
+          ${renderProfileSection('social', 'Social', socialBody)}
+          ${renderProfileSection('titles', 'Titles', titlesBody)}
+          ${renderProfileSection('security', 'Security', securityBody)}
+          <div class="profile-save-row">
+            <button class="primary" id="saveProfileBtn" type="submit" ${state.profileSaving ? 'disabled' : ''}>
+              ${state.profileSaving ? '<span class="btn-spinner" aria-hidden="true"></span>Saving...' : 'Save Profile'}
+            </button>
+            <p class="muted profile-save-meta">Chip balance: ${me.chips} • Rank ${me.leaderboardRank ? `#${me.leaderboardRank}` : 'Unranked'} • PvP ${me.pvpWins || 0}-${me.pvpLosses || 0}</p>
+          </div>
         </form>
-        <p class="muted">Chip balance: ${me.chips} • Rank ${me.leaderboardRank ? `#${me.leaderboardRank}` : 'Unranked'} • PvP ${me.pvpWins || 0}-${me.pvpLosses || 0}</p>
       </div>
     </main>
     ${
@@ -4834,6 +4882,14 @@ function renderProfile() {
     }
   `;
   bindShellNav();
+  app.querySelectorAll('[data-profile-toggle]').forEach((btn) => {
+    btn.onclick = () => {
+      const key = String(btn.dataset.profileToggle || '').trim();
+      if (!key) return;
+      state.profileSections[key] = !Boolean(state.profileSections[key]);
+      render();
+    };
+  });
   const togglePinBtn = document.getElementById('togglePinBtn');
   if (togglePinBtn) {
     togglePinBtn.onclick = () => {
@@ -5936,11 +5992,16 @@ function renderMatch() {
   const splitTensEventActive = isSplitTensEventActiveClient();
   const splitLegalForHand = handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4, splitTensEventActive);
   const splitTensBlocked = Boolean(canAct && isTenTenPair(activeHand) && !splitTensEventActive);
+  const hitBlockedAfterDouble = Boolean(canAct && (activeHand?.doubleCount || 0) >= 1);
+  const splitTensActiveHint = Boolean(canAct && isTenTenPair(activeHand) && splitTensEventActive);
   const splitButtonTitle = splitLegalForHand
     ? 'Split pair into two hands'
     : splitTensBlocked
       ? 'Splitting 10s is available during limited-time events.'
       : 'Split requires pair (max 4 hands)';
+  const hitButtonTitle = canAct
+    ? (hitBlockedAfterDouble ? 'Hit is unavailable after a double on this hand.' : 'Draw one card')
+    : actionHint;
   const actionHint = canAct
     ? 'Choose an action for your active hand.'
     : waitingPressure
@@ -6134,7 +6195,7 @@ function renderMatch() {
                 <div class="actions-panel" ${roundResolved ? 'style="display:none"' : ''}>
                   <div class="actions-row">
                     <div class="actions actions-main">
-                      <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
+                      <button data-action="hit" title="${hitButtonTitle}" class="primary" ${!canAct || hitBlockedAfterDouble ? 'disabled' : ''}>Hit</button>
                       <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
                       <button data-action="double" title="${canAct ? 'Double your bet and draw one card (re-double allowed while eligible)' : actionHint}" ${!canAct || (activeHand?.doubleCount || 0) >= (match.maxDoublesPerHand || 1) ? 'disabled' : ''}>Double</button>
                       <button data-action="split" title="${splitButtonTitle}" ${!canAct || !splitLegalForHand ? 'disabled' : ''}>Split</button>
@@ -6145,6 +6206,7 @@ function renderMatch() {
                     </div>
                   </div>
                   <div class="muted action-hint">${actionHint}</div>
+                  ${splitTensActiveHint ? '<div class="muted split-tens-hint split-tens-hint--active">Event rule active: 10/10 split enabled.</div>' : ''}
                   ${splitTensBlocked ? '<div class="muted split-tens-hint">Splitting 10s is available during limited-time events.</div>' : ''}
                   ${
                     isPvpMatch

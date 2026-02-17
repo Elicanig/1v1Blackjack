@@ -4424,7 +4424,8 @@ function visibleTotal(cards, hiddenFlags) {
 
 function legalActionsForHand(hand, playerRoundState = null, context = null) {
   if (!hand || hand.locked || hand.stood || hand.bust || hand.surrendered) return [];
-  const actions = ['hit', 'stand'];
+  const actions = ['stand'];
+  if ((hand.doubleCount || 0) === 0) actions.unshift('hit');
   if ((hand.actionCount || 0) === 0) actions.push('surrender');
   if ((hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
   if (canSplit(hand, playerRoundState, context)) actions.push('split');
@@ -4787,6 +4788,7 @@ function applyAction(match, playerId, action) {
   const betLimits = getMatchBetLimits(match);
 
   if (normalizedAction === 'hit') {
+    if ((hand.doubleCount || 0) >= 1) return { error: 'Hit unavailable after doubling; stand or double again' };
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     hand.cards.push(drawCard(match.round));
