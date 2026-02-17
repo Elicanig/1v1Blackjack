@@ -8,6 +8,7 @@ import {
   isSixSevenStartingHand,
   canSplit,
   applyAction,
+  applyRoundResultChoice,
   applyBaseBetSelection,
   confirmBaseBet,
   applyPressureDecision,
@@ -19,6 +20,7 @@ import {
   buildChallengePayload,
   countWinningSplitHandsForPlayer,
   calculateForfeitLossAmount,
+  leaveMatchByForfeit,
   rankedTierFromElo,
   rankedBetRangeForElo,
   rankedKFactorForElo,
@@ -115,6 +117,33 @@ function makeBotBettingMatch(difficulty = 'easy') {
       players: {
         p1: { activeHandIndex: 0, hands: [] },
         [botId]: { activeHandIndex: 0, hands: [] }
+      }
+    }
+  };
+}
+
+function makeResultPhaseMatch({ matchType = 'quickplay', opponentId = 'p2' } = {}) {
+  return {
+    id: `m-result-${String(matchType).toLowerCase()}`,
+    phase: PHASES.RESULT,
+    matchType,
+    playerIds: ['p1', opponentId],
+    betControllerId: 'p1',
+    betSettings: { selectedBetById: { p1: 25, [opponentId]: 25 } },
+    startingPlayerIndex: 0,
+    round: {
+      baseBet: 25,
+      firstActionTaken: true,
+      postedBetByPlayer: { p1: 25, [opponentId]: 25 },
+      allInPlayers: { p1: false, [opponentId]: false },
+      betConfirmedByPlayer: { p1: true, [opponentId]: true },
+      resultChoiceByPlayer: {},
+      pendingPressure: null,
+      turnPlayerId: null,
+      deck: [],
+      players: {
+        p1: { activeHandIndex: 0, hands: [newHand([card('9'), card('7')], [false, true], 25, 0)] },
+        [opponentId]: { activeHandIndex: 0, hands: [newHand([card('10'), card('6')], [false, true], 25, 0)] }
       }
     }
   };
@@ -1044,4 +1073,53 @@ test('52 match win streak: push is neutral and loss resets', () => {
   assert.equal(matchWinStreakAfterOutcome(5, 'win'), 6);
   assert.equal(matchWinStreakAfterOutcome(6, 'push'), 6);
   assert.equal(matchWinStreakAfterOutcome(6, 'loss'), 0);
+});
+
+test('53 Double or Nothing is blocked in bot matches at round result', () => {
+  const m = makeResultPhaseMatch({ matchType: 'bot', opponentId: 'bot:normal:dno' });
+  const res = applyRoundResultChoice(m, 'p1', 'double');
+  assert.equal(Boolean(res.error), true);
+});
+
+test('54 Double or Nothing is blocked in regular lobbies', () => {
+  const m = makeResultPhaseMatch({ matchType: 'lobby', opponentId: 'p2' });
+  const res = applyRoundResultChoice(m, 'p1', 'double');
+  assert.equal(Boolean(res.error), true);
+});
+
+test('55 Double or Nothing remains available in Quick Play and friend challenges', () => {
+  const quick = makeResultPhaseMatch({ matchType: 'quickplay', opponentId: 'p2' });
+  const quickRes = applyRoundResultChoice(quick, 'p1', 'double');
+  assert.equal(quickRes.ok, true);
+
+  const challenge = makeResultPhaseMatch({ matchType: 'friend_challenge', opponentId: 'p2' });
+  const challengeRes = applyRoundResultChoice(challenge, 'p1', 'double');
+  assert.equal(challengeRes.ok, true);
+});
+
+test('56 leaving after settlement never applies extra chip penalty', () => {
+  const m = {
+    id: 'm-settled-leave',
+    phase: PHASES.RESULT,
+    matchType: 'HIGH_ROLLER',
+    playerIds: ['p1', 'p2'],
+    round: {
+      resultFinalized: true,
+      players: {
+        p1: { activeHandIndex: 0, hands: [newHand([card('10'), card('9')], [false, true], 50, 0)] },
+        p2: { activeHandIndex: 0, hands: [newHand([card('10'), card('8')], [false, true], 50, 0)] }
+      }
+    },
+    connections: {
+      p1: { connected: true, graceEndsAt: null },
+      p2: { connected: true, graceEndsAt: null }
+    }
+  };
+
+  const out = leaveMatchByForfeit(m, 'p1');
+  assert.equal(out.ok, true);
+  assert.equal(out.settledExit, true);
+  assert.equal(out.charged, false);
+  assert.equal(out.chargedAmount, 0);
+  assert.equal(out.forfeited, false);
 });

@@ -759,9 +759,16 @@ function rankTierLabelFromUser(user = {}) {
 
 function rankTierKeyFromUser(user = {}) {
   const key = String(user.rankTierKey || '').trim().toUpperCase();
-  if (key) return key;
+  const explicitKey = key && RANKED_TIER_META[key] ? key : '';
   const rankTier = String(user.rankTier || '').trim().toUpperCase();
-  if (rankTier && RANKED_TIER_META[rankTier]) return rankTier;
+  const explicitLabelKey = rankTier && RANKED_TIER_META[rankTier] ? rankTier : '';
+  const hasRankedElo = Number.isFinite(Number(user.rankedElo));
+  const eloKey = hasRankedElo ? rankTierKeyFromElo(user.rankedElo) : '';
+  if (explicitKey && eloKey && explicitKey !== eloKey) return eloKey;
+  if (explicitLabelKey && eloKey && explicitLabelKey !== eloKey) return eloKey;
+  if (explicitKey) return explicitKey;
+  if (explicitLabelKey) return explicitLabelKey;
+  if (eloKey) return eloKey;
   return rankTierKeyFromElo(user.rankedElo);
 }
 
@@ -2095,6 +2102,16 @@ function isBotMatchActive() {
   if (!state.currentMatch || !state.me) return false;
   const oppId = state.currentMatch.playerIds?.find((id) => id !== state.me.id);
   return Boolean(oppId && state.currentMatch.participants?.[oppId]?.isBot);
+}
+
+function canUseDoubleOrNothingInMatch(match = state.currentMatch) {
+  if (!match) return false;
+  const matchType = String(match.matchType || '').trim().toUpperCase();
+  const opponentId = match.playerIds?.find((id) => id !== state.me?.id);
+  const botOpponent = Boolean(opponentId && match.participants?.[opponentId]?.isBot);
+  if (botOpponent) return false;
+  if (matchType === 'RANKED') return false;
+  return matchType === 'QUICKPLAY' || matchType === 'FRIEND_CHALLENGE';
 }
 
 async function forfeitBotMatch({ showToast = false, refreshOnError = true } = {}) {
@@ -3556,14 +3573,16 @@ function syncRoundResultModal() {
     ? (rankedRound ? 'Return to Ranked' : 'Series Complete')
     : (rankedRound ? 'Continue Series' : 'Next Round');
   const pvpRound = Boolean(opponentId && !botRound);
+  const allowDoubleOrNothingMode = canUseDoubleOrNothingInMatch(match);
   const doubledBet = Math.max(1, Math.floor(Number(match?.baseBet) || 0) * 2);
   const opponentBankroll = Math.max(0, Math.floor(Number(match?.players?.[opponentId]?.bankroll) || 0));
   const maxBetCap = Math.max(1, Math.floor(Number(match?.maxBetCap) || doubledBet));
   const minBet = Math.max(1, Math.floor(Number(match?.minBet) || 1));
-  const canDoubleOrNothing = !rankedRound && (botRound || pvpRound) &&
+  const canDoubleOrNothing = allowDoubleOrNothingMode &&
     doubledBet >= minBet &&
     doubledBet <= maxBetCap &&
     (result.isPractice || (bankroll >= doubledBet && opponentBankroll >= doubledBet));
+  const showRankedContinueRow = Boolean(rankedSeriesActive && !seriesComplete);
   const leaveLabel = rankedRound
     ? (rankedSeriesActive ? 'Forfeit Series' : 'Return to Ranked')
     : (botRound ? 'Leave to Lobby' : 'Leave to Home');
@@ -3575,20 +3594,29 @@ function syncRoundResultModal() {
         <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${Math.abs(delta)}</div>
         <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
         <div class="result-actions">
-          <div class="result-actions-top">
-            <button id="roundResultNextBtn" class="primary" ${nextDisabled ? 'disabled' : ''}>${nextLabel}</button>
-            ${rankedRound ? '' : `<button id="roundResultChangeBetBtn" class="ghost" ${busy ? 'disabled' : ''}>Change Bet</button>`}
-          </div>
           ${
-            rankedRound
-              ? ''
-              : `<div class="result-actions-mid">
-                   <button id="roundResultDoubleBtn" class="gold result-double-btn" ${busy || !canDoubleOrNothing ? 'disabled' : ''}>
-                     Double or Nothing (${doubledBet.toLocaleString()})${pvpRound ? ' • both must accept' : ''}
-                   </button>
+            showRankedContinueRow
+              ? `<div class="result-actions-top">
+                   <button id="roundResultNextBtn" class="primary" ${nextDisabled ? 'disabled' : ''}>${nextLabel}</button>
+                   <button id="roundResultLeaveBtn" class="warn">${leaveLabel}</button>
                  </div>`
+              : rankedRound
+                ? ''
+                : `<div class="result-actions-top">
+                     <button id="roundResultNextBtn" class="primary" ${nextDisabled ? 'disabled' : ''}>${nextLabel}</button>
+                     <button id="roundResultChangeBetBtn" class="ghost" ${busy ? 'disabled' : ''}>Change Bet</button>
+                   </div>
+                   ${
+                     allowDoubleOrNothingMode
+                       ? `<div class="result-actions-mid">
+                            <button id="roundResultDoubleBtn" class="gold result-double-btn" ${busy || !canDoubleOrNothing ? 'disabled' : ''}>
+                              Double or Nothing (${doubledBet.toLocaleString()})${pvpRound ? ' • both must accept' : ''}
+                            </button>
+                          </div>`
+                       : ''
+                   }
+                   <div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">${leaveLabel}</button></div>`
           }
-          ${rankedRound && seriesComplete ? '' : `<div class="result-actions-bottom"><button id="roundResultLeaveBtn" class="warn result-leave-btn">${leaveLabel}</button></div>`}
         </div>
         ${
           rankedSeriesActive && state.rankedForfeitModalOpen
@@ -3602,7 +3630,11 @@ function syncRoundResultModal() {
                </div>`
             : ''
         }
-        ${seriesComplete ? '<div class="muted" style="margin-top:8px">Series complete. Elo finalized for this series.</div>' : (busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : '')}
+        ${
+          seriesComplete
+            ? '<div class="muted" style="margin-top:8px">Series complete. Opening series results…</div>'
+            : (busy ? '<div class="muted" style="margin-top:8px">Waiting for round choice…</div>' : '')
+        }
       </div>
     </div>
   `;
@@ -5705,11 +5737,11 @@ function renderMatch() {
                   <h3>Round ${match.roundNumber} — ${negotiationEnabled ? 'Negotiate your bet' : 'Place your bet'}${match.highRoller ? ' • High Roller' : ''}</h3>
                   <div class="bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()}</strong></div>
                 </div>
-                <div class="match-zone betting-zone">
+                <div class="match-zone betting-zone ${supportsBetChat ? 'with-chat' : ''}">
                   <div class="bet-control ${negotiationEnabled ? 'is-negotiation' : ''}">
                     <div class="bet-head">
                       <strong>${negotiationEnabled ? 'Bet Negotiation' : 'Base Bet'}</strong>
-                      <span class="muted">
+                      <span class="muted bet-head-helper">
                         ${quickPlayBucketBet ? `Quick Play fixed: $${quickPlayBucketBet.toLocaleString()}` : `Min ${minBet.toLocaleString()} / Max ${maxBet.toLocaleString()}`}
                       </span>
                     </div>
@@ -5724,13 +5756,9 @@ function renderMatch() {
                               <span class="muted">Opponent proposal</span>
                               <strong>${negotiationOpponentProposal ? negotiationOpponentProposal.toLocaleString() : '—'}</strong>
                             </div>
-                            <div class="negotiation-cell">
+                            <div class="negotiation-cell is-target">
                               <span class="muted">Current target</span>
                               <strong>${negotiationTargetBet ? negotiationTargetBet.toLocaleString() : 'Pending'}</strong>
-                            </div>
-                            <div class="negotiation-cell is-status">
-                              <span class="muted">Status</span>
-                              <strong>${negotiationStatusText}</strong>
                             </div>
                           </div>`
                         : ''
@@ -5757,19 +5785,33 @@ function renderMatch() {
                         />
                       </div>
                     </div>
+                    ${
+                      negotiationEnabled
+                        ? `<div class="negotiation-status-line">
+                             <span class="muted">Status</span>
+                             <strong>${negotiationStatusText}</strong>
+                           </div>`
+                        : ''
+                    }
                     <div class="bet-confirm-row">
-                      <div class="bet-confirm-actions ${negotiationEnabled ? 'negotiation-actions' : ''}">
+                      <div class="bet-confirm-actions ${negotiationEnabled ? 'negotiation-actions negotiation-actions-primary' : ''}">
                         ${
                           negotiationEnabled
                             ? `<button id="agreeBetBtn" class="primary" ${!canConfirmBet ? 'disabled' : ''}>Agree</button>
                                <button id="raiseBetBtn" class="gold" ${!isBetValid ? 'disabled' : ''}>Propose Raise</button>
-                               <button id="lowerBetBtn" class="ghost" ${!isBetValid ? 'disabled' : ''}>Propose Lower</button>
-                               <button id="resetNegotiationBtn" class="ghost" type="button">Reset negotiation</button>
-                               <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${leaveActionLabel}</button>`
+                               <button id="lowerBetBtn" class="ghost" ${!isBetValid ? 'disabled' : ''}>Propose Lower</button>`
                             : `<button id="confirmBetBtn" class="primary" ${!canConfirmBet || !isBetValid ? 'disabled' : ''}>Confirm Bet</button>
                                <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${leaveActionLabel}</button>`
                         }
                       </div>
+                      ${
+                        negotiationEnabled
+                          ? `<div class="bet-confirm-actions negotiation-actions negotiation-actions-secondary">
+                               <button id="resetNegotiationBtn" class="ghost" type="button">Reset negotiation</button>
+                               <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${leaveActionLabel}</button>
+                             </div>`
+                          : ''
+                      }
                       <div class="muted">
                         ${
                           negotiationEnabled

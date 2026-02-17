@@ -760,6 +760,12 @@ function logRankedQueueEvent(event, payload = {}) {
   console.log(`[ranked-queue] ${event}`, JSON.stringify(payload));
 }
 
+function logMatchEconomyEvent(event, payload = {}) {
+  if (process.env.NODE_ENV === 'test') return;
+  // eslint-disable-next-line no-console
+  console.log(`[match-economy] ${event}`, JSON.stringify(payload));
+}
+
 function hasHighRollerAccess(user) {
   const chips = Math.max(0, Math.floor(Number(user?.chips) || 0));
   return chips >= HIGH_ROLLER_UNLOCK_CHIPS;
@@ -771,6 +777,14 @@ function isBotPlayer(playerId) {
 
 function isBotMatch(match) {
   return Boolean(match?.playerIds?.some((id) => isBotPlayer(id)));
+}
+
+function isDoubleOrNothingEnabledForMatch(match) {
+  if (!match) return false;
+  if (isBotMatch(match)) return false;
+  const matchType = String(match.matchType || '').trim().toUpperCase();
+  if (matchType === 'RANKED') return false;
+  return matchType === 'QUICKPLAY' || matchType === 'FRIEND_CHALLENGE';
 }
 
 function usesRoundStartStakeCommit(match) {
@@ -3533,6 +3547,7 @@ function startRound(match) {
     betNegotiation: null,
     botPacing: { firstActionDoneById: {} },
     resultChoiceByPlayer: {},
+    resultFinalized: false,
     firstActionPlayerId: null,
     turnPlayerId: null,
     resultByPlayer: null,
@@ -3548,6 +3563,7 @@ function startRound(match) {
     }
   };
   clearRoundPhaseTimer(match.id);
+  match.resultFinalized = false;
   match.phase = PHASES.ROUND_INIT;
   match.roundNumber += 1;
 
@@ -3784,6 +3800,13 @@ function resolveRound(match) {
     [aId]: getParticipantChips(match, aId),
     [bId]: getParticipantChips(match, bId)
   };
+  logMatchEconomyEvent('SETTLEMENT_APPLIED', {
+    matchId: match.id,
+    matchType: match.matchType || null,
+    chipsDelta,
+    bankrollBefore,
+    bankrollAfter
+  });
 
   function applyHandOutcomeStats(user, ownId, out, hand) {
     if (!user) return;
@@ -4105,6 +4128,8 @@ function resolveRound(match) {
       seriesResult: rankedSeriesResultByPlayer?.[bId] || null
     }
   };
+  match.round.resultFinalized = true;
+  match.resultFinalized = true;
 
   match.phase = PHASES.REVEAL;
   pushMatchState(match);
@@ -4141,8 +4166,8 @@ function applyRoundResultChoice(match, playerId, choice) {
   if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
   if (match.phase !== PHASES.RESULT) return { error: 'Round result is not ready' };
   if (!['next', 'betting', 'double'].includes(choice)) return { error: 'Invalid round choice' };
-  if (choice === 'double' && String(match.matchType || '').toUpperCase() === 'RANKED') {
-    return { error: 'Double or Nothing is unavailable in ranked series' };
+  if (choice === 'double' && !isDoubleOrNothingEnabledForMatch(match)) {
+    return { error: 'Double or Nothing is only available in Quick Play PvP and friend challenges' };
   }
 
   if (!match.round.resultChoiceByPlayer) match.round.resultChoiceByPlayer = {};
@@ -4161,8 +4186,8 @@ function applyRoundResultChoice(match, playerId, choice) {
   const shouldAutoStart = everyoneNext || everyoneDouble;
 
   if (everyoneDouble) {
-    if (String(match.matchType || '').toUpperCase() === 'RANKED') {
-      return { error: 'Double or Nothing is unavailable in ranked series' };
+    if (!isDoubleOrNothingEnabledForMatch(match)) {
+      return { error: 'Double or Nothing is only available in Quick Play PvP and friend challenges' };
     }
     const currentBase = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
     const proposed = currentBase * 2;
@@ -4198,8 +4223,8 @@ function applyRoundResultChoice(match, playerId, choice) {
 function applyDoubleOrNothingChoice(match, playerId) {
   if (!match || !match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
   if (match.phase !== PHASES.RESULT) return { error: 'Round result is not ready' };
-  if (String(match.matchType || '').toUpperCase() === 'RANKED') {
-    return { error: 'Double or Nothing is unavailable in ranked series' };
+  if (!isDoubleOrNothingEnabledForMatch(match)) {
+    return { error: 'Double or Nothing is only available in Quick Play PvP and friend challenges' };
   }
   const currentBase = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
   const proposed = currentBase * 2;
@@ -5231,6 +5256,29 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
   const opponentId = match.playerIds.find((id) => id !== leaverId);
   const botMatch = isBotMatch(match);
   const rankedMatch = String(match.matchType || '').toUpperCase() === 'RANKED';
+  const postSettlementPhase = match.phase === PHASES.REVEAL || match.phase === PHASES.RESULT || match.phase === PHASES.NEXT_ROUND;
+  const settledNoPenaltyExit = !rankedMatch && (postSettlementPhase || Boolean(match.round?.resultFinalized || match.resultFinalized));
+  logMatchEconomyEvent('LEAVE_REQUEST', {
+    matchId: match.id,
+    leaverId,
+    source,
+    matchType: match.matchType || null,
+    phase: match.phase,
+    isSettled: settledNoPenaltyExit
+  });
+  if (settledNoPenaltyExit) {
+    const leaverReason = botMatch ? 'Match settled. Returned to lobby.' : 'Match settled. Returned to menu.';
+    const opponentReason = 'Opponent left after settlement.';
+    emitToUser(leaverId, 'match:ended', { reason: leaverReason, seriesResult: null });
+    if (opponentId) emitToUser(opponentId, 'match:ended', { reason: opponentReason, seriesResult: null });
+    cleanupMatch(match);
+    logMatchEconomyEvent('LEAVE_SETTLED_NO_PENALTY', {
+      matchId: match.id,
+      leaverId,
+      chargedAmount: 0
+    });
+    return { ok: true, forfeited: false, charged: false, chargedAmount: 0, preRoundExit: false, settledExit: true };
+  }
   const leaverUser = !isBotPlayer(leaverId) ? getUserById(leaverId) : null;
   const opponentUser = !isBotPlayer(opponentId) ? getUserById(opponentId) : null;
   const roundStarted = Boolean(match.round?.stakesCommitted);
@@ -5345,6 +5393,14 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
   emitToUser(leaverId, 'match:ended', { reason: leaverReason, seriesResult: rankedSeriesResultByPlayer?.[leaverId] || null });
   if (opponentId) emitToUser(opponentId, 'match:ended', { reason: opponentReason, seriesResult: rankedSeriesResultByPlayer?.[opponentId] || null });
   cleanupMatch(match);
+  logMatchEconomyEvent('LEAVE_FORFEIT_APPLIED', {
+    matchId: match.id,
+    leaverId,
+    source,
+    charged,
+    chargedAmount,
+    forfeited
+  });
   return { ok: true, forfeited, charged, chargedAmount, preRoundExit: preRoundBotExit };
 }
 
@@ -6186,7 +6242,8 @@ async function handleBotForfeit(req, res) {
     forfeited: Boolean(outcome.forfeited),
     charged: Boolean(outcome.charged),
     chargedAmount: Math.max(0, Math.floor(Number(outcome.chargedAmount) || 0)),
-    preRoundExit: Boolean(outcome.preRoundExit)
+    preRoundExit: Boolean(outcome.preRoundExit),
+    settledExit: Boolean(outcome.settledExit)
   });
 }
 
@@ -6803,6 +6860,7 @@ export {
   isRealMatch,
   countWinningSplitHandsForPlayer,
   calculateForfeitLossAmount,
+  leaveMatchByForfeit,
   rankedTierFromElo,
   rankedBetRangeForElo,
   rankedKFactorForElo,
