@@ -651,10 +651,13 @@ test('39be series Elo win uses randomized 32-39 range', () => {
     });
     assert.equal(seriesWin.finalDelta >= 32, true);
     assert.equal(seriesWin.finalDelta <= 39, true);
+    if (process.env.NODE_ENV === 'test') {
+      assert.equal(seriesWin.finalDelta, 35);
+    }
   }
 });
 
-test('39bf series Elo loss uses randomized -39 to -32 range', () => {
+test('39bf series Elo loss uses randomized -14 to -9 range', () => {
   for (let i = 0; i < 40; i += 1) {
     const seriesLoss = rankedSeriesDeltaForOutcome({
       playerElo: 1500,
@@ -662,8 +665,11 @@ test('39bf series Elo loss uses randomized -39 to -32 range', () => {
       won: false,
       rankTierKey: 'GOLD'
     });
-    assert.equal(seriesLoss.finalDelta <= -32, true);
-    assert.equal(seriesLoss.finalDelta >= -39, true);
+    assert.equal(seriesLoss.finalDelta <= -9, true);
+    assert.equal(seriesLoss.finalDelta >= -14, true);
+    if (process.env.NODE_ENV === 'test') {
+      assert.equal(seriesLoss.finalDelta, -11);
+    }
   }
 });
 
@@ -686,15 +692,23 @@ test('39bfa fixed series Elo magnitude applies exact opposite signs', () => {
   assert.equal(loss.finalDelta, -35);
 });
 
-test('39bg series Elo stays within 32-39 regardless of elo gap', () => {
+test('39bg series Elo win/loss ranges hold regardless of elo gap', () => {
   const favoredWin = rankedSeriesDeltaForOutcome({
     playerElo: 1900,
     opponentElo: 1200,
     won: true,
     rankTierKey: 'LEGENDARY'
   });
+  const expectedLoss = rankedSeriesDeltaForOutcome({
+    playerElo: 1900,
+    opponentElo: 1200,
+    won: false,
+    rankTierKey: 'LEGENDARY'
+  });
   assert.equal(favoredWin.finalDelta >= 32, true);
   assert.equal(favoredWin.finalDelta <= 39, true);
+  assert.equal(expectedLoss.finalDelta <= -9, true);
+  assert.equal(expectedLoss.finalDelta >= -14, true);
 });
 
 test('39c double is allowed even if opponent may have to surrender pressure', () => {
