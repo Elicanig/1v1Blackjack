@@ -20,7 +20,7 @@ let inviteCountdownTicker = null;
 let matchTurnTicker = null;
 let challengeCountdownTicker = null;
 let quickPlayConnectTimer = null;
-let viewTransitionTimer = null;
+let botMatchLaunchTimer = null;
 const PERMISSION_ERROR_PATTERNS = [
   /not allowed by the user agent/i,
   /not allowed by the platform/i,
@@ -324,24 +324,22 @@ function useHoverGlow() {
   const media = window.matchMedia('(prefers-reduced-motion: reduce)');
   let reduced = media.matches;
   let raf = null;
-  let targetEl = null;
-  let lx = 0;
-  let ly = 0;
+  let activeEl = null;
+  let activeRect = null;
+  let tx = 0;
+  let ty = 0;
+  let cx = 0;
+  let cy = 0;
+  let lastTs = 0;
 
-  const flush = () => {
-    raf = null;
-    if (!targetEl || reduced) return;
-    targetEl.style.setProperty('--hx', `${lx}px`);
-    targetEl.style.setProperty('--hy', `${ly}px`);
-  };
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
   const smoothstep = (t) => t * t * (3 - 2 * t);
 
-  const queue = (el, x, y, w, h) => {
-    if (reduced) return;
-    targetEl = el;
-    lx = x;
-    ly = y;
+  const paint = (el, x, y) => {
+    if (!el || !activeRect) return;
+    const w = Math.max(1, activeRect.width);
+    const h = Math.max(1, activeRect.height);
     const nx = w > 0 ? x / w : 0.5;
     const ny = h > 0 ? y / h : 0.5;
     const edgeX = Math.min(nx, 1 - nx);
@@ -349,28 +347,89 @@ function useHoverGlow() {
     const edge = Math.min(edgeX, edgeY);
     const edgeLinear = Math.max(0, Math.min(1, edge * 2));
     const edgeFactor = smoothstep(edgeLinear);
+    el.style.setProperty('--hx', `${x}px`);
+    el.style.setProperty('--hy', `${y}px`);
     el.style.setProperty('--nx', String(nx));
     el.style.setProperty('--ny', String(ny));
     el.style.setProperty('--edge', String(edgeFactor));
-    if (!raf) raf = requestAnimationFrame(flush);
+  };
+
+  const refreshRect = () => {
+    if (!activeEl) return;
+    activeRect = activeEl.getBoundingClientRect();
+  };
+
+  const queueFrame = () => {
+    if (raf || reduced || !activeEl) return;
+    raf = requestAnimationFrame((ts) => {
+      raf = null;
+      if (reduced || !activeEl) return;
+      if (!activeEl.isConnected) {
+        activeEl = null;
+        activeRect = null;
+        lastTs = 0;
+        return;
+      }
+      if (!activeRect) refreshRect();
+      if (!activeRect) return;
+      const dt = lastTs ? Math.min(34, Math.max(8, ts - lastTs)) : 16;
+      lastTs = ts;
+      const lerpFactor = 1 - Math.exp(-dt / 68);
+      cx += (tx - cx) * lerpFactor;
+      cy += (ty - cy) * lerpFactor;
+      paint(activeEl, cx, cy);
+      if (Math.abs(tx - cx) > 0.35 || Math.abs(ty - cy) > 0.35) {
+        queueFrame();
+      }
+    });
+  };
+
+  const updateTargetPoint = (clientX, clientY, { snap = false } = {}) => {
+    if (!activeRect) refreshRect();
+    if (!activeRect) return;
+    tx = clamp(clientX - activeRect.left, 0, Math.max(1, activeRect.width));
+    ty = clamp(clientY - activeRect.top, 0, Math.max(1, activeRect.height));
+    if (snap) {
+      cx = tx;
+      cy = ty;
+      paint(activeEl, cx, cy);
+    }
+    queueFrame();
+  };
+
+  const setActiveElement = (el, event) => {
+    if (!el || reduced) return;
+    const switched = activeEl !== el;
+    if (switched && activeEl) activeEl.classList.remove('is-hovering');
+    activeEl = el;
+    activeRect = null;
+    if (activeEl && !activeEl.classList.contains('is-hovering')) {
+      activeEl.classList.add('is-hovering');
+    }
+    updateTargetPoint(event.clientX, event.clientY, { snap: switched });
+  };
+
+  const clearActiveElement = (target = activeEl) => {
+    if (target) target.classList.remove('is-hovering');
+    if (!activeEl || target === activeEl) {
+      activeEl = null;
+      activeRect = null;
+      lastTs = 0;
+    }
   };
 
   const onMove = (e) => {
     if (reduced) return;
     const el = e.target.closest?.('.glow-follow');
     if (!el) return;
-    const r = el.getBoundingClientRect();
-    queue(el, e.clientX - r.left, e.clientY - r.top, r.width, r.height);
+    setActiveElement(el, e);
   };
 
   const onOver = (e) => {
+    if (reduced) return;
     const el = e.target.closest?.('.glow-follow');
-    if (el) {
-      if (el.classList.contains('is-hovering')) return;
-      el.classList.add('is-hovering');
-      const r = el.getBoundingClientRect();
-      queue(el, e.clientX - r.left, e.clientY - r.top, r.width, r.height);
-    }
+    if (!el) return;
+    setActiveElement(el, e);
   };
 
   const onOut = (e) => {
@@ -378,23 +437,43 @@ function useHoverGlow() {
     if (!el) return;
     const to = e.relatedTarget;
     if (to && el.contains(to)) return;
-    el.classList.remove('is-hovering');
+    if (el === activeEl) clearActiveElement(el);
   };
 
   const onWindowLeave = () => {
-    document.querySelectorAll('.glow-follow.is-hovering').forEach((el) => el.classList.remove('is-hovering'));
+    document.querySelectorAll('.glow-follow.is-hovering').forEach((el) => clearActiveElement(el));
   };
 
   const onPrefChange = () => {
     reduced = media.matches;
-    if (reduced) onWindowLeave();
+    if (reduced) {
+      onWindowLeave();
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = null;
+      }
+    }
   };
 
   app.addEventListener('pointermove', onMove, { passive: true });
   app.addEventListener('pointerover', onOver, { passive: true });
   app.addEventListener('pointerout', onOut, { passive: true });
   app.addEventListener('pointerleave', onWindowLeave, { passive: true });
-  media.addEventListener('change', onPrefChange);
+  window.addEventListener('resize', () => {
+    if (!activeEl) return;
+    refreshRect();
+    paint(activeEl, cx, cy);
+  }, { passive: true });
+  window.addEventListener('scroll', () => {
+    if (!activeEl) return;
+    refreshRect();
+    paint(activeEl, cx, cy);
+  }, { passive: true });
+  if (typeof media.addEventListener === 'function') {
+    media.addEventListener('change', onPrefChange);
+  } else if (typeof media.addListener === 'function') {
+    media.addListener(onPrefChange);
+  }
 }
 
 function initTwinkleLayer() {
@@ -421,7 +500,6 @@ function initTwinkleLayer() {
 }
 
 function applyGlowFollowClasses() {
-  app.querySelectorAll('.glow-follow').forEach((el) => el.classList.remove('glow-follow', 'glow-follow--panel'));
   if (state.view === 'match' && state.currentMatch?.phase === 'ROUND_INIT') {
     app
       .querySelectorAll('.betting-header, .bet-control, .bet-confirm-actions button')
@@ -489,6 +567,11 @@ const state = {
   matchChatDraft: '',
   selectedBotDifficulty: 'normal',
   botStakeType: 'FAKE',
+  botMatchLaunch: {
+    pending: false,
+    showBusy: false,
+    mode: ''
+  },
   emotePickerOpen: false,
   floatingEmote: null,
   inviteModeModalFriend: null,
@@ -1245,6 +1328,30 @@ function quickPlayOpponentNameFromMatch(match) {
   const opponentId = Array.isArray(match.playerIds) ? match.playerIds.find((id) => id !== state.me.id) : null;
   if (!opponentId) return '';
   return match.participants?.[opponentId]?.username || '';
+}
+
+function clearBotMatchLaunchState({ renderNow = false } = {}) {
+  if (botMatchLaunchTimer) {
+    clearTimeout(botMatchLaunchTimer);
+    botMatchLaunchTimer = null;
+  }
+  const wasPending = Boolean(state.botMatchLaunch?.pending || state.botMatchLaunch?.showBusy);
+  state.botMatchLaunch = { pending: false, showBusy: false, mode: '' };
+  if (renderNow && wasPending) render();
+}
+
+function beginBotMatchLaunchState(mode = 'real') {
+  if (state.botMatchLaunch?.pending) return false;
+  clearBotMatchLaunchState({ renderNow: false });
+  state.botMatchLaunch = { pending: true, showBusy: false, mode };
+  botMatchLaunchTimer = setTimeout(() => {
+    botMatchLaunchTimer = null;
+    if (!state.botMatchLaunch?.pending) return;
+    state.botMatchLaunch.showBusy = true;
+    if (state.view === 'home') render();
+  }, 300);
+  if (state.view === 'home') render();
+  return true;
 }
 
 function finalizeQuickPlayConnectedState() {
@@ -2206,6 +2313,7 @@ function connectSocket() {
     if (previousMatch?.id !== match?.id) {
       state.matchChatDraft = '';
     }
+    clearBotMatchLaunchState({ renderNow: false });
     state.currentMatch = match;
     applyEventsSnapshot(match?.serverNow, match?.activeEvents || []);
     state.leaveMatchModal = false;
@@ -2244,7 +2352,6 @@ function connectSocket() {
       return;
     }
     goToView('match');
-    state.emotePickerOpen = false;
     render();
   });
   state.socket.on('match:error', ({ error }) => setError(error));
@@ -2302,6 +2409,7 @@ function connectSocket() {
     resetRankedQueueState();
     state.matchChatDraft = '';
     state.rankedForfeitModalOpen = false;
+    clearBotMatchLaunchState({ renderNow: false });
     state.currentMatch = null;
     state.currentLobby = null;
     state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -2435,6 +2543,7 @@ async function loadMe() {
     state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0, skill: 0 };
     state.challengeResetRefreshInFlight = false;
     state.challengeClaimPendingById = {};
+    clearBotMatchLaunchState({ renderNow: false });
     state.freeClaimed = false;
     state.freeClaimedAt = null;
     state.freeClaimNextAt = null;
@@ -3639,6 +3748,8 @@ async function startBotMatch(options = {}) {
   const forcePractice = matchMode === 'practice' || economyMode === 'no_delta';
   const stakeType = forcePractice ? 'FAKE' : (options.stakeType || (highRoller ? 'REAL' : state.botStakeType));
   if (highRoller && !guardHighRollerAccess()) return;
+  const launchMode = forcePractice ? 'practice' : (highRoller ? 'high-roller' : 'real');
+  if (!beginBotMatchLaunchState(launchMode)) return;
   try {
     const data = await api('/api/lobbies/bot', {
       method: 'POST',
@@ -3651,11 +3762,14 @@ async function startBotMatch(options = {}) {
         matchType: highRoller ? 'HIGH_ROLLER' : undefined
       })
     });
+    clearBotMatchLaunchState({ renderNow: false });
     state.currentLobby = null;
     state.currentMatch = data.match;
     goToView('match');
     setStatus(`${forcePractice || stakeType !== 'REAL' ? 'Practice' : 'Real-chip'} bot match started (${state.selectedBotDifficulty})${highRoller ? ' • High Roller' : ''}.`);
+    render();
   } catch (e) {
+    clearBotMatchLaunchState({ renderNow: state.view === 'home' });
     if (/high roller unlocks at/i.test(String(e?.message || ''))) {
       pushToast(HIGH_ROLLER_UNLOCK_MESSAGE);
     }
@@ -3826,6 +3940,7 @@ async function loadRankedOverview({ silent = false } = {}) {
 function logout() {
   resetQuickPlayState();
   resetRankedQueueState();
+  clearBotMatchLaunchState({ renderNow: false });
   state.matchChatDraft = '';
   state.inviteModeModalFriend = null;
   state.challengeModalFriend = null;
@@ -4088,7 +4203,7 @@ function syncRoundResultModal() {
   const showRankedContinueRow = Boolean(rankedSeriesActive && !seriesComplete);
   const leaveLabel = rankedRound
     ? (rankedSeriesActive ? 'Forfeit Series' : 'Return to Ranked')
-    : (botRound ? 'Leave to Lobby' : 'Leave to Home');
+    : 'Leave to Home';
   mount.innerHTML = `
     <div class="round-result-wrap">
       <div class="round-result-popup result-modal card">
@@ -4178,7 +4293,19 @@ function syncRoundResultModal() {
         render();
         return;
       }
-      state.pendingNavAfterLeave = isOfflineMatchActive() ? 'home' : (botRound ? 'lobbies' : 'home');
+      if (botRound || isOfflineMatchActive()) {
+        state.pendingNavAfterLeave = null;
+        state.leaveMatchModal = false;
+        state.roundResultChoicePending = false;
+        state.roundResultBanner = null;
+        state.currentMatch = null;
+        state.currentLobby = null;
+        state.matchChatDraft = '';
+        goToView('home');
+        render();
+        return;
+      }
+      state.pendingNavAfterLeave = 'home';
       leaveCurrentMatch({ showToast: true, refreshOnError: true });
     };
   }
@@ -4485,6 +4612,11 @@ function renderHome() {
     : Math.max(0, Math.min(1, Number(me.levelProgress) || 0));
   const levelPercent = Math.round(xpProgress * 100);
   const streakBonusPct = streakBonusPercent(me);
+  const botLaunchPending = Boolean(state.botMatchLaunch?.pending);
+  const botLaunchShowBusy = botLaunchPending && Boolean(state.botMatchLaunch?.showBusy);
+  const botLaunchMode = String(state.botMatchLaunch?.mode || '');
+  const realBotLaunching = botLaunchPending && (botLaunchMode === 'real' || botLaunchMode === 'high-roller');
+  const practiceBotLaunching = botLaunchPending && botLaunchMode === 'practice';
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -4569,7 +4701,7 @@ function renderHome() {
                           class="ghost ${highRollerUnlocked ? '' : 'is-locked'}"
                           id="highRollerBotBtn"
                           type="button"
-                          ${highRollerUnlocked ? '' : `aria-disabled="true" title="Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips"`}
+                          ${highRollerUnlocked ? '' : `aria-disabled="true" title="Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips"`} ${botLaunchPending ? 'disabled' : ''}
                         >High Roller Bot</button>
                       </div>
                     </div>
@@ -4594,23 +4726,24 @@ function renderHome() {
                       </div>
                       <div class="practice-controls">
                         <div class="bot-difficulty-grid" id="botDifficultyGrid" role="radiogroup" aria-label="Bot difficulty">
-                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'easy'}" data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}">
+                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'easy'}" data-bot="easy" class="bot-diff-btn ${state.selectedBotDifficulty === 'easy' ? 'is-selected' : ''}" ${botLaunchPending ? 'disabled' : ''}>
                             <span class="bot-diff-label">Easy</span>
                             <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.easy.min}-${BOT_BET_RANGES.easy.max}</span>
                           </button>
-                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'medium'}" data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}">
+                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'medium'}" data-bot="medium" class="bot-diff-btn ${state.selectedBotDifficulty === 'medium' ? 'is-selected' : ''}" ${botLaunchPending ? 'disabled' : ''}>
                             <span class="bot-diff-label">Medium</span>
                             <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.medium.min}-${BOT_BET_RANGES.medium.max}</span>
                           </button>
-                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'normal'}" data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}">
+                          <button type="button" role="radio" aria-checked="${state.selectedBotDifficulty === 'normal'}" data-bot="normal" class="bot-diff-btn ${state.selectedBotDifficulty === 'normal' ? 'is-selected' : ''}" ${botLaunchPending ? 'disabled' : ''}>
                             <span class="bot-diff-label">Normal</span>
                             <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.normal.min}-${BOT_BET_RANGES.normal.max}</span>
                           </button>
                         </div>
                         <div class="muted practice-note">Practice mode: no chips won/lost, no ranked/streak/challenge impact.</div>
+                        ${botLaunchShowBusy ? '<div class="muted practice-queue-note"><span class="btn-spinner" aria-hidden="true"></span>Finding bot table...</div>' : ''}
                         <div class="home-inline-actions">
-                          <button class="gold bot-play-btn" id="playRealBotBtn">Play Real Bot</button>
-                          <button class="ghost bot-play-btn" id="playPracticeBotBtn">Start Practice Bot</button>
+                          <button class="gold bot-play-btn" id="playRealBotBtn" ${botLaunchPending ? 'disabled' : ''}>${realBotLaunching && botLaunchShowBusy ? '<span class="btn-spinner" aria-hidden="true"></span>Finding bot table...' : 'Play Real Bot'}</button>
+                          <button class="ghost bot-play-btn" id="playPracticeBotBtn" ${botLaunchPending ? 'disabled' : ''}>${practiceBotLaunching && botLaunchShowBusy ? '<span class="btn-spinner" aria-hidden="true"></span>Finding bot table...' : 'Start Practice Bot'}</button>
                         </div>
                       </div>
                     </section>
@@ -4919,6 +5052,7 @@ function renderHome() {
   const highRollerBotBtn = document.getElementById('highRollerBotBtn');
   if (highRollerBotBtn) {
     highRollerBotBtn.onclick = () => {
+      if (state.botMatchLaunch?.pending) return;
       if (!guardHighRollerAccess()) return;
       startBotMatch({ highRoller: true, stakeType: 'REAL' });
     };
@@ -4943,6 +5077,7 @@ function renderHome() {
   const botGrid = document.getElementById('botDifficultyGrid');
   if (botGrid) {
     const selectBot = (difficulty) => {
+      if (state.botMatchLaunch?.pending) return;
       if (!difficulty || !BOT_BET_RANGES[difficulty]) return;
       if (state.selectedBotDifficulty === difficulty) return;
       state.selectedBotDifficulty = difficulty;
@@ -4963,9 +5098,19 @@ function renderHome() {
     });
   }
   const playPracticeBotBtn = document.getElementById('playPracticeBotBtn');
-  if (playPracticeBotBtn) playPracticeBotBtn.onclick = () => startPracticeBotMatch();
+  if (playPracticeBotBtn) {
+    playPracticeBotBtn.onclick = () => {
+      if (state.botMatchLaunch?.pending) return;
+      startPracticeBotMatch();
+    };
+  }
   const playRealBotBtn = document.getElementById('playRealBotBtn');
-  if (playRealBotBtn) playRealBotBtn.onclick = () => startBotMatch({ stakeType: 'REAL' });
+  if (playRealBotBtn) {
+    playRealBotBtn.onclick = () => {
+      if (state.botMatchLaunch?.pending) return;
+      startBotMatch({ stakeType: 'REAL' });
+    };
+  }
   const openStatsMoreBtn = document.getElementById('openStatsMoreBtn');
   if (openStatsMoreBtn) {
     openStatsMoreBtn.onclick = () => {
@@ -6367,9 +6512,9 @@ function renderChallenges() {
     ${renderTopbar('Challenges')}
     <main class="view-stack">
       <p class="muted">Only real-chip matches count toward challenge progress.</p>
+      ${renderTier('Hourly Challenges', 'hourly')}
       ${renderTier('Daily Skill Challenges', 'skill', { dailyRotation: true })}
       ${renderTier('Daily Challenges', 'daily')}
-      ${renderTier('Hourly Challenges', 'hourly')}
       ${renderTier('Weekly Challenges', 'weekly')}
     </main>
   `;
@@ -6974,7 +7119,7 @@ function renderMatch() {
                   <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
                   <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
                   <div class="strip-item"><span class="muted">Phase</span> <strong class="phase-strong">${phaseLabel}${modePill}${rankedSeriesHudText ? ` <span class="series-pill">${rankedSeriesHudText}</span>` : ''}</strong></div>
-                  <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ' <span class="streak-flame" aria-hidden="true"><span class="streak-flame-core"></span><span class="streak-flame-glow"></span></span>' : ''}</strong></div>
+                  <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ' <span class="streak-flame" aria-hidden="true"><span class="streak-flame-core"></span><span class="streak-flame-glow"></span><span class="streak-flame-trail"></span><span class="streak-flame-spark"></span></span>' : ''}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
                 <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">
@@ -7030,34 +7175,34 @@ function renderMatch() {
                   ${splitTensBlocked ? '<div class="muted split-tens-hint">Splitting 10s is available during limited-time events.</div>' : ''}
                   ${
                     isPvpMatch
-                      ? `<div class="actions actions-extra">
-                           <button id="toggleEmoteBtn" class="ghost" type="button" ${emoteCoolingDown ? 'disabled' : ''}>🙂 Emote</button>
-                          <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${rankedMatch ? 'Forfeit Series' : 'Leave'}</button>
+                      ? `<div class="emote-dock ${state.emotePickerOpen ? 'is-open' : ''}">
+                           <button id="toggleEmoteBtn" class="ghost emote-toggle-btn" type="button" ${emoteCoolingDown ? 'disabled' : ''}>🙂 Emote</button>
+                           ${
+                             state.emotePickerOpen
+                               ? `<div class="emote-popover card">
+                                    <div class="emote-grid">
+                                      <button data-emote-type="emoji" data-emote-value="🔥" ${emoteCoolingDown ? 'disabled' : ''}>🔥</button>
+                                      <button data-emote-type="emoji" data-emote-value="😎" ${emoteCoolingDown ? 'disabled' : ''}>😎</button>
+                                      <button data-emote-type="emoji" data-emote-value="👏" ${emoteCoolingDown ? 'disabled' : ''}>👏</button>
+                                      <button data-emote-type="emoji" data-emote-value="😅" ${emoteCoolingDown ? 'disabled' : ''}>😅</button>
+                                      <button data-emote-type="emoji" data-emote-value="🤝" ${emoteCoolingDown ? 'disabled' : ''}>🤝</button>
+                                      <button data-emote-type="emoji" data-emote-value="😵‍💫" ${emoteCoolingDown ? 'disabled' : ''}>😵‍💫</button>
+                                    </div>
+                                    <div class="emote-quips">
+                                      <button data-emote-type="quip" data-emote-value="Nice hand" ${emoteCoolingDown ? 'disabled' : ''}>Nice hand</button>
+                                      <button data-emote-type="quip" data-emote-value="No way" ${emoteCoolingDown ? 'disabled' : ''}>No way</button>
+                                      <button data-emote-type="quip" data-emote-value="Run it" ${emoteCoolingDown ? 'disabled' : ''}>Run it</button>
+                                      <button data-emote-type="quip" data-emote-value="Clutch" ${emoteCoolingDown ? 'disabled' : ''}>Clutch</button>
+                                      <button data-emote-type="quip" data-emote-value="Focus mode" ${emoteCoolingDown ? 'disabled' : ''}>Focus mode</button>
+                                      <button data-emote-type="quip" data-emote-value="GG" ${emoteCoolingDown ? 'disabled' : ''}>GG</button>
+                                    </div>
+                                  </div>`
+                               : ''
+                           }
+                         </div>
+                         <div class="actions actions-extra">
+                           <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${rankedMatch ? 'Forfeit Series' : 'Leave'}</button>
                          </div>`
-                      : ''
-                  }
-                  ${
-                    isPvpMatch && state.emotePickerOpen
-                      ? `<div class="emote-row">
-                          <div class="emote-popover card">
-                            <div class="emote-grid">
-                              <button data-emote-type="emoji" data-emote-value="🔥" ${emoteCoolingDown ? 'disabled' : ''}>🔥</button>
-                              <button data-emote-type="emoji" data-emote-value="😎" ${emoteCoolingDown ? 'disabled' : ''}>😎</button>
-                              <button data-emote-type="emoji" data-emote-value="👏" ${emoteCoolingDown ? 'disabled' : ''}>👏</button>
-                              <button data-emote-type="emoji" data-emote-value="😅" ${emoteCoolingDown ? 'disabled' : ''}>😅</button>
-                              <button data-emote-type="emoji" data-emote-value="🤝" ${emoteCoolingDown ? 'disabled' : ''}>🤝</button>
-                              <button data-emote-type="emoji" data-emote-value="😵‍💫" ${emoteCoolingDown ? 'disabled' : ''}>😵‍💫</button>
-                            </div>
-                            <div class="emote-quips">
-                              <button data-emote-type="quip" data-emote-value="Nice hand" ${emoteCoolingDown ? 'disabled' : ''}>Nice hand</button>
-                              <button data-emote-type="quip" data-emote-value="No way" ${emoteCoolingDown ? 'disabled' : ''}>No way</button>
-                              <button data-emote-type="quip" data-emote-value="Run it" ${emoteCoolingDown ? 'disabled' : ''}>Run it</button>
-                              <button data-emote-type="quip" data-emote-value="Clutch" ${emoteCoolingDown ? 'disabled' : ''}>Clutch</button>
-                              <button data-emote-type="quip" data-emote-value="Focus mode" ${emoteCoolingDown ? 'disabled' : ''}>Focus mode</button>
-                              <button data-emote-type="quip" data-emote-value="GG" ${emoteCoolingDown ? 'disabled' : ''}>GG</button>
-                            </div>
-                          </div>
-                        </div>`
                       : ''
                   }
                 ${
@@ -7570,17 +7715,6 @@ function render() {
   syncRankedOverlay();
   syncTurnCountdownUI();
   syncXpBars();
-  if (previousView && previousView !== state.view) {
-    if (viewTransitionTimer) {
-      clearTimeout(viewTransitionTimer);
-      viewTransitionTimer = null;
-    }
-    app.classList.add('view-transitioning');
-    viewTransitionTimer = setTimeout(() => {
-      app.classList.remove('view-transitioning');
-      viewTransitionTimer = null;
-    }, 220);
-  }
   if (enteringFriends && state.token) loadFriendsData();
 }
 
@@ -7646,6 +7780,14 @@ function render() {
       }
     }
   });
+  window.addEventListener('pointerdown', (event) => {
+    if (!state.emotePickerOpen || state.view !== 'match') return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('.emote-dock')) return;
+    state.emotePickerOpen = false;
+    render();
+  }, { passive: true, capture: true });
   window.addEventListener('popstate', () => {
     state.view = initialViewFromPath();
     render();
