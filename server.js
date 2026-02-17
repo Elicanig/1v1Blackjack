@@ -121,11 +121,43 @@ const PROFILE_BORDER_DEFS_BY_ID = Object.freeze(
   Object.fromEntries(PROFILE_BORDER_DEFS.map((border) => [border.id, border]))
 );
 const DECK_SKIN_DEFS = Object.freeze([
-  { id: 'CLASSIC', name: 'Classic Felt', minLevelRequired: 1 },
-  { id: 'GOLD', name: 'Gold Reserve', minLevelRequired: 10 },
-  { id: 'NEON', name: 'Neon Pulse', minLevelRequired: 20 },
-  { id: 'OBSIDIAN', name: 'Obsidian Luxe', minLevelRequired: 35 },
-  { id: 'AURORA', name: 'Aurora Royale', minLevelRequired: 50 }
+  { id: 'CLASSIC', name: 'Classic Felt', description: 'Traditional white cards and emerald backs.', minLevelRequired: 1, unlockHint: 'Available by default.' },
+  { id: 'GOLD', name: 'Gold Reserve', description: 'Warm ivory cards with gilded trim.', minLevelRequired: 10, unlockHint: 'Reach level 10.' },
+  { id: 'NEON', name: 'Neon Pulse', description: 'Cyber-glow accents with crisp contrast.', minLevelRequired: 20, unlockHint: 'Reach level 20.' },
+  { id: 'OBSIDIAN', name: 'Obsidian Luxe', description: 'Dark premium face with metallic highlights.', minLevelRequired: 35, unlockHint: 'Reach level 35.' },
+  { id: 'AURORA', name: 'Aurora Royale', description: 'Prismatic finish with subtle shimmer.', minLevelRequired: 50, unlockHint: 'Reach level 50.' },
+  {
+    id: 'OBSIDIAN_LUXE_II',
+    name: 'Obsidian Luxe II',
+    description: 'Deep black stone with gold inlays and ember accents.',
+    minLevelRequired: 1,
+    unlockCondition: { type: 'bestMatchWinStreak', threshold: 25 },
+    unlockHint: 'Reach a 25-match win streak.'
+  },
+  {
+    id: 'AURORA_ROYALE_II',
+    name: 'Aurora Royale II',
+    description: 'Animated aurora gradient with royal trim.',
+    minLevelRequired: 1,
+    unlockCondition: { type: 'rankedElo', threshold: 1900 },
+    unlockHint: 'Reach 1900 ranked Elo.'
+  },
+  {
+    id: 'VOID_PRISM',
+    name: 'Void Prism',
+    description: 'Dark glass with shifting spectral highlights.',
+    minLevelRequired: 1,
+    unlockCondition: { type: 'rankedWins', threshold: 120 },
+    unlockHint: 'Win 120 ranked series.'
+  },
+  {
+    id: 'CELESTIAL_IVORY',
+    name: 'Celestial Ivory',
+    description: 'Pearl-white marble with star-gold filigree.',
+    minLevelRequired: 1,
+    unlockCondition: { type: 'blackjacks', threshold: 300 },
+    unlockHint: 'Deal 300 natural blackjacks.'
+  }
 ]);
 const DECK_SKIN_DEFS_BY_ID = Object.freeze(
   Object.fromEntries(DECK_SKIN_DEFS.map((skin) => [skin.id, skin]))
@@ -1609,9 +1641,29 @@ function normalizeDeckSkinId(value) {
   return DECK_SKIN_DEFS_BY_ID[key] ? key : 'CLASSIC';
 }
 
+function deckSkinMetricValueForUser(user, metricType) {
+  switch (String(metricType || '').trim()) {
+    case 'rankedElo':
+      return normalizeRankedElo(user?.rankedElo);
+    default:
+      return titleMetricValueForUser(user, metricType);
+  }
+}
+
+function deckSkinUnlockConditionMet(user, unlockCondition) {
+  if (!unlockCondition || typeof unlockCondition !== 'object') return false;
+  const conditionType = String(unlockCondition.type || '').trim();
+  if (!conditionType || conditionType === 'manual') return false;
+  const threshold = Math.max(1, Math.floor(Number(unlockCondition.threshold) || 0));
+  return deckSkinMetricValueForUser(user, conditionType) >= threshold;
+}
+
 function deckSkinUnlockedForUser(user, deckSkinId) {
   const normalized = normalizeDeckSkinId(deckSkinId);
   const def = DECK_SKIN_DEFS_BY_ID[normalized] || DECK_SKIN_DEFS[0];
+  if (def?.unlockCondition && typeof def.unlockCondition === 'object') {
+    return deckSkinUnlockConditionMet(user, def.unlockCondition);
+  }
   const level = levelFromXp(user?.xp || 0);
   return level >= Math.max(1, Math.floor(Number(def?.minLevelRequired) || 1));
 }
@@ -2054,7 +2106,9 @@ function sanitizeSelfUser(user) {
   const deckSkins = DECK_SKIN_DEFS.map((skin) => ({
     id: skin.id,
     name: skin.name,
+    description: String(skin.description || ''),
     minLevelRequired: Math.max(1, Math.floor(Number(skin.minLevelRequired) || 1)),
+    unlockHint: String(skin.unlockHint || `Reach level ${Math.max(1, Math.floor(Number(skin.minLevelRequired) || 1))}.`),
     unlocked: deckSkinUnlockedForUser(user, skin.id)
   }));
   return {
@@ -6422,6 +6476,10 @@ app.patch('/api/profile/deck-skin', authMiddleware, async (req, res) => {
   }
   const requested = normalizeDeckSkinId(requestedRaw || 'CLASSIC');
   if (!deckSkinUnlockedForUser(req.user, requested)) {
+    const hint = String(DECK_SKIN_DEFS_BY_ID[requested]?.unlockHint || '').trim();
+    if (hint) {
+      return res.status(403).json({ error: `Deck skin locked. ${hint}` });
+    }
     const required = Math.max(1, Math.floor(Number(DECK_SKIN_DEFS_BY_ID[requested]?.minLevelRequired) || 1));
     return res.status(403).json({ error: `Deck skin unlocks at level ${required}` });
   }

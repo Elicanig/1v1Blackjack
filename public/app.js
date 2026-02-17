@@ -82,11 +82,15 @@ const TITLE_DEFS = Object.freeze([
 ]);
 const TITLE_DEF_MAP = new Map(TITLE_DEFS.filter((entry) => entry.key).map((entry) => [entry.key, entry]));
 const DECK_SKIN_DEFS = Object.freeze([
-  { id: 'CLASSIC', name: 'Classic Felt', description: 'Traditional white cards and emerald backs.', minLevelRequired: 1, token: 'classic' },
-  { id: 'GOLD', name: 'Gold Reserve', description: 'Warm ivory cards with gilded trim.', minLevelRequired: 10, token: 'gold' },
-  { id: 'NEON', name: 'Neon Pulse', description: 'Cyber-glow accents with crisp contrast.', minLevelRequired: 20, token: 'neon' },
-  { id: 'OBSIDIAN', name: 'Obsidian Luxe', description: 'Dark premium face with metallic highlights.', minLevelRequired: 35, token: 'obsidian' },
-  { id: 'AURORA', name: 'Aurora Royale', description: 'Prismatic finish with subtle shimmer.', minLevelRequired: 50, token: 'aurora' }
+  { id: 'CLASSIC', name: 'Classic Felt', description: 'Traditional white cards and emerald backs.', minLevelRequired: 1, token: 'classic', unlockHint: 'Available by default.' },
+  { id: 'GOLD', name: 'Gold Reserve', description: 'Warm ivory cards with gilded trim.', minLevelRequired: 10, token: 'gold', unlockHint: 'Reach level 10.' },
+  { id: 'NEON', name: 'Neon Pulse', description: 'Cyber-glow accents with crisp contrast.', minLevelRequired: 20, token: 'neon', unlockHint: 'Reach level 20.' },
+  { id: 'OBSIDIAN', name: 'Obsidian Luxe', description: 'Dark premium face with metallic highlights.', minLevelRequired: 35, token: 'obsidian', unlockHint: 'Reach level 35.' },
+  { id: 'AURORA', name: 'Aurora Royale', description: 'Prismatic finish with subtle shimmer.', minLevelRequired: 50, token: 'aurora', unlockHint: 'Reach level 50.' },
+  { id: 'OBSIDIAN_LUXE_II', name: 'Obsidian Luxe II', description: 'Deep black stone, gold inlays, and a low ember glow.', minLevelRequired: 1, token: 'obsidian-luxe-ii', unlockHint: 'Reach a 25-match win streak.' },
+  { id: 'AURORA_ROYALE_II', name: 'Aurora Royale II', description: 'Animated aurora gradient with polished royal trim.', minLevelRequired: 1, token: 'aurora-royale-ii', unlockHint: 'Reach 1900 ranked Elo.' },
+  { id: 'VOID_PRISM', name: 'Void Prism', description: 'Dark glass finish with shifting spectral highlights.', minLevelRequired: 1, token: 'void-prism', unlockHint: 'Win 120 ranked series.' },
+  { id: 'CELESTIAL_IVORY', name: 'Celestial Ivory', description: 'Pearl ivory marble with star-gold filigree.', minLevelRequired: 1, token: 'celestial-ivory', unlockHint: 'Deal 300 natural blackjacks.' }
 ]);
 const DECK_SKIN_MAP = new Map(DECK_SKIN_DEFS.map((entry) => [entry.id, entry]));
 const PROFILE_BORDER_DEFS = Object.freeze([
@@ -545,7 +549,12 @@ const state = {
     titles: false,
     security: false
   },
-  profileTitleFilter: 'ALL',
+  profileTitlePickerOpen: false,
+  profileTitleDraftKey: '',
+  profileTitleModalOriginKey: '',
+  profileTitleSearch: '',
+  profileTitleOwnershipFilter: 'ALL',
+  profileTitleCategoryFilter: 'ALL',
   profileSaving: false,
   profileBorderSavingId: '',
   rankTimelineModalOpen: false,
@@ -1534,18 +1543,34 @@ function normalizeDeckSkinId(value) {
 
 function deckSkinsForUser(me = {}) {
   const level = Math.max(1, Math.floor(Number(me?.level) || 1));
+  const serverSkins = Array.isArray(me?.deckSkins) ? me.deckSkins : [];
+  const serverById = new Map(
+    serverSkins
+      .map((entry) => {
+        const id = normalizeDeckSkinId(entry?.id);
+        return [id, entry];
+      })
+  );
   return DECK_SKIN_DEFS.map((skin) => ({
     ...skin,
-    unlocked: level >= skin.minLevelRequired
+    minLevelRequired: Math.max(1, Math.floor(Number(serverById.get(skin.id)?.minLevelRequired) || skin.minLevelRequired || 1)),
+    description: String(serverById.get(skin.id)?.description || skin.description || ''),
+    unlockHint: String(serverById.get(skin.id)?.unlockHint || skin.unlockHint || `Reach level ${Math.max(1, Math.floor(Number(skin.minLevelRequired) || 1))}.`),
+    unlocked: typeof serverById.get(skin.id)?.unlocked === 'boolean'
+      ? Boolean(serverById.get(skin.id).unlocked)
+      : level >= Math.max(1, Math.floor(Number(skin.minLevelRequired) || 1))
   }));
 }
 
 function deckSkinForUser(me = state.me) {
+  const skins = deckSkinsForUser(me);
+  const byId = new Map(skins.map((entry) => [entry.id, entry]));
   const normalizedId = normalizeDeckSkinId(me?.selectedDeckSkin || 'CLASSIC');
-  const def = DECK_SKIN_MAP.get(normalizedId) || DECK_SKIN_DEFS[0];
-  const level = Math.max(1, Math.floor(Number(me?.level) || 1));
-  if (level < def.minLevelRequired) return DECK_SKIN_DEFS[0];
-  return def;
+  const requested = byId.get(normalizedId) || skins[0] || DECK_SKIN_DEFS[0];
+  if (!requested?.unlocked) {
+    return skins.find((entry) => entry.unlocked) || skins[0] || DECK_SKIN_DEFS[0];
+  }
+  return requested;
 }
 
 function streakBonusPercent(me = state.me) {
@@ -1598,10 +1623,16 @@ function titleCatalogEntryByKeyClient(me = {}, key = '') {
   return titleCatalogForUserClient(me).find((entry) => entry.key === normalizedKey) || null;
 }
 
-function normalizeTitleFilter(value) {
+function normalizeTitleOwnershipFilter(value) {
   const key = String(value || 'ALL').trim().toUpperCase();
   if (['ALL', 'UNLOCKED', 'LOCKED'].includes(key)) return key;
   return 'ALL';
+}
+
+function normalizeTitleCategoryFilter(value, categories = []) {
+  const allowed = new Set(['ALL', ...categories.map((entry) => String(entry || '').trim().toUpperCase()).filter(Boolean)]);
+  const key = String(value || 'ALL').trim().toUpperCase();
+  return allowed.has(key) ? key : 'ALL';
 }
 
 function normalizeFavoriteStatKey(value) {
@@ -2404,7 +2435,12 @@ async function loadMe() {
     state.favoriteStatFilter = '';
     state.titleInfoModalKey = '';
     state.profileSections = { identity: true, progress: true, borders: false, social: true, titles: false, security: false };
-    state.profileTitleFilter = 'ALL';
+    state.profileTitlePickerOpen = false;
+    state.profileTitleDraftKey = '';
+    state.profileTitleModalOriginKey = '';
+    state.profileTitleSearch = '';
+    state.profileTitleOwnershipFilter = 'ALL';
+    state.profileTitleCategoryFilter = 'ALL';
     state.profileSaving = false;
     state.profileBorderSavingId = '';
     state.rankTimelineModalOpen = false;
@@ -2433,6 +2469,12 @@ function goToView(view) {
       state.favoriteStatDraftKey = '';
       state.favoriteStatFilter = '';
       state.titleInfoModalKey = '';
+      state.profileTitlePickerOpen = false;
+      state.profileTitleDraftKey = '';
+      state.profileTitleModalOriginKey = '';
+      state.profileTitleSearch = '';
+      state.profileTitleOwnershipFilter = 'ALL';
+      state.profileTitleCategoryFilter = 'ALL';
     }
   }
   state.view = view;
@@ -5022,13 +5064,23 @@ function renderProfile() {
   const selectedBorder = profileBorders.find((border) => border.id === selectedBorderId) || profileBorders[0] || PROFILE_BORDER_DEFS[0];
   const deckSkins = deckSkinsForUser(me);
   const selectedDeckSkin = deckSkinForUser(me);
-  const titleFilter = normalizeTitleFilter(state.profileTitleFilter);
-  state.profileTitleFilter = titleFilter;
-  const filteredTitleCatalog = titleCatalog.filter((entry) => {
-    if (titleFilter === 'UNLOCKED') return Boolean(entry.unlocked);
-    if (titleFilter === 'LOCKED') return !entry.unlocked;
-    return true;
+  const titleCategories = ['ALL', ...new Set(titleCatalog.map((entry) => String(entry.category || 'skill').trim().toUpperCase()).filter(Boolean))];
+  const titleOwnershipFilter = normalizeTitleOwnershipFilter(state.profileTitleOwnershipFilter);
+  const titleCategoryFilter = normalizeTitleCategoryFilter(state.profileTitleCategoryFilter, titleCategories);
+  const titleSearch = String(state.profileTitleSearch || '').trim().toLowerCase();
+  state.profileTitleOwnershipFilter = titleOwnershipFilter;
+  state.profileTitleCategoryFilter = titleCategoryFilter;
+  const equippedTitleKey = String(me.selectedTitleKey || '').trim().toUpperCase();
+  const titleDraftKey = String(state.profileTitleDraftKey || equippedTitleKey || '').trim().toUpperCase();
+  const titlePickerRows = titleCatalog.filter((entry) => {
+    if (titleOwnershipFilter === 'UNLOCKED' && !entry.unlocked) return false;
+    if (titleOwnershipFilter === 'LOCKED' && entry.unlocked) return false;
+    if (titleCategoryFilter !== 'ALL' && String(entry.category || '').trim().toUpperCase() !== titleCategoryFilter) return false;
+    if (!titleSearch) return true;
+    const haystack = `${entry.label} ${entry.requirementText} ${entry.description} ${entry.category}`.toLowerCase();
+    return haystack.includes(titleSearch);
   });
+  const selectedTitleDraftEntry = titleCatalog.find((entry) => entry.key === titleDraftKey) || null;
   const nextBorderUnlockLevel = Number.isFinite(Number(me.nextBorderUnlockLevel))
     ? Math.max(1, Math.floor(Number(me.nextBorderUnlockLevel)))
     : ((profileBorders.find((border) => level < border.minLevelRequired)?.minLevelRequired) || null);
@@ -5098,8 +5150,30 @@ function renderProfile() {
         <input name="avatar_seed" value="${me.avatarSeed || me.username}" />
         <label>Deck Skin</label>
         <select name="selected_deck_skin">
-          ${deckSkins.map((skin) => `<option value="${skin.id}" ${normalizeDeckSkinId(me.selectedDeckSkin) === skin.id ? 'selected' : ''} ${skin.unlocked ? '' : 'disabled'}>${skin.name}${skin.unlocked ? '' : ` (Unlocks Lv ${skin.minLevelRequired})`}</option>`).join('')}
+          ${deckSkins.map((skin) => `<option value="${skin.id}" ${normalizeDeckSkinId(me.selectedDeckSkin) === skin.id ? 'selected' : ''} ${skin.unlocked ? '' : 'disabled'}>${skin.name}${skin.unlocked ? '' : ` (${skin.unlockHint || `Unlocks Lv ${skin.minLevelRequired}`})`}</option>`).join('')}
         </select>
+        <label>Skin Library</label>
+        <div class="profile-deck-skin-library">
+          ${deckSkins.map((skin) => {
+            const active = selectedDeckSkin.id === skin.id;
+            const statusText = skin.unlocked ? 'Owned' : (skin.unlockHint || `Unlocks Lv ${skin.minLevelRequired}`);
+            return `<button
+              class="profile-deck-skin-chip ${active ? 'is-active' : ''} ${skin.unlocked ? 'is-unlocked' : 'is-locked'}"
+              type="button"
+              data-deck-skin-preview="${skin.id}"
+              data-deck-skin-select="${skin.id}"
+              data-deck-skin-unlocked="${skin.unlocked ? '1' : '0'}"
+              data-deck-skin-name="${skin.name}"
+              data-deck-skin-description="${skin.description || ''}"
+              data-deck-skin-token="${skin.token || 'classic'}"
+              data-deck-skin-status="${statusText}"
+              title="${statusText}"
+            >
+              <span>${skin.name}</span>
+              <small>${statusText}</small>
+            </button>`;
+          }).join('')}
+        </div>
       </div>
       <div class="profile-preview-card">
         <label>Preview</label>
@@ -5107,9 +5181,17 @@ function renderProfile() {
           <img src="${preview}" alt="avatar preview" class="profile-avatar-preview" />
           <span class="muted">Generated automatically</span>
         </div>
-        <div class="profile-deck-skin-preview deck-skin-${selectedDeckSkin.token}">
-          <strong>${selectedDeckSkin.name}</strong>
-          <span class="muted">${selectedDeckSkin.description}</span>
+        <div class="profile-deck-skin-preview deck-skin-${selectedDeckSkin.token}" id="profileDeckSkinPreview" data-selected-skin-id="${selectedDeckSkin.id}">
+          <div class="profile-deck-skin-preview-head">
+            <strong id="profileDeckSkinPreviewName">${selectedDeckSkin.name}</strong>
+            <span class="muted" id="profileDeckSkinPreviewStatus">${selectedDeckSkin.unlocked ? 'Owned' : (selectedDeckSkin.unlockHint || `Unlocks Lv ${selectedDeckSkin.minLevelRequired}`)}</span>
+          </div>
+          <span class="muted" id="profileDeckSkinPreviewDesc">${selectedDeckSkin.description}</span>
+          <div class="profile-deck-skin-cards" aria-hidden="true">
+            <article class="profile-sample-card black"><span class="profile-sample-card-corner">A♠</span><span class="profile-sample-card-center">♠</span></article>
+            <article class="profile-sample-card red"><span class="profile-sample-card-corner">10♦</span><span class="profile-sample-card-center">♦</span></article>
+            <article class="profile-sample-card red"><span class="profile-sample-card-corner">K♥</span><span class="profile-sample-card-center">♥</span></article>
+          </div>
         </div>
       </div>
     </div>
@@ -5182,34 +5264,20 @@ function renderProfile() {
   const titlesBody = `
     <div class="titles-equip">
       <label>Displayed Title</label>
-      <select name="selected_title">
-        <option value="">None</option>
-        ${titleCatalog.map((entry) => {
-          const unlocked = Boolean(entry.unlocked);
-          return `<option value="${entry.key}" ${me.selectedTitleKey === entry.key ? 'selected' : ''} ${unlocked ? '' : 'disabled'}>${entry.label}${unlocked ? '' : ' (Locked)'}</option>`;
-        }).join('')}
-      </select>
-      <label class="title-filter-row">
-        <span>Filter</span>
-        <select id="profileTitleFilterSelect">
-          <option value="ALL" ${titleFilter === 'ALL' ? 'selected' : ''}>All</option>
-          <option value="UNLOCKED" ${titleFilter === 'UNLOCKED' ? 'selected' : ''}>Unlocked</option>
-          <option value="LOCKED" ${titleFilter === 'LOCKED' ? 'selected' : ''}>Locked</option>
-        </select>
-      </label>
-      <div class="titles-list">
-        ${
-          filteredTitleCatalog.length
-            ? filteredTitleCatalog.map((entry) => {
-                const unlocked = Boolean(entry.unlocked);
-                return `<button class="title-row ${unlocked ? 'unlocked' : 'locked'}" type="button" data-title-info="${entry.key}" title="${unlocked ? 'Unlocked' : entry.requirementText}">
-                  <span>${unlocked ? '✓' : '🔒'} ${entry.label}</span>
-                  <span class="muted">${unlocked ? 'Ready to equip' : entry.requirementText}</span>
-                </button>`;
-              }).join('')
-            : '<div class="title-row locked"><span>No titles in this filter.</span><span class="muted">Try a different filter.</span></div>'
-        }
+      <input type="hidden" name="selected_title" value="${selectedTitleDraftEntry?.key || ''}" />
+      <div class="title-current-card">
+        <div>
+          <strong>${selectedTitleDraftEntry?.label || 'None'}</strong>
+          <div class="muted">${selectedTitleDraftEntry ? (selectedTitleDraftEntry.description || selectedTitleDraftEntry.requirementText || 'Unlocked title') : 'No title equipped.'}</div>
+        </div>
+        <span class="title-current-status ${selectedTitleDraftEntry ? 'is-owned' : ''}">${selectedTitleDraftEntry ? 'Owned' : 'Default'}</span>
       </div>
+      <div class="row title-picker-actions">
+        <button id="openTitlePickerBtn" class="primary" type="button">Choose Title</button>
+        <button id="clearTitlePickerBtn" class="ghost" type="button" ${selectedTitleDraftEntry ? '' : 'disabled'}>Clear</button>
+        <button id="openSelectedTitleInfoBtn" class="ghost" type="button" ${selectedTitleDraftEntry ? '' : 'disabled'}>View Unlock Details</button>
+      </div>
+      <div class="muted">Equipped title updates when you save profile.</div>
     </div>
   `;
   const securityBody = `
@@ -5282,6 +5350,74 @@ function renderProfile() {
         : ''
     }
     ${
+      state.profileTitlePickerOpen
+        ? `<div class="modal" id="titlePickerModal">
+            <div class="modal-panel card title-picker-modal" role="dialog" aria-modal="true" aria-label="Choose displayed title">
+              <div class="title-picker-head stats-more-head">
+                <div>
+                  <h3>Choose Displayed Title</h3>
+                  <p class="muted">Search and select a title to show on your profile.</p>
+                </div>
+                <button id="closeTitlePickerBtn" class="ghost" type="button">Cancel</button>
+              </div>
+              <div class="title-picker-controls">
+                <label>
+                  <span class="muted">Search</span>
+                  <input id="titlePickerSearchInput" type="text" placeholder="Search titles..." value="${state.profileTitleSearch || ''}" />
+                </label>
+                <label>
+                  <span class="muted">Status</span>
+                  <select id="titlePickerOwnershipFilter">
+                    <option value="ALL" ${titleOwnershipFilter === 'ALL' ? 'selected' : ''}>All</option>
+                    <option value="UNLOCKED" ${titleOwnershipFilter === 'UNLOCKED' ? 'selected' : ''}>Owned</option>
+                    <option value="LOCKED" ${titleOwnershipFilter === 'LOCKED' ? 'selected' : ''}>Locked</option>
+                  </select>
+                </label>
+                <label>
+                  <span class="muted">Category</span>
+                  <select id="titlePickerCategoryFilter">
+                    ${titleCategories.map((category) => `<option value="${category}" ${titleCategoryFilter === category ? 'selected' : ''}>${category === 'ALL' ? 'All' : category.charAt(0) + category.slice(1).toLowerCase()}</option>`).join('')}
+                  </select>
+                </label>
+              </div>
+              <div class="title-picker-list">
+                <button class="title-picker-row ${titleDraftKey ? '' : 'is-selected'} is-owned" type="button" data-title-picker-select="">
+                  <div class="title-picker-row-left">
+                    <strong>None</strong>
+                    <span class="muted">No title equipped.</span>
+                  </div>
+                  <div class="title-picker-row-right">
+                    <span class="title-picker-status">Default</span>
+                  </div>
+                </button>
+                ${
+                  titlePickerRows.length
+                    ? titlePickerRows.map((entry) => {
+                        const unlocked = Boolean(entry.unlocked);
+                        const selected = titleDraftKey === entry.key;
+                        return `<button class="title-picker-row ${selected ? 'is-selected' : ''} ${unlocked ? 'is-owned' : 'is-locked'}" type="button" data-title-picker-select="${entry.key}">
+                          <div class="title-picker-row-left">
+                            <strong>${entry.label}</strong>
+                            <span class="muted">${entry.description || entry.requirementText || 'Title unlock details'}</span>
+                          </div>
+                          <div class="title-picker-row-right">
+                            <span class="title-picker-status">${unlocked ? 'Owned' : 'Locked'}</span>
+                            <span class="muted">${unlocked ? 'Ready to equip' : entry.requirementText}</span>
+                          </div>
+                        </button>`;
+                      }).join('')
+                    : '<div class="title-picker-empty muted">No titles match this filter.</div>'
+                }
+              </div>
+              <div class="title-picker-foot row">
+                <button id="cancelTitlePickerBtn" class="ghost" type="button">Cancel</button>
+                <button id="saveTitlePickerBtn" class="primary" type="button">Use Selected Title</button>
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
+    ${
       titleInfoEntry
         ? `<div class="modal" id="titleInfoModal">
             <div class="modal-panel card title-info-modal" role="dialog" aria-modal="true" aria-label="Title details">
@@ -5309,13 +5445,51 @@ function renderProfile() {
       render();
     };
   });
-  const profileTitleFilterSelect = document.getElementById('profileTitleFilterSelect');
-  if (profileTitleFilterSelect) {
-    profileTitleFilterSelect.onchange = (event) => {
-      state.profileTitleFilter = normalizeTitleFilter(event.target.value);
-      render();
-    };
+  const deckSkinSelect = app.querySelector('[name="selected_deck_skin"]');
+  const deckSkinPreviewPanel = document.getElementById('profileDeckSkinPreview');
+  const deckSkinPreviewName = document.getElementById('profileDeckSkinPreviewName');
+  const deckSkinPreviewDesc = document.getElementById('profileDeckSkinPreviewDesc');
+  const deckSkinPreviewStatus = document.getElementById('profileDeckSkinPreviewStatus');
+  const paintDeckSkinPreview = (skinId) => {
+    if (!deckSkinPreviewPanel) return;
+    const normalized = normalizeDeckSkinId(skinId);
+    const source = app.querySelector(`[data-deck-skin-preview="${normalized}"]`);
+    if (!source) return;
+    const token = String(source.dataset.deckSkinToken || 'classic').trim() || 'classic';
+    deckSkinPreviewPanel.className = `profile-deck-skin-preview deck-skin-${token}`;
+    if (deckSkinPreviewName) deckSkinPreviewName.textContent = source.dataset.deckSkinName || 'Deck Skin';
+    if (deckSkinPreviewDesc) deckSkinPreviewDesc.textContent = source.dataset.deckSkinDescription || '';
+    if (deckSkinPreviewStatus) deckSkinPreviewStatus.textContent = source.dataset.deckSkinStatus || '';
+  };
+  const syncDeckSkinSelectionState = () => {
+    const selectedId = normalizeDeckSkinId(deckSkinSelect?.value || selectedDeckSkin.id || 'CLASSIC');
+    app.querySelectorAll('[data-deck-skin-select]').forEach((btn) => {
+      btn.classList.toggle('is-active', normalizeDeckSkinId(btn.dataset.deckSkinSelect) === selectedId);
+    });
+    paintDeckSkinPreview(selectedId);
+  };
+  if (deckSkinSelect) {
+    deckSkinSelect.addEventListener('change', syncDeckSkinSelectionState);
   }
+  app.querySelectorAll('[data-deck-skin-preview]').forEach((btn) => {
+    btn.onmouseenter = () => paintDeckSkinPreview(btn.dataset.deckSkinPreview);
+    btn.onfocus = () => paintDeckSkinPreview(btn.dataset.deckSkinPreview);
+    btn.onmouseleave = () => syncDeckSkinSelectionState();
+    btn.onblur = () => syncDeckSkinSelectionState();
+    btn.onclick = () => {
+      const skinId = normalizeDeckSkinId(btn.dataset.deckSkinSelect);
+      const unlocked = btn.dataset.deckSkinUnlocked === '1';
+      if (!unlocked) {
+        pushToast(btn.dataset.deckSkinStatus || 'Deck skin is locked.');
+        return;
+      }
+      if (deckSkinSelect) {
+        deckSkinSelect.value = skinId;
+      }
+      syncDeckSkinSelectionState();
+    };
+  });
+  syncDeckSkinSelectionState();
   app.querySelectorAll('[data-profile-border-equip]').forEach((btn) => {
     btn.onclick = () => {
       const borderId = String(btn.dataset.profileBorderEquip || '').trim().toUpperCase();
@@ -5323,14 +5497,33 @@ function renderProfile() {
       equipProfileBorder(borderId);
     };
   });
-  app.querySelectorAll('[data-title-info]').forEach((btn) => {
-    btn.onclick = () => {
-      const key = String(btn.dataset.titleInfo || '').trim().toUpperCase();
-      if (!key) return;
-      state.titleInfoModalKey = key;
+  const openTitlePickerBtn = document.getElementById('openTitlePickerBtn');
+  if (openTitlePickerBtn) {
+    openTitlePickerBtn.onclick = () => {
+      state.profileTitleDraftKey = selectedTitleDraftEntry?.key || '';
+      state.profileTitleModalOriginKey = selectedTitleDraftEntry?.key || '';
+      state.profileTitleSearch = '';
+      state.profileTitleOwnershipFilter = 'ALL';
+      state.profileTitleCategoryFilter = 'ALL';
+      state.profileTitlePickerOpen = true;
       render();
     };
-  });
+  }
+  const clearTitlePickerBtn = document.getElementById('clearTitlePickerBtn');
+  if (clearTitlePickerBtn) {
+    clearTitlePickerBtn.onclick = () => {
+      state.profileTitleDraftKey = '';
+      render();
+    };
+  }
+  const openSelectedTitleInfoBtn = document.getElementById('openSelectedTitleInfoBtn');
+  if (openSelectedTitleInfoBtn) {
+    openSelectedTitleInfoBtn.onclick = () => {
+      if (!selectedTitleDraftEntry?.key) return;
+      state.titleInfoModalKey = selectedTitleDraftEntry.key;
+      render();
+    };
+  }
   const togglePinBtn = document.getElementById('togglePinBtn');
   if (togglePinBtn) {
     togglePinBtn.onclick = () => {
@@ -5409,6 +5602,98 @@ function renderProfile() {
       render();
     };
   });
+  const titlePickerModal = document.getElementById('titlePickerModal');
+  if (titlePickerModal) {
+    titlePickerModal.onclick = () => {
+      state.profileTitlePickerOpen = false;
+      state.profileTitleDraftKey = state.profileTitleModalOriginKey || state.profileTitleDraftKey || '';
+      state.profileTitleModalOriginKey = '';
+      state.profileTitleSearch = '';
+      state.profileTitleOwnershipFilter = 'ALL';
+      state.profileTitleCategoryFilter = 'ALL';
+      render();
+    };
+  }
+  const titlePickerPanel = app.querySelector('.title-picker-modal');
+  if (titlePickerPanel) {
+    titlePickerPanel.onclick = (event) => event.stopPropagation();
+  }
+  const closeTitlePickerBtn = document.getElementById('closeTitlePickerBtn');
+  if (closeTitlePickerBtn) {
+    closeTitlePickerBtn.onclick = () => {
+      state.profileTitlePickerOpen = false;
+      state.profileTitleDraftKey = state.profileTitleModalOriginKey || state.profileTitleDraftKey || '';
+      state.profileTitleModalOriginKey = '';
+      state.profileTitleSearch = '';
+      state.profileTitleOwnershipFilter = 'ALL';
+      state.profileTitleCategoryFilter = 'ALL';
+      render();
+    };
+  }
+  const cancelTitlePickerBtn = document.getElementById('cancelTitlePickerBtn');
+  if (cancelTitlePickerBtn) {
+    cancelTitlePickerBtn.onclick = () => {
+      state.profileTitlePickerOpen = false;
+      state.profileTitleDraftKey = state.profileTitleModalOriginKey || state.profileTitleDraftKey || '';
+      state.profileTitleModalOriginKey = '';
+      state.profileTitleSearch = '';
+      state.profileTitleOwnershipFilter = 'ALL';
+      state.profileTitleCategoryFilter = 'ALL';
+      render();
+    };
+  }
+  const saveTitlePickerBtn = document.getElementById('saveTitlePickerBtn');
+  if (saveTitlePickerBtn) {
+    saveTitlePickerBtn.onclick = () => {
+      state.profileTitlePickerOpen = false;
+      state.profileTitleModalOriginKey = '';
+      state.profileTitleSearch = '';
+      state.profileTitleOwnershipFilter = 'ALL';
+      state.profileTitleCategoryFilter = 'ALL';
+      render();
+    };
+  }
+  app.querySelectorAll('[data-title-picker-select]').forEach((btn) => {
+    btn.onclick = () => {
+      const key = String(btn.dataset.titlePickerSelect || '').trim().toUpperCase();
+      if (!key) {
+        state.profileTitleDraftKey = '';
+        render();
+        return;
+      }
+      const entry = titleCatalog.find((title) => title.key === key);
+      if (!entry) return;
+      if (!entry.unlocked) {
+        state.titleInfoModalKey = entry.key;
+        pushToast(entry.requirementText || 'Title is locked.');
+        render();
+        return;
+      }
+      state.profileTitleDraftKey = key;
+      render();
+    };
+  });
+  const titlePickerSearchInput = document.getElementById('titlePickerSearchInput');
+  if (titlePickerSearchInput) {
+    titlePickerSearchInput.addEventListener('input', (event) => {
+      state.profileTitleSearch = String(event.target.value || '');
+      render();
+    });
+  }
+  const titlePickerOwnershipFilter = document.getElementById('titlePickerOwnershipFilter');
+  if (titlePickerOwnershipFilter) {
+    titlePickerOwnershipFilter.onchange = (event) => {
+      state.profileTitleOwnershipFilter = normalizeTitleOwnershipFilter(event.target.value);
+      render();
+    };
+  }
+  const titlePickerCategoryFilter = document.getElementById('titlePickerCategoryFilter');
+  if (titlePickerCategoryFilter) {
+    titlePickerCategoryFilter.onchange = (event) => {
+      state.profileTitleCategoryFilter = normalizeTitleCategoryFilter(event.target.value, titleCategories);
+      render();
+    };
+  }
   const titleInfoModal = document.getElementById('titleInfoModal');
   if (titleInfoModal) {
     titleInfoModal.onclick = () => {
