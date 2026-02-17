@@ -2522,6 +2522,23 @@ function connectSocket() {
     state.currentMatch.chat = Array.isArray(payload.chat) ? payload.chat : state.currentMatch.chat || [];
     render();
   });
+  state.socket.on('match:betUpdated', (payload = {}) => {
+    if (!state.currentMatch || payload.matchId !== state.currentMatch.id) return;
+    const pid = payload.playerId;
+    const handIndex = Math.max(0, Math.floor(Number(payload.handIndex) || 0));
+    const newBet = Math.max(0, Math.floor(Number(payload.newBet) || 0));
+    const previousBet = Math.max(0, Math.floor(Number(payload.previousBet) || 0));
+    const hand = state.currentMatch.players?.[pid]?.hands?.[handIndex];
+    if (hand) {
+      hand.bet = newBet;
+      hand.doubleCount = Math.max(hand.doubleCount || 0, Math.floor(Number(payload.doubleCount) || 0));
+      hand.doubled = hand.doubleCount > 0;
+    }
+    if (pid && state.me?.id && pid !== state.me.id && newBet > previousBet) {
+      pushToast(`${playerName(pid)} doubled: ${previousBet.toLocaleString()} → ${newBet.toLocaleString()}.`);
+    }
+    render();
+  });
   state.socket.on('match:state', (match) => {
     const previousMatch = state.currentMatch;
     const previousRound = state.currentMatch?.roundNumber || 0;
@@ -3035,18 +3052,26 @@ function isTypingTarget(target) {
   return tag === 'input' || tag === 'textarea' || target.isContentEditable;
 }
 
-function isTenTenPair(hand) {
-  return Boolean(hand?.cards?.length === 2 && hand.cards[0]?.rank === '10' && hand.cards[1]?.rank === '10');
+function isTenValueRank(rank) {
+  return rank === '10' || rank === 'J' || rank === 'Q' || rank === 'K';
 }
 
-function handCanSplit(hand, handCount = 0, maxHands = 4, splitTensEventActive = isSplitTensEventActiveClient()) {
+function isTenValuePair(hand) {
+  return Boolean(
+    hand?.cards?.length === 2 &&
+    isTenValueRank(hand.cards[0]?.rank) &&
+    isTenValueRank(hand.cards[1]?.rank)
+  );
+}
+
+function handCanSplit(hand, handCount = 0, maxHands = 4) {
   if (!hand) return false;
   if ((hand.doubleCount || 0) > 0) return false;
   if (hand.cards.length !== 2) return false;
   if ((hand.splitDepth || 0) >= 3) return false;
   if (handCount >= maxHands) return false;
-  if (!hand.cards[0].rank || !hand.cards[1].rank || hand.cards[0].rank !== hand.cards[1].rank) return false;
-  if (isTenTenPair(hand) && !splitTensEventActive) return false;
+  const sameRank = hand.cards[0]?.rank && hand.cards[0].rank === hand.cards[1]?.rank;
+  if (!sameRank && !isTenValuePair(hand)) return false;
   return true;
 }
 
@@ -5182,7 +5207,7 @@ function renderHome() {
                 <div class="home-active-events-copy">
                   <strong>${splitTensEvent.event?.title || 'Split Tens Event'}</strong>
                   <div class="muted">${splitTensEvent.event?.description || 'For the next 24 hours, splitting 10s is allowed.'}</div>
-                  <div class="muted">Rule change: Splitting 10s enabled (10/10 pair).</div>
+                  <div class="muted">Rule change: Split any two 10-value cards (10/J/Q/K).</div>
                 </div>
                 <div class="home-active-events-meta">
                   <div class="split-tens-event-countdown" id="splitTensCountdownHome">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</div>
@@ -5300,7 +5325,7 @@ function renderHome() {
               </div>
               <p class="muted">For the next 24 hours, splitting 10s is allowed.</p>
               <ul class="rules-list split-tens-event-list">
-                <li><strong>Rule change:</strong> 10/10 can be split.</li>
+                <li><strong>Rule change:</strong> Any two 10-value cards (10/J/Q/K) can be split.</li>
                 <li><strong>Ends at:</strong> ${formatEventEndsAtLocal(splitTensEvent.event?.endsAt)}</li>
                 <li><strong id="splitTensCountdownModal">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</strong></li>
               </ul>
@@ -6954,7 +6979,7 @@ function renderRules() {
               <li>Hit, stand, double, split, and surrender are available when legal.</li>
               <li>Surrender forfeits 75% of that hand bet.</li>
               <li>Split and double outcomes are tracked as separate hand results.</li>
-              <li>Splitting 10/10 is enabled only during active limited-time events (shown on Home).</li>
+              <li>You can split any two 10-value cards (10/J/Q/K), including mixed face combinations.</li>
             </ul>
           </article>
           <article>
@@ -7272,13 +7297,10 @@ function renderMatch() {
   const effectiveBet = hasBetDraft ? draftBet : sanitizeInt(state.currentBet);
   const isBetValid = Number.isInteger(effectiveBet) && effectiveBet >= minBet && effectiveBet <= maxBet;
   const opponentThinking = Boolean(!canAct && !waitingPressure && isBotOpponent && match.phase === 'ACTION_TURN' && match.currentTurn === oppId);
-  const splitTensEventActive = isSplitTensEventActiveClient();
-  const splitLegalForHand = handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4, splitTensEventActive);
-  const splitTensBlocked = Boolean(canAct && isTenTenPair(activeHand) && !splitTensEventActive);
+  const splitLegalForHand = handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4);
   const hitBlockedAfterDouble = Boolean(canAct && (activeHand?.doubleCount || 0) >= 1);
   const doubleModeActive = hitBlockedAfterDouble;
   const doubleLegalForHand = Boolean(canAct && handCanDouble(activeHand, match.maxDoublesPerHand || 1));
-  const splitTensActiveHint = Boolean(canAct && isTenTenPair(activeHand) && splitTensEventActive);
   const actionHint = canAct
     ? 'Choose an action for your active hand.'
     : waitingPressure
@@ -7288,9 +7310,7 @@ function renderMatch() {
         : 'Waiting for next turn.';
   const splitButtonTitle = splitLegalForHand
     ? 'Split pair into two hands'
-    : splitTensBlocked
-      ? 'Splitting 10s is available during limited-time events.'
-      : 'Split requires pair (max 4 hands)';
+    : 'Split requires a pair or any two 10-value cards (10/J/Q/K)';
   const hitButtonTitle = canAct
     ? (hitBlockedAfterDouble ? 'Hit is unavailable after a double on this hand.' : 'Draw one card')
     : actionHint;
@@ -7503,8 +7523,6 @@ function renderMatch() {
                     </div>
                   </div>
                   <div class="muted action-hint">${actionHint}</div>
-                  ${splitTensActiveHint ? '<div class="muted split-tens-hint split-tens-hint--active">Event rule active: 10/10 split enabled.</div>' : ''}
-                  ${splitTensBlocked ? '<div class="muted split-tens-hint">Splitting 10s is available during limited-time events.</div>' : ''}
                   ${
                     isPvpMatch
                       ? `<div class="emote-dock ${state.emotePickerOpen ? 'is-open' : ''}">

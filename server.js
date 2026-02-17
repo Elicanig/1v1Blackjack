@@ -1401,8 +1401,16 @@ function isSplitTensEventActive(context = null) {
   return splitTensEventActiveAt(nowMs);
 }
 
-function isTenTenPair(hand) {
-  return Boolean(hand?.cards?.length === 2 && hand.cards[0]?.rank === '10' && hand.cards[1]?.rank === '10');
+function isTenValueRank(rank) {
+  return rank === '10' || rank === 'J' || rank === 'Q' || rank === 'K';
+}
+
+function isTenValuePair(hand) {
+  return Boolean(
+    hand?.cards?.length === 2 &&
+    isTenValueRank(hand.cards[0]?.rank) &&
+    isTenValueRank(hand.cards[1]?.rank)
+  );
 }
 
 function deployCommitId() {
@@ -3951,6 +3959,7 @@ function newHand(cards, hidden, bet = BASE_BET, splitDepth = 0) {
     bust: false,
     doubled: false,
     doubleCount: 0,
+    actionHistory: [],
     wasSplitHand: splitDepth > 0,
     naturalBlackjack: false
   };
@@ -4164,6 +4173,32 @@ function pushMatchState(match) {
     const socketId = activeSessions.get(pid);
     if (!socketId) continue;
     io.to(socketId).emit('match:state', buildClientState(match, pid));
+  }
+}
+
+function emitMatchBetUpdated(match, {
+  playerId,
+  handIndex = 0,
+  previousBet = 0,
+  newBet = 0,
+  reason = 'double',
+  doubleCount = 0
+} = {}) {
+  if (!match || !Array.isArray(match.playerIds)) return;
+  const payload = {
+    matchId: match.id,
+    playerId,
+    handIndex: Math.max(0, Math.floor(Number(handIndex) || 0)),
+    previousBet: Math.max(0, Math.floor(Number(previousBet) || 0)),
+    newBet: Math.max(0, Math.floor(Number(newBet) || 0)),
+    reason,
+    doubleCount: Math.max(0, Math.floor(Number(doubleCount) || 0)),
+    ts: nowIso()
+  };
+  for (const pid of match.playerIds) {
+    const socketId = activeSessions.get(pid);
+    if (!socketId) continue;
+    io.to(socketId).emit('match:betUpdated', payload);
   }
 }
 
@@ -4905,17 +4940,22 @@ function resolveRound(match) {
     } else {
       const result = compareHands(handA, handB);
       const pot = Math.min(handA.bet, handB.bet);
+      const singleBust = Boolean(handA?.bust) !== Boolean(handB?.bust);
       const handANatural = Boolean(handA.naturalBlackjack);
       const handBNatural = Boolean(handB.naturalBlackjack);
       if (result > 0) {
-        const amount = handANatural && !handBNatural ? Math.floor(pot * 1.5) : pot;
+        const amount = singleBust && handB?.bust
+          ? Math.max(0, Math.floor(Number(handB?.bet) || 0))
+          : (handANatural && !handBNatural ? Math.floor(pot * 1.5) : pot);
         chipsDelta[aId] += amount;
         chipsDelta[bId] -= amount;
         handA.outcome = mergeHandOutcome(handA.outcome, 'win');
         handB.outcome = mergeHandOutcome(handB.outcome, 'loss');
         outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
       } else if (result < 0) {
-        const amount = handBNatural && !handANatural ? Math.floor(pot * 1.5) : pot;
+        const amount = singleBust && handA?.bust
+          ? Math.max(0, Math.floor(Number(handA?.bet) || 0))
+          : (handBNatural && !handANatural ? Math.floor(pot * 1.5) : pot);
         chipsDelta[aId] -= amount;
         chipsDelta[bId] += amount;
         handA.outcome = mergeHandOutcome(handA.outcome, 'loss');
@@ -5529,8 +5569,8 @@ function canSplit(hand, playerRoundState = null, context = null) {
   if (playerRoundState?.hands?.length >= RULES.MAX_HANDS_PER_PLAYER) return false;
   if (hand.cards.length !== 2) return false;
   if (hand.splitDepth >= RULES.MAX_SPLITS) return false;
-  if (hand.cards[0].rank !== hand.cards[1].rank) return false;
-  if (isTenTenPair(hand) && !isSplitTensEventActive(context)) return false;
+  const sameRank = hand.cards[0]?.rank && hand.cards[0].rank === hand.cards[1]?.rank;
+  if (!sameRank && !isTenValuePair(hand)) return false;
   return true;
 }
 
@@ -6085,9 +6125,28 @@ function applyAction(match, playerId, action) {
     if (!canAffordIncrement(match, playerId, delta)) return { error: 'Insufficient chips to double' };
     if (hand.bet * 2 > betLimits.max) return { error: `Bet cannot exceed ${betLimits.max} for this table` };
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
+    const previousBet = Math.max(0, Math.floor(Number(hand.bet) || 0));
     hand.bet *= 2;
     hand.doubleCount = (hand.doubleCount || 0) + 1;
     hand.doubled = hand.doubleCount > 0;
+    if (!Array.isArray(hand.actionHistory)) hand.actionHistory = [];
+    hand.actionHistory.push({
+      type: 'double',
+      ts: nowIso(),
+      handIndex: state.activeHandIndex,
+      betBefore: previousBet,
+      betAfter: Math.max(0, Math.floor(Number(hand.bet) || 0))
+    });
+    emitMatchBetUpdated(match, {
+      playerId,
+      handIndex: state.activeHandIndex,
+      previousBet,
+      newBet: hand.bet,
+      reason: 'double',
+      doubleCount: hand.doubleCount
+    });
+    // Ensure both clients receive and render the updated wager before draw/bust settlement.
+    pushMatchState(match);
     if (isRealMatch(match) && !isBotPlayer(playerId)) {
       const user = getUserById(playerId);
       if (user) {
@@ -6128,7 +6187,6 @@ function applyAction(match, playerId, action) {
   }
 
   if (normalizedAction === 'split') {
-    if (isTenTenPair(hand) && !isSplitTensEventActive(match)) return { error: 'Split tens event inactive' };
     if (!canSplit(hand, state, match)) return { error: 'Split unavailable' };
     if (!canAffordIncrement(match, playerId, hand.bet)) return { error: 'Insufficient chips to split' };
     recordHumanActionForBotLearning(match, playerId, normalizedAction);

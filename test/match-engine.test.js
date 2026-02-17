@@ -201,14 +201,16 @@ test('10 canSplit false when max split depth reached', () => {
   assert.equal(canSplit(newHand([card('8'), card('8', 'D')], [false, true], 5, RULES.MAX_SPLITS)), false);
 });
 
-test('10b canSplit blocks 10/10 when split tens event is inactive', () => {
+test('10b canSplit allows 10/10 regardless of split event state', () => {
   const hand = newHand([card('10'), card('10', 'D')], [false, true], 5, 0);
-  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: false }), false);
+  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: false }), true);
+  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: true }), true);
 });
 
-test('10c canSplit allows 10/10 when split tens event is active', () => {
-  const hand = newHand([card('10'), card('10', 'D')], [false, true], 5, 0);
-  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: true }), true);
+test('10c canSplit allows mixed 10-value pairs (10/J/Q/K)', () => {
+  assert.equal(canSplit(newHand([card('10'), card('J', 'D')], [false, true], 5, 0)), true);
+  assert.equal(canSplit(newHand([card('Q'), card('K', 'D')], [false, true], 5, 0)), true);
+  assert.equal(canSplit(newHand([card('J'), card('Q', 'D')], [false, true], 5, 0)), true);
 });
 
 test('11 applyAction rejects when not in action phase', () => {
@@ -308,7 +310,7 @@ test('21 split disallowed after max depth', () => {
   assert.equal(res.error, 'Split unavailable');
 });
 
-test('21b split 10/10 is rejected when split tens event is inactive', () => {
+test('21b split 10/10 is allowed regardless of split tens event state', () => {
   const m = makeMatch({
     p1Hand: newHand([card('10'), card('10', 'D')], [false, true], 5, 0),
     p2Hand: newHand([card('9'), card('7', 'S')], [false, true], 5, 0),
@@ -316,39 +318,35 @@ test('21b split 10/10 is rejected when split tens event is inactive', () => {
   });
   m.splitTensEventActiveOverride = false;
   const res = applyAction(m, 'p1', 'split');
-  assert.equal(res.error, 'Split tens event inactive');
+  assert.equal(res.ok, true);
+  assert.equal(m.round.players.p1.hands.length, 2);
 });
 
-test('21c split 10/10 is allowed when split tens event is active', () => {
+test('21c split mixed 10-value cards is allowed (10 + Q)', () => {
   const m = makeMatch({
-    p1Hand: newHand([card('10'), card('10', 'D')], [false, true], 5, 0),
+    p1Hand: newHand([card('10'), card('Q', 'D')], [false, true], 5, 0),
     p2Hand: newHand([card('9'), card('7', 'S')], [false, true], 5, 0),
     deck: [card('4', 'S'), card('3', 'C')]
   });
-  m.splitTensEventActiveOverride = true;
   const res = applyAction(m, 'p1', 'split');
   assert.equal(res.ok, true);
   assert.equal(m.round.players.p1.hands.length, 2);
   assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
 });
 
-test('21d non-10 pairs remain splittable regardless of split tens event state', () => {
+test('21d non-10 pairs remain splittable', () => {
   const hand = newHand([card('8'), card('8', 'D')], [false, true], 5, 0);
-  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: false }), true);
-  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: true }), true);
+  assert.equal(canSplit(hand), true);
 });
 
-test('21e split 10/10 enforcement is checked at action time (event can expire mid-match)', () => {
+test('21e split rejects non-pairs that are not both 10-value cards', () => {
   const m = makeMatch({
-    p1Hand: newHand([card('10'), card('10', 'D')], [false, true], 5, 0),
+    p1Hand: newHand([card('10'), card('9', 'D')], [false, true], 5, 0),
     p2Hand: newHand([card('9'), card('7', 'S')], [false, true], 5, 0),
     deck: [card('4', 'S'), card('3', 'C')]
   });
-  m.splitTensEventActiveOverride = true;
-  assert.equal(canSplit(m.round.players.p1.hands[0], m.round.players.p1, m), true);
-  m.splitTensEventActiveOverride = false;
   const res = applyAction(m, 'p1', 'split');
-  assert.equal(res.error, 'Split tens event inactive');
+  assert.equal(res.error, 'Split unavailable');
 });
 
 test('22 pressure decision match increases opponent bet on affected hand', () => {
@@ -1080,6 +1078,37 @@ test('41m re-double works up to cap and settlement uses final bet', () => {
   assert.equal(applyAction(m, 'p2', 'stand').ok, true);
   assert.equal(m.phase, PHASES.REVEAL);
   assert.equal(m.round.resultByPlayer.p1.deltaChips, 40);
+});
+
+test('41m2 double-then-bust sync keeps updated bet and settles using final doubled amount', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('9'), card('2')], [false, true], 50, 0),
+    p2Hand: newHand([card('10'), card('7')], [false, true], 50, 0),
+    deck: [card('K', 'D'), card('2', 'H')]
+  });
+  m.round.baseBet = 50;
+  m.round.postedBetByPlayer = { p1: 50, p2: 50 };
+
+  const d1 = applyAction(m, 'p1', 'double');
+  assert.equal(d1.ok, true);
+  assert.equal(m.round.players.p1.hands[0].bet, 100);
+  assert.equal(m.round.players.p1.hands[0].doubleCount, 1);
+  assert.equal(applyPressureDecision(m, 'p2', 'match').ok, true);
+  assert.equal(m.round.players.p2.hands[0].bet, 100);
+  assert.equal(m.round.turnPlayerId, 'p1');
+
+  const d2 = applyAction(m, 'p1', 'double');
+  assert.equal(d2.ok, true);
+  assert.equal(m.round.players.p1.hands[0].bet, 200);
+  assert.equal(m.round.players.p1.hands[0].bust, true);
+  assert.equal(m.round.players.p1.hands[0].locked, true);
+  assert.equal(m.round.players.p1.hands[0].actionHistory?.length >= 2, true);
+  assert.equal(m.round.players.p1.hands[0].actionHistory?.[0]?.betAfter, 100);
+  assert.equal(m.round.players.p1.hands[0].actionHistory?.[1]?.betAfter, 200);
+
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, -200);
+  assert.equal(m.round.resultByPlayer.p2.deltaChips, 200);
 });
 
 test('41ma opponent double pressure match does not block your own legal double', () => {
