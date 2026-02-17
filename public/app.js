@@ -20,6 +20,7 @@ let inviteCountdownTicker = null;
 let matchTurnTicker = null;
 let challengeCountdownTicker = null;
 let quickPlayConnectTimer = null;
+let quickPlayStatusPollTimer = null;
 let botMatchLaunchTimer = null;
 const PERMISSION_ERROR_PATTERNS = [
   /not allowed by the user agent/i,
@@ -87,7 +88,7 @@ const DECK_SKIN_DEFS = Object.freeze([
   { id: 'NEON', name: 'Neon Pulse', description: 'Cyber-glow accents with crisp contrast.', minLevelRequired: 20, token: 'neon', unlockHint: 'Reach level 20.' },
   { id: 'OBSIDIAN', name: 'Obsidian Luxe', description: 'Dark premium face with metallic highlights.', minLevelRequired: 35, token: 'obsidian', unlockHint: 'Reach level 35.' },
   { id: 'AURORA', name: 'Aurora Royale', description: 'Prismatic finish with subtle shimmer.', minLevelRequired: 50, token: 'aurora', unlockHint: 'Reach level 50.' },
-  { id: 'OBSIDIAN_LUXE_II', name: 'Obsidian Luxe II', description: 'Deep black stone, gold inlays, and a low ember glow.', minLevelRequired: 1, token: 'obsidian-luxe-ii', unlockHint: 'Reach a 25-match win streak.' },
+  { id: 'OBSIDIAN_LUXE_II', name: 'Obsidian Luxe II', description: 'Deep black stone, gold inlays, and a low ember glow.', minLevelRequired: 1, token: 'obsidian-luxe-ii', unlockHint: 'Reach a 20-match win streak.' },
   { id: 'AURORA_ROYALE_II', name: 'Aurora Royale II', description: 'Animated aurora gradient with polished royal trim.', minLevelRequired: 1, token: 'aurora-royale-ii', unlockHint: 'Reach 1900 ranked Elo.' },
   { id: 'VOID_PRISM', name: 'Void Prism', description: 'Dark glass finish with shifting spectral highlights.', minLevelRequired: 1, token: 'void-prism', unlockHint: 'Win 120 ranked series.' },
   { id: 'CELESTIAL_IVORY', name: 'Celestial Ivory', description: 'Pearl ivory marble with star-gold filigree.', minLevelRequired: 1, token: 'celestial-ivory', unlockHint: 'Deal 300 natural blackjacks.' }
@@ -1302,12 +1303,71 @@ function clearQuickPlayConnectTimer() {
   }
 }
 
+function quickPlayClientLog(event, payload = {}) {
+  if (typeof console === 'undefined') return;
+  console.info(`[quickplay-client] ${event}`, payload);
+}
+
+function clearQuickPlayStatusPoll() {
+  if (quickPlayStatusPollTimer) {
+    clearInterval(quickPlayStatusPollTimer);
+    quickPlayStatusPollTimer = null;
+  }
+}
+
+function startQuickPlayStatusPoll() {
+  clearQuickPlayStatusPoll();
+  quickPlayStatusPollTimer = setInterval(async () => {
+    if (!quickPlayIsActive()) {
+      clearQuickPlayStatusPoll();
+      return;
+    }
+    try {
+      const status = await api('/api/matchmaking/status', { method: 'GET' });
+      quickPlayClientLog('STATUS_POLL', {
+        status: status?.status || null,
+        queuePosition: status?.queuePosition || null,
+        bucket: status?.bucket || null
+      });
+      if (status?.status === 'found') {
+        beginQuickPlayConnectedState(status);
+        render();
+        return;
+      }
+      if (status?.status === 'searching') {
+        const bucket =
+          normalizeQuickPlayBucketValue(status?.bucket) ||
+          normalizeQuickPlayBucketValue(state.quickPlay.bucket) ||
+          normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) ||
+          250;
+        state.quickPlay.status = 'searching';
+        state.quickPlay.bucket = bucket;
+        state.quickPlay.selectedBucket = bucket;
+        state.quickPlay.queuePosition = Number.isFinite(Number(status?.queuePosition))
+          ? Number(status.queuePosition)
+          : state.quickPlay.queuePosition;
+        state.quickPlay.queuedAt = status?.queuedAt || state.quickPlay.queuedAt;
+        return;
+      }
+      if (state.quickPlay.status === 'searching') {
+        quickPlayClientLog('QUEUE_STOPPED', { reason: 'status_idle' });
+        resetQuickPlayState();
+        pushToast('Quick Play queue ended. Please try again.');
+        render();
+      }
+    } catch (error) {
+      quickPlayClientLog('STATUS_POLL_ERROR', { error: String(error?.message || error || 'unknown') });
+    }
+  }, 2200);
+}
+
 function quickPlayIsActive() {
   return state.quickPlay.status === 'searching' || state.quickPlay.status === 'connected';
 }
 
 function resetQuickPlayState({ clearTimer = true } = {}) {
   if (clearTimer) clearQuickPlayConnectTimer();
+  clearQuickPlayStatusPoll();
   const selectedBucket = normalizeQuickPlayBucketValue(state.quickPlay?.selectedBucket) || 250;
   state.quickPlay = {
     status: 'idle',
@@ -1388,6 +1448,12 @@ function beginQuickPlayConnectedState(payload = {}) {
   state.quickPlay.opponentName = nextOpponentName;
   state.quickPlay.queuePosition = null;
   if (incomingMatch) state.quickPlay.pendingMatch = incomingMatch;
+  clearQuickPlayStatusPoll();
+  quickPlayClientLog('MATCH_FOUND', {
+    matchId: incomingMatchId,
+    opponentName: nextOpponentName,
+    bucket: nextBucket
+  });
   if (quickPlayConnectTimer) return;
   quickPlayConnectTimer = setTimeout(() => {
     finalizeQuickPlayConnectedState();
@@ -2139,16 +2205,19 @@ function connectSocket() {
   state.socket = io({ auth: { token: state.token } });
 
   state.socket.on('connect', () => {
+    quickPlayClientLog('SOCKET_CONNECTED', { socketId: state.socket?.id || '' });
     if (state.quickPlay.status === 'searching') {
       const reconnectBucket =
         normalizeQuickPlayBucketValue(state.quickPlay.bucket) ||
         normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) ||
         250;
+      quickPlayClientLog('QUEUE_RECONNECT_CHECK', { bucket: reconnectBucket });
       api('/api/matchmaking/join', {
         method: 'POST',
         body: JSON.stringify({ bucket: reconnectBucket })
       })
         .then((data) => {
+          quickPlayClientLog('QUEUE_RECONNECT_RESPONSE', { status: data?.status || null, bucket: data?.bucket || reconnectBucket });
           if (data?.status === 'found') {
             beginQuickPlayConnectedState(data);
           } else {
@@ -2157,10 +2226,12 @@ function connectSocket() {
             const responseBucket = normalizeQuickPlayBucketValue(data?.bucket) || reconnectBucket;
             state.quickPlay.bucket = responseBucket;
             state.quickPlay.selectedBucket = responseBucket;
+            startQuickPlayStatusPoll();
           }
           render();
         })
-        .catch(() => {
+        .catch((error) => {
+          quickPlayClientLog('QUEUE_RECONNECT_ERROR', { error: String(error?.message || error || 'unknown') });
           resetQuickPlayState();
           pushToast('Quick Play stopped after reconnect issue.');
           render();
@@ -2193,6 +2264,7 @@ function connectSocket() {
     setError(e?.message || 'Connection error');
   });
   state.socket.on('disconnect', () => {
+    quickPlayClientLog('SOCKET_DISCONNECTED');
     if (state.quickPlay.status === 'searching') {
       resetQuickPlayState();
       pushToast('Quick Play cancelled: connection lost.');
@@ -2216,21 +2288,34 @@ function connectSocket() {
     state.quickPlay.selectedBucket = bucket;
     state.quickPlay.queuePosition = Number.isFinite(Number(payload.queuePosition)) ? Number(payload.queuePosition) : state.quickPlay.queuePosition;
     if (payload?.queuedAt) state.quickPlay.queuedAt = payload.queuedAt;
+    startQuickPlayStatusPoll();
+    quickPlayClientLog('QUEUE_SEARCHING', {
+      bucket,
+      queuePosition: state.quickPlay.queuePosition,
+      queuedAt: state.quickPlay.queuedAt
+    });
     render();
   });
   state.socket.on('matchmaking:found', (payload = {}) => {
+    quickPlayClientLog('QUEUE_FOUND_EVENT', { matchId: payload?.matchId || payload?.match?.id || null });
     beginQuickPlayConnectedState(payload);
     render();
   });
-  state.socket.on('matchmaking:cancelled', () => {
+  state.socket.on('matchmaking:cancelled', (payload = {}) => {
     if (!quickPlayIsActive()) return;
+    quickPlayClientLog('QUEUE_CANCELLED_EVENT', payload || {});
     resetQuickPlayState();
+    pushToast('Quick Play queue cancelled.');
     render();
   });
   state.socket.on('matchmaking:error', ({ error }) => {
     if (!quickPlayIsActive()) return;
+    quickPlayClientLog('QUEUE_ERROR_EVENT', { error: error || '' });
     resetQuickPlayState();
-    if (error) setError(error);
+    if (error) {
+      setError(error);
+      pushToast(`Could not queue Quick Play: ${error}`);
+    }
   });
   state.socket.on('ranked:found', (payload = {}) => {
     beginRankedConnectedState(payload);
@@ -2354,7 +2439,21 @@ function connectSocket() {
     render();
   });
   state.socket.on('match:error', ({ error }) => setError(error));
-  state.socket.on('round:result', ({ matchId, roundNumber, outcome, deltaChips, title, previousBankroll, newBankroll, isPractice, rankedSeries, seriesResult }) => {
+  state.socket.on('round:result', ({
+    matchId,
+    roundNumber,
+    outcome,
+    deltaChips,
+    xpDelta,
+    xpBetAmount,
+    xpBetMultiplier,
+    title,
+    previousBankroll,
+    newBankroll,
+    isPractice,
+    rankedSeries,
+    seriesResult
+  }) => {
     // One-shot inline result banner trigger keyed by match+round.
     const key = `${matchId}:${roundNumber}`;
     if (state.lastRoundResultKey === key) return;
@@ -2366,6 +2465,9 @@ function connectSocket() {
       outcome,
       title: title || (outcome === 'win' ? 'You Win' : outcome === 'lose' ? 'You Lose' : 'Push'),
       deltaChips: deltaChips || 0,
+      xpDelta: Math.max(0, Math.floor(Number(xpDelta) || 0)),
+      xpBetAmount: Math.max(0, Math.floor(Number(xpBetAmount) || 0)),
+      xpBetMultiplier: Math.max(1, Number(xpBetMultiplier) || 1),
       isPractice: Boolean(isPractice),
       rankedSeries: rankedSeries || null,
       seriesResult: seriesResult || null
@@ -2505,6 +2607,28 @@ async function loadMe() {
     await loadVersion();
     await loadLeaderboard({ silent: true });
     await loadRankedOverview({ silent: true });
+    if (!state.currentMatch) {
+      try {
+        const quickStatus = await api('/api/matchmaking/status', { method: 'GET' });
+        if (quickStatus?.status === 'found') {
+          beginQuickPlayConnectedState(quickStatus);
+        } else if (quickStatus?.status === 'searching') {
+          const bucket = normalizeQuickPlayBucketValue(quickStatus.bucket) || 250;
+          state.quickPlay.status = 'searching';
+          state.quickPlay.bucket = bucket;
+          state.quickPlay.selectedBucket = bucket;
+          state.quickPlay.queuePosition = Number.isFinite(Number(quickStatus?.queuePosition))
+            ? Number(quickStatus.queuePosition)
+            : null;
+          state.quickPlay.queuedAt = quickStatus?.queuedAt || null;
+          startQuickPlayStatusPoll();
+        } else if (state.quickPlay.status === 'searching') {
+          resetQuickPlayState();
+        }
+      } catch (error) {
+        quickPlayClientLog('STATUS_BOOTSTRAP_ERROR', { error: String(error?.message || error || 'unknown') });
+      }
+    }
     render();
   } catch (e) {
     const msg = String(e?.message || '');
@@ -2747,7 +2871,7 @@ function canTriggerAction(action) {
   if (!hand || hand.locked || hand.bust || hand.surrendered || hand.stood) return false;
   if (action === 'hit' && (hand.doubleCount || 0) >= 1) return false;
   if (action === 'split' && !handCanSplit(hand, myState?.hands?.length || 0, match.maxHandsPerPlayer || 4)) return false;
-  if (action === 'double' && (hand.doubleCount || 0) >= (match.maxDoublesPerHand || 1)) return false;
+  if (action === 'double' && !handCanDouble(hand, match.maxDoublesPerHand || 1)) return false;
   if (action === 'surrender' && (hand.actionCount || 0) > 0) return false;
   return true;
 }
@@ -2780,6 +2904,15 @@ function handCanSplit(hand, handCount = 0, maxHands = 4, splitTensEventActive = 
   if (handCount >= maxHands) return false;
   if (!hand.cards[0].rank || !hand.cards[1].rank || hand.cards[0].rank !== hand.cards[1].rank) return false;
   if (isTenTenPair(hand) && !splitTensEventActive) return false;
+  return true;
+}
+
+function handCanDouble(hand, maxDoubles = 1) {
+  if (!hand || hand.locked || hand.stood || hand.bust || hand.surrendered) return false;
+  if ((hand.doubleCount || 0) >= maxDoubles) return false;
+  if ((hand.hitCount || 0) > 0) return false;
+  const hasExistingDouble = (hand.doubleCount || 0) > 0;
+  if (!hasExistingDouble && (hand.actionCount || 0) > 0) return false;
   return true;
 }
 
@@ -3608,6 +3741,8 @@ async function joinQuickPlayQueue({ bucket = null, silent = false } = {}) {
     normalizeQuickPlayBucketValue(state.quickPlay.selectedBucket) ||
     250;
   clearQuickPlayConnectTimer();
+  clearQuickPlayStatusPoll();
+  quickPlayClientLog('QUEUE_REQUEST_START', { bucket: selectedBucket });
   state.quickPlay = {
     status: 'searching',
     bucket: selectedBucket,
@@ -3626,6 +3761,11 @@ async function joinQuickPlayQueue({ bucket = null, silent = false } = {}) {
       method: 'POST',
       body: JSON.stringify({ bucket: selectedBucket })
     });
+    quickPlayClientLog('QUEUE_REQUEST_RESPONSE', {
+      status: data?.status || null,
+      queuePosition: data?.queuePosition || null,
+      bucket: data?.bucket || selectedBucket
+    });
     if (data?.status === 'found') {
       beginQuickPlayConnectedState(data);
       render();
@@ -3637,9 +3777,11 @@ async function joinQuickPlayQueue({ bucket = null, silent = false } = {}) {
     state.quickPlay.selectedBucket = responseBucket;
     state.quickPlay.queuePosition = Number.isFinite(Number(data?.queuePosition)) ? Number(data.queuePosition) : null;
     state.quickPlay.queuedAt = data?.queuedAt || state.quickPlay.queuedAt;
+    startQuickPlayStatusPoll();
     if (!silent) setStatus(`Searching Quick Play $${formatQuickPlayBucket(responseBucket)} queue...`);
     render();
   } catch (e) {
+    quickPlayClientLog('QUEUE_REQUEST_ERROR', { error: String(e?.message || e || 'unknown') });
     resetQuickPlayState();
     setError(e.message);
   }
@@ -3651,8 +3793,10 @@ async function cancelQuickPlayQueue({ silent = false } = {}) {
   const bucket = state.quickPlay.bucket;
   try {
     await api('/api/matchmaking/cancel', { method: 'POST' });
+    quickPlayClientLog('QUEUE_CANCELLED', { bucket, source: 'ui' });
   } catch {
     // queue is best-effort for client cancellation
+    quickPlayClientLog('QUEUE_CANCEL_ERROR', { bucket, source: 'ui' });
   }
   resetQuickPlayState();
   if (!silent) {
@@ -4172,6 +4316,8 @@ function syncRoundResultModal() {
   }
   const meId = state.me?.id;
   const delta = result.deltaChips || 0;
+  const xpDelta = Math.max(0, Math.floor(Number(result.xpDelta) || 0));
+  const xpMultiplier = Math.max(1, Number(result.xpBetMultiplier) || 1);
   const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
   const bankroll = isOfflineMatchActive()
     ? Math.max(0, Math.floor(Number(match?.players?.[meId]?.bankroll) || 0))
@@ -4209,6 +4355,11 @@ function syncRoundResultModal() {
         <h3 class="result-title">${headline}</h3>
         <div class="muted">${subtitle}</div>
         <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${Math.abs(delta)}</div>
+        ${
+          xpDelta > 0
+            ? `<div class="round-xp-gain">+${xpDelta} XP <span class="muted">(${xpMultiplier.toFixed(2)}x bet)</span></div>`
+            : ''
+        }
         <div class="muted">${result.isPractice ? 'Practice round • No chips won/lost' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
         <div class="result-actions">
           ${
@@ -6923,6 +7074,7 @@ function renderMatch() {
   const splitLegalForHand = handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4, splitTensEventActive);
   const splitTensBlocked = Boolean(canAct && isTenTenPair(activeHand) && !splitTensEventActive);
   const hitBlockedAfterDouble = Boolean(canAct && (activeHand?.doubleCount || 0) >= 1);
+  const doubleLegalForHand = Boolean(canAct && handCanDouble(activeHand, match.maxDoublesPerHand || 1));
   const splitTensActiveHint = Boolean(canAct && isTenTenPair(activeHand) && splitTensEventActive);
   const actionHint = canAct
     ? 'Choose an action for your active hand.'
@@ -7130,7 +7282,7 @@ function renderMatch() {
                     <div class="actions actions-main">
                       <button data-action="hit" title="${hitButtonTitle}" class="primary" ${!canAct || hitBlockedAfterDouble ? 'disabled' : ''}>Hit</button>
                       <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
-                      <button data-action="double" title="${canAct ? 'Double your bet and draw one card (re-double allowed while eligible)' : actionHint}" ${!canAct || (activeHand?.doubleCount || 0) >= (match.maxDoublesPerHand || 1) ? 'disabled' : ''}>Double</button>
+                      <button data-action="double" title="${canAct ? (doubleLegalForHand ? 'Double your bet and draw one card (re-double allowed while eligible)' : 'Double is only available as your first move on this hand (or as a re-double chain).') : actionHint}" ${!doubleLegalForHand ? 'disabled' : ''}>Double</button>
                       <button data-action="split" title="${splitButtonTitle}" ${!canAct || !splitLegalForHand ? 'disabled' : ''}>Split</button>
                       <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender ? 'disabled' : ''}>Surrender</button>
                     </div>
@@ -7149,20 +7301,16 @@ function renderMatch() {
                              state.emotePickerOpen
                                ? `<div class="emote-popover card">
                                     <div class="emote-grid">
-                                      <button data-emote-type="emoji" data-emote-value="🔥" ${emoteCoolingDown ? 'disabled' : ''}>🔥</button>
-                                      <button data-emote-type="emoji" data-emote-value="😎" ${emoteCoolingDown ? 'disabled' : ''}>😎</button>
-                                      <button data-emote-type="emoji" data-emote-value="👏" ${emoteCoolingDown ? 'disabled' : ''}>👏</button>
-                                      <button data-emote-type="emoji" data-emote-value="😅" ${emoteCoolingDown ? 'disabled' : ''}>😅</button>
-                                      <button data-emote-type="emoji" data-emote-value="🤝" ${emoteCoolingDown ? 'disabled' : ''}>🤝</button>
-                                      <button data-emote-type="emoji" data-emote-value="😵‍💫" ${emoteCoolingDown ? 'disabled' : ''}>😵‍💫</button>
+                                      <button data-emote-type="emoji" data-emote-value="😂" ${emoteCoolingDown ? 'disabled' : ''}>😂</button>
+                                      <button data-emote-type="emoji" data-emote-value="😡" ${emoteCoolingDown ? 'disabled' : ''}>😡</button>
+                                      <button data-emote-type="emoji" data-emote-value="😭" ${emoteCoolingDown ? 'disabled' : ''}>😭</button>
+                                      <button data-emote-type="emoji" data-emote-value="👍" ${emoteCoolingDown ? 'disabled' : ''}>👍</button>
                                     </div>
                                     <div class="emote-quips">
-                                      <button data-emote-type="quip" data-emote-value="Nice hand" ${emoteCoolingDown ? 'disabled' : ''}>Nice hand</button>
-                                      <button data-emote-type="quip" data-emote-value="No way" ${emoteCoolingDown ? 'disabled' : ''}>No way</button>
-                                      <button data-emote-type="quip" data-emote-value="Run it" ${emoteCoolingDown ? 'disabled' : ''}>Run it</button>
-                                      <button data-emote-type="quip" data-emote-value="Clutch" ${emoteCoolingDown ? 'disabled' : ''}>Clutch</button>
-                                      <button data-emote-type="quip" data-emote-value="Focus mode" ${emoteCoolingDown ? 'disabled' : ''}>Focus mode</button>
-                                      <button data-emote-type="quip" data-emote-value="GG" ${emoteCoolingDown ? 'disabled' : ''}>GG</button>
+                                      <button data-emote-type="quip" data-emote-value="Bitchmade" ${emoteCoolingDown ? 'disabled' : ''}>Bitchmade</button>
+                                      <button data-emote-type="quip" data-emote-value="Fuck you" ${emoteCoolingDown ? 'disabled' : ''}>Fuck you</button>
+                                      <button data-emote-type="quip" data-emote-value="Skill issue" ${emoteCoolingDown ? 'disabled' : ''}>Skill issue</button>
+                                      <button data-emote-type="quip" data-emote-value="L" ${emoteCoolingDown ? 'disabled' : ''}>L</button>
                                     </div>
                                   </div>`
                                : ''

@@ -108,6 +108,8 @@ const XP_REWARDS = Object.freeze({
   botLoss: 5,
   challenge: 75
 });
+const XP_BET_BASELINE = 100;
+const XP_BET_MULTIPLIER_CAP = 3.2;
 const PROFILE_BORDER_DEFS = Object.freeze([
   { id: 'NONE', name: 'None', minLevelRequired: 1, tier: 'Default', previewToken: 'none' },
   { id: 'BRONZE_TRIM', name: 'Bronze Trim', minLevelRequired: 10, tier: 'Common', previewToken: 'bronze-trim' },
@@ -135,8 +137,8 @@ const DECK_SKIN_DEFS = Object.freeze([
     name: 'Obsidian Luxe II',
     description: 'Deep black stone with gold inlays and ember accents.',
     minLevelRequired: 1,
-    unlockCondition: { type: 'bestMatchWinStreak', threshold: 25 },
-    unlockHint: 'Reach a 25-match win streak.'
+    unlockCondition: { type: 'bestMatchWinStreak', threshold: 20 },
+    unlockHint: 'Reach a 20-match win streak.'
   },
   {
     id: 'AURORA_ROYALE_II',
@@ -1187,6 +1189,12 @@ function logRankedQueueEvent(event, payload = {}) {
   console.log(`[ranked-queue] ${event}`, JSON.stringify(payload));
 }
 
+function logQuickPlayQueueEvent(event, payload = {}) {
+  if (process.env.NODE_ENV === 'test') return;
+  // eslint-disable-next-line no-console
+  console.log(`[quickplay-queue] ${event}`, JSON.stringify(payload));
+}
+
 function logMatchEconomyEvent(event, payload = {}) {
   if (process.env.NODE_ENV === 'test') return;
   // eslint-disable-next-line no-console
@@ -2011,6 +2019,21 @@ function xpStreakBonusMultiplier(user) {
   return 1;
 }
 
+function xpBetMultiplierFromAmount(betAmount) {
+  const bet = Math.max(1, Math.floor(Number(betAmount) || 0));
+  const ratio = bet / XP_BET_BASELINE;
+  const scaled = 0.85 + Math.sqrt(Math.max(0, ratio));
+  return Math.max(0.85, Math.min(XP_BET_MULTIPLIER_CAP, scaled));
+}
+
+function exposureBetForXp(playerRoundState, fallbackBet = BASE_BET) {
+  const safeFallback = Math.max(1, Math.floor(Number(fallbackBet) || BASE_BET));
+  const hands = Array.isArray(playerRoundState?.hands) ? playerRoundState.hands : [];
+  if (!hands.length) return safeFallback;
+  const exposure = hands.reduce((sum, hand) => sum + Math.max(0, Math.floor(Number(hand?.bet) || 0)), 0);
+  return Math.max(safeFallback, exposure);
+}
+
 function levelRewardForLevel(level) {
   const safeLevel = Math.max(1, Math.floor(Number(level) || 1));
   if (safeLevel % 5 !== 0) return 0;
@@ -2394,6 +2417,13 @@ function isUserInActiveMatch(userId) {
   return false;
 }
 
+function activeMatchForUser(userId) {
+  for (const match of matches.values()) {
+    if (match.playerIds.includes(userId)) return match;
+  }
+  return null;
+}
+
 function normalizeQuickPlayBucket(rawBucket) {
   const numeric = Math.floor(Number(rawBucket));
   if (!Number.isFinite(numeric)) return null;
@@ -2522,6 +2552,11 @@ async function processQuickPlayQueue(bucket) {
     const userB = getUserById(second.userId);
     if (!userA || !userB || userA.id === userB.id) continue;
     if (!canJoinQuickPlayBucket(userA, normalizedBucket)) {
+      logQuickPlayQueueEvent('QUEUE_REJECTED', {
+        userId: userA.id,
+        reason: 'insufficient_chips',
+        bucket: normalizedBucket
+      });
       emitToUser(userA.id, 'matchmaking:error', { error: `Need at least ${normalizedBucket} chips for this Quick Play bucket` });
       if (!quickPlayBucketByUser.has(userB.id) && !isUserInActiveMatch(userB.id)) {
         queue.unshift(second);
@@ -2530,6 +2565,11 @@ async function processQuickPlayQueue(bucket) {
       continue;
     }
     if (!canJoinQuickPlayBucket(userB, normalizedBucket)) {
+      logQuickPlayQueueEvent('QUEUE_REJECTED', {
+        userId: userB.id,
+        reason: 'insufficient_chips',
+        bucket: normalizedBucket
+      });
       emitToUser(userB.id, 'matchmaking:error', { error: `Need at least ${normalizedBucket} chips for this Quick Play bucket` });
       if (!quickPlayBucketByUser.has(userA.id) && !isUserInActiveMatch(userA.id)) {
         queue.unshift(first);
@@ -2552,6 +2592,12 @@ async function processQuickPlayQueue(bucket) {
     const match = createMatch(lobby, { quickPlayBucket: normalizedBucket });
     pushMatchState(match);
     touched = true;
+    logQuickPlayQueueEvent('MATCH_FOUND', {
+      matchId: match.id,
+      bucket: normalizedBucket,
+      userA: userA.id,
+      userB: userB.id
+    });
 
     matched.push({
       userId: userA.id,
@@ -3842,6 +3888,7 @@ function buildClientState(match, viewerId) {
           locked: hand.locked,
           surrendered: hand.surrendered,
           actionCount: hand.actionCount || 0,
+          hitCount: hand.hitCount || 0,
           bust: hand.bust,
           doubled: hand.doubled,
           doubleCount: hand.doubleCount || 0,
@@ -4584,6 +4631,14 @@ function resolveRound(match) {
     [aId]: 0,
     [bId]: 0
   };
+  const xpDeltaByPlayer = {
+    [aId]: 0,
+    [bId]: 0
+  };
+  const xpMetaByPlayer = {
+    [aId]: { betAmount: 0, multiplier: 1 },
+    [bId]: { betAmount: 0, multiplier: 1 }
+  };
 
   const outcomes = [];
 
@@ -4932,18 +4987,64 @@ function resolveRound(match) {
   }
 
   if (realMatch) {
-    const xpWin = pvpMatch ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
-    const xpLoss = pvpMatch ? XP_REWARDS.pvpLoss : XP_REWARDS.botLoss;
+    const xpWinBase = pvpMatch ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
+    const xpLossBase = pvpMatch ? XP_REWARDS.pvpLoss : XP_REWARDS.botLoss;
+    const baseBet = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
+    const exposureA = exposureBetForXp(a, baseBet);
+    const exposureB = exposureBetForXp(b, baseBet);
+    const multiplierA = xpBetMultiplierFromAmount(exposureA);
+    const multiplierB = xpBetMultiplierFromAmount(exposureB);
+    xpMetaByPlayer[aId] = { betAmount: exposureA, multiplier: multiplierA };
+    xpMetaByPlayer[bId] = { betAmount: exposureB, multiplier: multiplierB };
+    const awardXpDelta = (user, amount) => {
+      if (!user) return 0;
+      const before = Math.max(0, Math.floor(Number(user.xp) || 0));
+      awardXp(user, amount);
+      const after = Math.max(0, Math.floor(Number(user.xp) || 0));
+      return Math.max(0, after - before);
+    };
     if (netA > 0) {
-      if (userA) awardXp(userA, Math.round(xpWin * xpStreakBonusMultiplier(userA)));
-      if (userB) awardXp(userB, xpLoss);
+      if (userA) {
+        const gain = Math.max(
+          1,
+          Math.floor(
+            xpWinBase *
+            multiplierA *
+            xpStreakBonusMultiplier(userA)
+          )
+        );
+        xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
+      }
+      if (userB) {
+        const gain = Math.max(1, Math.floor(xpLossBase * multiplierB));
+        xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
+      }
     } else if (netA < 0) {
-      if (userB) awardXp(userB, Math.round(xpWin * xpStreakBonusMultiplier(userB)));
-      if (userA) awardXp(userA, xpLoss);
+      if (userB) {
+        const gain = Math.max(
+          1,
+          Math.floor(
+            xpWinBase *
+            multiplierB *
+            xpStreakBonusMultiplier(userB)
+          )
+        );
+        xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
+      }
+      if (userA) {
+        const gain = Math.max(1, Math.floor(xpLossBase * multiplierA));
+        xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
+      }
     } else {
-      // Push still grants small progression to reduce churn.
-      if (userA) awardXp(userA, Math.floor(xpLoss / 2));
-      if (userB) awardXp(userB, Math.floor(xpLoss / 2));
+      // Push still grants a small amount of progression.
+      if (userA) {
+        const gain = Math.max(1, Math.floor((xpLossBase * 0.5) * multiplierA));
+        xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
+      }
+      if (userB) {
+        const gain = Math.max(1, Math.floor((xpLossBase * 0.5) * multiplierB));
+        xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
+      }
     }
   }
 
@@ -5017,6 +5118,9 @@ function resolveRound(match) {
       outcome: outcomeA,
       title: titleFor(aId),
       deltaChips: chipsDelta[aId],
+      xpDelta: xpDeltaByPlayer[aId] || 0,
+      xpBetAmount: xpMetaByPlayer[aId]?.betAmount || 0,
+      xpBetMultiplier: xpMetaByPlayer[aId]?.multiplier || 1,
       previousBankroll: bankrollBefore[aId],
       newBankroll: bankrollAfter[aId],
       isPractice: isPracticeMatch(match),
@@ -5029,6 +5133,9 @@ function resolveRound(match) {
       outcome: outcomeB,
       title: titleFor(bId),
       deltaChips: chipsDelta[bId],
+      xpDelta: xpDeltaByPlayer[bId] || 0,
+      xpBetAmount: xpMetaByPlayer[bId]?.betAmount || 0,
+      xpBetMultiplier: xpMetaByPlayer[bId]?.multiplier || 1,
       previousBankroll: bankrollBefore[bId],
       newBankroll: bankrollAfter[bId],
       isPractice: isPracticeMatch(match),
@@ -5218,6 +5325,17 @@ function canSplit(hand, playerRoundState = null, context = null) {
   return true;
 }
 
+function canDoubleActionForHand(hand, maxDoubles = RULES.MAX_DOUBLES_PER_HAND) {
+  if (!hand || hand.locked || hand.stood || hand.bust || hand.surrendered) return false;
+  if ((hand.doubleCount || 0) >= maxDoubles) return false;
+  const hasHit = (hand.hitCount || 0) > 0;
+  if (hasHit) return false;
+  const hasExistingDouble = (hand.doubleCount || 0) > 0;
+  // Double is a first-action move; re-double chaining is allowed after an existing double.
+  if (!hasExistingDouble && (hand.actionCount || 0) > 0) return false;
+  return true;
+}
+
 function visibleTotal(cards, hiddenFlags) {
   const visibleCards = cards.filter((_, idx) => !hiddenFlags[idx]);
   return handTotal(visibleCards);
@@ -5228,7 +5346,7 @@ function legalActionsForHand(hand, playerRoundState = null, context = null) {
   const actions = ['stand'];
   if ((hand.doubleCount || 0) === 0) actions.unshift('hit');
   if ((hand.actionCount || 0) === 0) actions.push('surrender');
-  if ((hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
+  if (canDoubleActionForHand(hand, RULES.MAX_DOUBLES_PER_HAND)) actions.push('double');
   if (canSplit(hand, playerRoundState, context)) actions.push('split');
   return actions;
 }
@@ -5294,6 +5412,7 @@ function getBotObservation(match, botId) {
           isSoft: meta.isSoft,
           bet: hand.bet || 0,
           actionCount: hand.actionCount || 0,
+          hitCount: hand.hitCount || 0,
           doubleCount: hand.doubleCount || 0,
           doubled: Boolean(hand.doubled),
           splitDepth: hand.splitDepth || 0,
@@ -5325,6 +5444,7 @@ function getBotObservation(match, botId) {
     public: {
       baseBet: match?.round?.baseBet || 0,
       mode: match?.mode || resolveMatchMode(match?.stakeType),
+      matchType: String(match?.matchType || '').toUpperCase(),
       splitTensEventActive: isSplitTensEventActive(match)
     }
   };
@@ -5401,6 +5521,37 @@ function recordHumanActionForBotLearning(match, playerId, action) {
   model.aggression = Math.max(0.2, Math.min(0.8, aggressiveCount / denominator));
 }
 
+function botShouldSurrenderOpeningHand(observation, hand, opponentUpCardTotal, difficultyKey = 'normal') {
+  if (!hand) return false;
+  if ((hand.actionCount || 0) > 0) return false;
+  if ((hand.hitCount || 0) > 0) return false;
+  if ((hand.doubleCount || 0) > 0) return false;
+  if (hand.isSoft) return false;
+  if ((hand.total || 0) >= 17) return false;
+  if (hand.splitEligible && ['A', '8'].includes(String(hand.pairRank || ''))) return false;
+
+  const total = hand.total || 0;
+  const up = Number(opponentUpCardTotal) || 10;
+  const highStakes = Math.max(0, Math.floor(Number(observation?.public?.baseBet) || 0)) >= HIGH_ROLLER_MIN_BET;
+
+  if (total >= 15 && up >= 10) {
+    let chance = difficultyKey === 'medium' ? 0.08 : 0.12;
+    if (up === 11) chance += 0.03;
+    if (highStakes) chance *= 0.45;
+    chance = Math.max(0.02, Math.min(0.16, chance));
+    return secureRandomFloat() < chance;
+  }
+
+  if (total === 14 && up === 11) {
+    let chance = difficultyKey === 'medium' ? 0.04 : 0.06;
+    if (highStakes) chance *= 0.45;
+    chance = Math.max(0.01, Math.min(0.08, chance));
+    return secureRandomFloat() < chance;
+  }
+
+  return false;
+}
+
 function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   if (!observation || observation.phase !== PHASES.ACTION_TURN) return 'stand';
   if (process.env.NODE_ENV !== 'production') assertSafeBotObservation(observation);
@@ -5421,6 +5572,9 @@ function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   }
   const opponentUpCard = observation.opponent?.hands?.[0]?.upcards?.[0] || null;
   const opponentUpCardTotal = opponentUpCard ? cardValue(opponentUpCard) : 10;
+  if (legal.includes('surrender') && botShouldSurrenderOpeningHand(observation, hand, opponentUpCardTotal, difficultyKey)) {
+    return 'surrender';
+  }
   let ideal = basicStrategyActionFromObservation(hand, opponentUpCardTotal);
   if (!legal.includes(ideal)) ideal = legal[0];
   const aggression = botAggressionBias();
@@ -5445,7 +5599,7 @@ function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   const accuracy = adaptiveAccuracy;
   if (secureRandomFloat() <= accuracy) return ideal;
 
-  const alternatives = legal.filter((a) => a !== ideal);
+  const alternatives = legal.filter((a) => a !== ideal && a !== 'surrender');
   if (!alternatives.length) return ideal;
   return alternatives[randomIntInclusive(0, alternatives.length - 1)];
 }
@@ -5490,10 +5644,15 @@ function chooseBotPressureDecisionFromObservation(observation, difficulty = 'nor
 
   const base = difficulty === 'easy' ? 0.45 : difficulty === 'medium' ? 0.65 : 0.83;
   const total = hand.total || 0;
+  const highStakes = Math.max(0, Math.floor(Number(observation?.public?.baseBet) || 0)) >= HIGH_ROLLER_MIN_BET;
   let chance = base;
   if (total >= 17) chance += 0.1;
   if (total <= 12) chance -= 0.15;
   if (pressure.delta >= 10) chance -= 0.05;
+  if (highStakes) {
+    chance += 0.08;
+    if (total >= 15) chance += 0.05;
+  }
   chance = Math.max(0.1, Math.min(0.95, chance));
   if (!pressure.canMatch) return 'surrender';
   return secureRandomFloat() < chance ? 'match' : 'surrender';
@@ -5704,7 +5863,12 @@ function applyAction(match, playerId, action) {
   }
 
   if (normalizedAction === 'double') {
-    if (hand.locked || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
+    if ((hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) {
+      return { error: 'Hand cannot double down' };
+    }
+    if (!canDoubleActionForHand(hand, RULES.MAX_DOUBLES_PER_HAND)) {
+      return { error: 'Double is only available as the first action on a hand (or as a re-double chain)' };
+    }
     recordHumanActionForBotLearning(match, playerId, normalizedAction);
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
@@ -7295,20 +7459,44 @@ app.post('/api/match/:matchId/forfeit', authMiddleware, async (req, res) => {
 
 app.post('/api/matchmaking/join', authMiddleware, async (req, res) => {
   if (isUserInActiveMatch(req.user.id)) {
+    logQuickPlayQueueEvent('QUEUE_REJECTED', {
+      userId: req.user.id,
+      reason: 'already_in_active_match'
+    });
     return res.status(409).json({ error: 'Already in an active match' });
   }
   const bucket = normalizeQuickPlayBucket(req.body?.bucket);
   if (!bucket) {
+    logQuickPlayQueueEvent('QUEUE_REJECTED', {
+      userId: req.user.id,
+      reason: 'invalid_bucket',
+      bucket: req.body?.bucket
+    });
     return res.status(400).json({ error: `Invalid quick play bucket. Choose one of: ${QUICK_PLAY_BUCKETS.join(', ')}` });
   }
   if (!canJoinQuickPlayBucket(req.user, bucket)) {
+    logQuickPlayQueueEvent('QUEUE_REJECTED', {
+      userId: req.user.id,
+      reason: 'insufficient_chips',
+      bucket
+    });
     return res.status(400).json({ error: `Need at least ${bucket} chips to enter this Quick Play bucket` });
   }
   removeFromRankedQueue(req.user.id);
   const queued = enqueueQuickPlayUser(req.user.id, bucket);
   if (queued.error) {
+    logQuickPlayQueueEvent('QUEUE_REJECTED', {
+      userId: req.user.id,
+      reason: queued.error,
+      bucket
+    });
     return res.status(400).json({ error: queued.error });
   }
+  logQuickPlayQueueEvent('QUEUE_ACCEPTED', {
+    userId: req.user.id,
+    bucket,
+    queuedAt: queued.queuedAt || null
+  });
   const matched = await processQuickPlayQueue(bucket);
   const found = matched.find((entry) => entry.userId === req.user.id);
   if (found) return res.json(found.payload);
@@ -7324,10 +7512,22 @@ app.post('/api/matchmaking/join', authMiddleware, async (req, res) => {
 
 app.post('/api/matchmaking/cancel', authMiddleware, async (req, res) => {
   const removed = removeFromQuickPlayQueue(req.user.id);
+  logQuickPlayQueueEvent('QUEUE_CANCELLED', {
+    userId: req.user.id,
+    removed,
+    reason: 'api_cancel'
+  });
   return res.json({ status: 'cancelled', removed });
 });
 
 app.get('/api/matchmaking/status', authMiddleware, async (req, res) => {
+  const activeMatch = activeMatchForUser(req.user.id);
+  if (activeMatch) {
+    const quickPlayBucket = normalizeQuickPlayBucket(activeMatch.quickPlayBucket);
+    if (quickPlayBucket) {
+      return res.json(buildQuickPlayFoundPayload(activeMatch, req.user.id, quickPlayBucket));
+    }
+  }
   const status = quickPlayQueueStatus(req.user.id);
   return res.json({
     status: status.bucket ? 'searching' : 'idle',
@@ -7629,25 +7829,30 @@ io.on('connection', (socket) => {
 
   socket.on('matchmaking:join', async (payload = {}) => {
     if (isUserInActiveMatch(userId)) {
+      logQuickPlayQueueEvent('QUEUE_REJECTED', { userId, reason: 'already_in_active_match_socket' });
       socket.emit('matchmaking:error', { error: 'Already in an active match' });
       return;
     }
     const bucket = normalizeQuickPlayBucket(payload.bucket);
     if (!bucket) {
+      logQuickPlayQueueEvent('QUEUE_REJECTED', { userId, reason: 'invalid_bucket_socket', bucket: payload.bucket });
       socket.emit('matchmaking:error', { error: `Invalid quick play bucket. Choose one of: ${QUICK_PLAY_BUCKETS.join(', ')}` });
       return;
     }
     const user = getUserById(userId);
     if (!canJoinQuickPlayBucket(user, bucket)) {
+      logQuickPlayQueueEvent('QUEUE_REJECTED', { userId, reason: 'insufficient_chips_socket', bucket });
       socket.emit('matchmaking:error', { error: `Need at least ${bucket} chips to enter this Quick Play bucket` });
       return;
     }
     removeFromRankedQueue(userId);
     const queued = enqueueQuickPlayUser(userId, bucket);
     if (queued.error) {
+      logQuickPlayQueueEvent('QUEUE_REJECTED', { userId, reason: queued.error, bucket });
       socket.emit('matchmaking:error', { error: queued.error });
       return;
     }
+    logQuickPlayQueueEvent('QUEUE_ACCEPTED', { userId, bucket, queuedAt: queued.queuedAt || null, source: 'socket' });
     const matched = await processQuickPlayQueue(bucket);
     const found = matched.find((entry) => entry.userId === userId);
     if (found) return;
@@ -7663,6 +7868,7 @@ io.on('connection', (socket) => {
 
   socket.on('matchmaking:cancel', () => {
     const removed = removeFromQuickPlayQueue(userId);
+    logQuickPlayQueueEvent('QUEUE_CANCELLED', { userId, removed, reason: 'socket_cancel' });
     socket.emit('matchmaking:cancelled', { status: 'cancelled', removed });
   });
 

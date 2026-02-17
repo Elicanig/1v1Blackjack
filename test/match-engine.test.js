@@ -270,12 +270,12 @@ test('17 double doubles bet, draws one, and creates pending pressure', () => {
   assert.ok(m.round.pendingPressure);
 });
 
-test('18 re-double is allowed after another action while under cap', () => {
+test('18 hit then double is rejected (double must be opening action or re-double chain)', () => {
   const m = makeMatch({ p1Hand: newHand([card('5'), card('4')], [false, true], 5, 0), deck: [card('2'), card('3')] });
   const hit = applyAction(m, 'p1', 'hit');
   assert.equal(hit.ok, true);
   const res = applyAction(m, 'p1', 'double');
-  assert.equal(res.ok, true);
+  assert.equal(res.error, 'Double is only available as the first action on a hand (or as a re-double chain)');
 });
 
 test('18b hit is blocked after a hand has doubled', () => {

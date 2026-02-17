@@ -2970,6 +2970,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-classic {
+  --card-back-foil: rgba(224, 189, 123, 0.22);
+  --card-back-mesh-a: rgba(239, 219, 181, 0.07);
+  --card-back-mesh-b: rgba(255, 255, 255, 0.01);
+  --card-back-crest: rgba(255, 239, 207, 0.18);
   background:
     radial-gradient(circle at 30% 18%, rgba(224, 189, 123, 0.28), transparent 48%),
     linear-gradient(145deg, #173a31, #102a23 70%);
@@ -2981,6 +2985,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-gold {
+  --card-back-foil: rgba(235, 201, 135, 0.32);
+  --card-back-mesh-a: rgba(255, 227, 172, 0.09);
+  --card-back-mesh-b: rgba(255, 247, 228, 0.02);
+  --card-back-crest: rgba(255, 236, 188, 0.24);
   background:
     radial-gradient(circle at 36% 22%, rgba(250, 224, 171, 0.34), transparent 52%),
     linear-gradient(145deg, #40311a, #2a1e0d 72%);
@@ -2993,6 +3001,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-neon {
+  --card-back-foil: rgba(112, 226, 210, 0.3);
+  --card-back-mesh-a: rgba(116, 243, 223, 0.1);
+  --card-back-mesh-b: rgba(180, 247, 255, 0.03);
+  --card-back-crest: rgba(163, 255, 246, 0.2);
   background:
     radial-gradient(circle at 36% 22%, rgba(112, 226, 210, 0.36), transparent 52%),
     linear-gradient(145deg, #122a34, #0a1b23 72%);
@@ -3014,6 +3026,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-obsidian {
+  --card-back-foil: rgba(176, 195, 221, 0.28);
+  --card-back-mesh-a: rgba(186, 211, 246, 0.08);
+  --card-back-mesh-b: rgba(236, 245, 255, 0.015);
+  --card-back-crest: rgba(220, 232, 255, 0.18);
   background:
     radial-gradient(circle at 36% 22%, rgba(176, 195, 221, 0.3), transparent 52%),
     linear-gradient(145deg, #11161d, #0b1016 72%);
@@ -3026,6 +3042,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-aurora {
+  --card-back-foil: rgba(191, 158, 250, 0.32);
+  --card-back-mesh-a: rgba(205, 178, 255, 0.1);
+  --card-back-mesh-b: rgba(231, 219, 255, 0.03);
+  --card-back-crest: rgba(222, 201, 255, 0.2);
   background:
     radial-gradient(circle at 36% 22%, rgba(191, 158, 250, 0.34), transparent 52%),
     linear-gradient(145deg, #1c1833, #121027 72%);
@@ -3044,6 +3064,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-obsidian-luxe-ii {
+  --card-back-foil: rgba(210, 170, 108, 0.34);
+  --card-back-mesh-a: rgba(227, 180, 112, 0.1);
+  --card-back-mesh-b: rgba(255, 235, 198, 0.02);
+  --card-back-crest: rgba(255, 220, 157, 0.22);
   background:
     radial-gradient(circle at 30% 20%, rgba(251, 171, 99, 0.26), transparent 48%),
     linear-gradient(145deg, #1b1512, #110c0a 72%);
@@ -3056,6 +3080,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-aurora-royale-ii {
+  --card-back-foil: rgba(147, 201, 255, 0.36);
+  --card-back-mesh-a: rgba(163, 217, 255, 0.1);
+  --card-back-mesh-b: rgba(236, 244, 255, 0.03);
+  --card-back-crest: rgba(184, 230, 255, 0.22);
   background:
     radial-gradient(circle at 32% 20%, rgba(147, 201, 255, 0.34), transparent 52%),
     linear-gradient(145deg, #1d1a3a, #11263f 72%);
@@ -3074,6 +3102,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-void-prism {
+  --card-back-foil: rgba(153, 190, 250, 0.34);
+  --card-back-mesh-a: rgba(172, 207, 255, 0.1);
+  --card-back-mesh-b: rgba(224, 239, 255, 0.02);
+  --card-back-crest: rgba(198, 221, 255, 0.2);
   background:
     radial-gradient(circle at 31% 22%, rgba(168, 196, 255, 0.34), transparent 54%),
     linear-gradient(145deg, #151b2f, #0f1322 72%);
@@ -3087,6 +3119,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden.deck-skin-celestial-ivory {
+  --card-back-foil: rgba(226, 190, 121, 0.34);
+  --card-back-mesh-a: rgba(250, 224, 169, 0.1);
+  --card-back-mesh-b: rgba(255, 245, 229, 0.03);
+  --card-back-crest: rgba(255, 236, 194, 0.22);
   background:
     radial-gradient(circle at 34% 20%, rgba(239, 211, 153, 0.34), transparent 52%),
     linear-gradient(145deg, #3f3729, #2d261c 72%);
@@ -3168,6 +3204,10 @@ select:focus-visible {
 }
 
 .playing-card.hidden {
+  --card-back-foil: rgba(224, 189, 123, 0.2);
+  --card-back-mesh-a: rgba(255, 255, 255, 0.06);
+  --card-back-mesh-b: rgba(255, 255, 255, 0.01);
+  --card-back-crest: rgba(255, 245, 220, 0.18);
   background:
     radial-gradient(circle at 30% 18%, rgba(224, 189, 123, 0.28), transparent 48%),
     linear-gradient(145deg, #173a31, #102a23 70%);
@@ -3184,6 +3224,29 @@ select:focus-visible {
     radial-gradient(circle at 50% 50%, rgba(24, 56, 47, 0.82), rgba(14, 36, 29, 0.88));
   display: grid;
   place-items: center;
+  overflow: hidden;
+}
+
+.card-back-inner::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(45deg, var(--card-back-mesh-a) 0 2px, var(--card-back-mesh-b) 2px 6px),
+    repeating-linear-gradient(-45deg, var(--card-back-mesh-a) 0 2px, transparent 2px 6px);
+  opacity: 0.78;
+}
+
+.card-back-inner::after {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  border-radius: 999px;
+  border: 1px solid var(--card-back-foil);
+  background: radial-gradient(circle at 50% 50%, var(--card-back-crest), transparent 70%);
+  pointer-events: none;
+  opacity: 0.82;
 }
 
 .card-back-mark {
@@ -5022,12 +5085,42 @@ select:focus-visible {
 .result-delta.pos { color: #7fe2b9; }
 .result-delta.neg { color: #e07f7f; }
 
+.round-xp-gain {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 10px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(118, 215, 171, 0.38);
+  background: linear-gradient(180deg, rgba(22, 68, 56, 0.44), rgba(14, 39, 32, 0.42));
+  color: #9bf0c8;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  animation: roundXpIn 300ms cubic-bezier(.2, .84, .2, 1);
+}
+
+.round-xp-gain .muted {
+  color: rgba(188, 229, 210, 0.9);
+}
+
 @keyframes resultDeltaPulse {
   0% {
     opacity: 0.2;
     transform: translate3d(0, 6px, 0) scale(0.94);
   }
   100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes roundXpIn {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0) scale(0.96);
+  }
+  to {
     opacity: 1;
     transform: translate3d(0, 0, 0) scale(1);
   }
