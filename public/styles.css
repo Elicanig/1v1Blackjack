@@ -814,6 +814,42 @@ select:focus-visible {
   align-items: start;
 }
 
+.split-tens-event-banner {
+  border-radius: 14px;
+  border: 1px solid rgba(205, 167, 100, 0.44);
+  background:
+    radial-gradient(220px 120px at 85% 0%, rgba(240, 204, 130, 0.22), transparent 62%),
+    linear-gradient(180deg, rgba(38, 30, 15, 0.7), rgba(11, 25, 21, 0.76));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.split-tens-event-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.split-tens-event-meta {
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+}
+
+.split-tens-event-countdown {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(240, 214, 162, 0.34);
+  background: rgba(26, 20, 10, 0.5);
+  color: #f2d9a9;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 5px 10px;
+}
+
 .home-play-col,
 .home-stats-col {
   gap: 16px;
@@ -1641,6 +1677,32 @@ select:focus-visible {
   justify-content: center;
   line-height: 1;
   min-height: 36px;
+}
+
+.active-events-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.active-events-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.active-events-countdown {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(205, 167, 100, 0.36);
+  background: rgba(205, 167, 100, 0.12);
+  color: #efd7a8;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 10px;
 }
 
 .rules-overview-card h2 {
@@ -2539,6 +2601,12 @@ select:focus-visible {
   line-height: 1.1;
 }
 
+.split-tens-hint {
+  font-size: 0.72rem;
+  color: #e4be8b;
+  margin-top: -2px;
+}
+
 .leave-btn {
   margin-left: 6px;
 }
@@ -3080,6 +3148,23 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.split-tens-event-modal {
+  width: min(620px, 96vw);
+  display: grid;
+  gap: 10px;
+}
+
+.split-tens-event-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.split-tens-event-list {
+  margin: 0;
 }
 
 .stats-more-head {
@@ -3782,6 +3867,20 @@ select:focus-visible {
   .rules-strip {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .split-tens-event-banner,
+  .active-events-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .split-tens-event-meta,
+  .active-events-actions {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    justify-content: space-between;
   }
 
   .hands {

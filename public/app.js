@@ -35,6 +35,7 @@ const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000, 5000];
 const HIGH_ROLLER_MIN_BET = 2500;
 const HIGH_ROLLER_UNLOCK_CHIPS = 10000;
 const HIGH_ROLLER_UNLOCK_MESSAGE = `High Roller unlocks at ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips.`;
+const SPLIT_TENS_EVENT_ID = 'split_tens_24h';
 const LEADERBOARD_LIMIT = 25;
 const RANKED_TIER_META = Object.freeze({
   BRONZE: { label: 'Bronze', icon: '◈', minElo: 0, fixedBet: 50 },
@@ -395,6 +396,9 @@ const state = {
   toasts: [],
   challenges: { hourly: [], daily: [], weekly: [], skill: [] },
   challengeClaimPendingById: {},
+  serverClockOffsetMs: 0,
+  activeEvents: [],
+  eventDetailsModalId: null,
   challengeResets: { hourly: null, daily: null, weekly: null },
   challengeResetRemainingMs: { hourly: 0, daily: 0, weekly: 0 },
   challengeResetRefreshInFlight: false,
@@ -698,6 +702,95 @@ function updateFreeClaimCountdown() {
   if (state.freeClaimRemainingMs <= 0) {
     state.freeClaimed = false;
   }
+}
+
+function serverNowMs() {
+  return Date.now() + Math.floor(Number(state.serverClockOffsetMs) || 0);
+}
+
+function applyServerClock(serverNow) {
+  const nowMs = serverNow ? new Date(serverNow).getTime() : NaN;
+  if (!Number.isFinite(nowMs)) return;
+  state.serverClockOffsetMs = nowMs - Date.now();
+}
+
+function normalizeActiveEvents(events = []) {
+  if (!Array.isArray(events)) return [];
+  const nowMs = serverNowMs();
+  return events
+    .map((event) => {
+      const endsMs = event?.endsAt ? new Date(event.endsAt).getTime() : NaN;
+      if (!Number.isFinite(endsMs) || endsMs <= nowMs) return null;
+      return {
+        id: String(event.id || ''),
+        title: String(event.title || ''),
+        description: String(event.description || ''),
+        startsAt: event.startsAt || null,
+        endsAt: event.endsAt || null,
+        remainingMs: Math.max(0, endsMs - nowMs)
+      };
+    })
+    .filter(Boolean);
+}
+
+function applyEventsSnapshot(serverNow, activeEvents = []) {
+  applyServerClock(serverNow);
+  state.activeEvents = normalizeActiveEvents(activeEvents);
+  if (state.eventDetailsModalId && !state.activeEvents.some((event) => event.id === state.eventDetailsModalId)) {
+    state.eventDetailsModalId = null;
+  }
+}
+
+function splitTensEventState() {
+  const event = (state.activeEvents || []).find((item) => item.id === SPLIT_TENS_EVENT_ID);
+  if (!event) return { active: false, remainingMs: 0, event: null };
+  const endsMs = event.endsAt ? new Date(event.endsAt).getTime() : NaN;
+  if (!Number.isFinite(endsMs)) return { active: false, remainingMs: 0, event: null };
+  const remainingMs = Math.max(0, endsMs - serverNowMs());
+  if (remainingMs <= 0) return { active: false, remainingMs: 0, event: null };
+  return { active: true, remainingMs, event: { ...event, remainingMs } };
+}
+
+function isSplitTensEventActiveClient() {
+  return splitTensEventState().active;
+}
+
+function formatEventEndsAtLocal(endsAt) {
+  const ts = endsAt ? new Date(endsAt).getTime() : NaN;
+  if (!Number.isFinite(ts)) return 'Unknown';
+  return new Date(ts).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+}
+
+function syncEventCountdownUI() {
+  const splitTens = splitTensEventState();
+  const labels = [
+    document.getElementById('splitTensCountdownHome'),
+    document.getElementById('splitTensCountdownRules'),
+    document.getElementById('splitTensCountdownModal')
+  ].filter(Boolean);
+  if (!labels.length) return;
+  const text = splitTens.active ? `Ends in ${formatCooldown(splitTens.remainingMs)}` : 'Event ended';
+  for (const label of labels) label.textContent = text;
+}
+
+function refreshActiveEventsCountdown() {
+  if (!Array.isArray(state.activeEvents) || !state.activeEvents.length) return false;
+  const nowMs = serverNowMs();
+  const next = state.activeEvents.filter((event) => {
+    const endsMs = event?.endsAt ? new Date(event.endsAt).getTime() : NaN;
+    return Number.isFinite(endsMs) && endsMs > nowMs;
+  });
+  const changed = next.length !== state.activeEvents.length;
+  state.activeEvents = next;
+  if (changed && state.eventDetailsModalId && !state.activeEvents.some((event) => event.id === state.eventDetailsModalId)) {
+    state.eventDetailsModalId = null;
+  }
+  return changed;
 }
 
 function formatCooldown(ms) {
@@ -1823,6 +1916,7 @@ function connectSocket() {
       state.matchChatDraft = '';
     }
     state.currentMatch = match;
+    applyEventsSnapshot(match?.serverNow, match?.activeEvents || []);
     state.leaveMatchModal = false;
     const myChoice = state.me?.id ? match?.resultChoiceByPlayer?.[state.me.id] : null;
     state.roundResultChoicePending = Boolean(match.phase === 'RESULT' && myChoice);
@@ -1936,6 +2030,7 @@ async function loadMe() {
     const data = await api('/api/me');
     state.me = data.user;
     state.rankedOverview = data.rankedOverview || null;
+    applyEventsSnapshot(data.serverNow, data.activeEvents || []);
     if (!rankedQueueIsActive()) {
       state.rankedQueue.bet = Math.max(1, Math.floor(Number(data.user?.rankedFixedBet || data.user?.rankedBetMin || state.rankedQueue.bet || 50)));
     }
@@ -2032,6 +2127,9 @@ async function loadMe() {
     state.notificationFriendRequestStatus = {};
     state.incomingFriendChallenges = [];
     state.outgoingFriendChallenges = [];
+    state.serverClockOffsetMs = 0;
+    state.activeEvents = [];
+    state.eventDetailsModalId = null;
     state.challenges = { hourly: [], daily: [], weekly: [], skill: [] };
     state.challengeResets = { hourly: null, daily: null, weekly: null };
     state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
@@ -2243,12 +2341,18 @@ function isTypingTarget(target) {
   return tag === 'input' || tag === 'textarea' || target.isContentEditable;
 }
 
-function handCanSplit(hand, handCount = 0, maxHands = 4) {
+function isTenTenPair(hand) {
+  return Boolean(hand?.cards?.length === 2 && hand.cards[0]?.rank === '10' && hand.cards[1]?.rank === '10');
+}
+
+function handCanSplit(hand, handCount = 0, maxHands = 4, splitTensEventActive = isSplitTensEventActiveClient()) {
   if (!hand) return false;
   if (hand.cards.length !== 2) return false;
   if ((hand.splitDepth || 0) >= 3) return false;
   if (handCount >= maxHands) return false;
-  return hand.cards[0].rank && hand.cards[1].rank && hand.cards[0].rank === hand.cards[1].rank;
+  if (!hand.cards[0].rank || !hand.cards[1].rank || hand.cards[0].rank !== hand.cards[1].rank) return false;
+  if (isTenTenPair(hand) && !splitTensEventActive) return false;
+  return true;
 }
 
 function isMyTurn() {
@@ -3968,11 +4072,26 @@ function renderHome() {
   const rankWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
   const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
   const highRollerUnlocked = hasHighRollerAccess(me);
+  const splitTensEvent = splitTensEventState();
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
     <main class="view-stack dashboard">
       <p class="muted view-subtitle">${me.username}</p>
+      ${
+        splitTensEvent.active
+          ? `<section class="card section split-tens-event-banner">
+              <div class="split-tens-event-copy">
+                <strong>LIMITED EVENT: Split Tens</strong>
+                <div class="muted">Rule change: 10/10 can be split.</div>
+              </div>
+              <div class="split-tens-event-meta">
+                <div class="split-tens-event-countdown" id="splitTensCountdownHome">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</div>
+                <button class="ghost" id="openSplitTensDetailsBtn" type="button">View Details</button>
+              </div>
+            </section>`
+          : ''
+      }
       <div class="dashboard-grid home-grid">
         <section class="col card section reveal-panel glow-follow glow-follow--panel play-panel home-play-col">
           <h2>Play</h2>
@@ -4285,6 +4404,24 @@ function renderHome() {
           </div>`
         : ''
     }
+    ${
+      state.eventDetailsModalId === SPLIT_TENS_EVENT_ID && splitTensEvent.active
+        ? `<div class="modal" id="splitTensEventModal">
+            <div class="modal-panel card split-tens-event-modal" role="dialog" aria-modal="true" aria-label="Split tens event details">
+              <div class="split-tens-event-modal-head">
+                <h3>Split Tens Event</h3>
+                <button id="closeSplitTensDetailsBtn" class="ghost" type="button">Close</button>
+              </div>
+              <p class="muted">For the next 24 hours, splitting 10s is allowed.</p>
+              <ul class="rules-list split-tens-event-list">
+                <li><strong>Rule change:</strong> 10/10 can be split.</li>
+                <li><strong>Ends at:</strong> ${formatEventEndsAtLocal(splitTensEvent.event?.endsAt)}</li>
+                <li><strong id="splitTensCountdownModal">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</strong></li>
+              </ul>
+            </div>
+          </div>`
+        : ''
+    }
     ${renderRankTimelineModal(me)}
   `;
 
@@ -4305,6 +4442,13 @@ function renderHome() {
     goRankedHomeBtn.onclick = () => {
       goToView('ranked');
       loadRankedOverview({ silent: true });
+      render();
+    };
+  }
+  const openSplitTensDetailsBtn = document.getElementById('openSplitTensDetailsBtn');
+  if (openSplitTensDetailsBtn) {
+    openSplitTensDetailsBtn.onclick = () => {
+      state.eventDetailsModalId = SPLIT_TENS_EVENT_ID;
       render();
     };
   }
@@ -4463,6 +4607,24 @@ function renderHome() {
       render();
     };
   }
+  const splitTensEventModal = document.getElementById('splitTensEventModal');
+  if (splitTensEventModal) {
+    splitTensEventModal.onclick = () => {
+      state.eventDetailsModalId = null;
+      render();
+    };
+  }
+  const closeSplitTensDetailsBtn = document.getElementById('closeSplitTensDetailsBtn');
+  if (closeSplitTensDetailsBtn) {
+    closeSplitTensDetailsBtn.onclick = () => {
+      state.eventDetailsModalId = null;
+      render();
+    };
+  }
+  const splitTensEventModalPanel = app.querySelector('.split-tens-event-modal');
+  if (splitTensEventModalPanel) {
+    splitTensEventModalPanel.onclick = (event) => event.stopPropagation();
+  }
   const rankTimelineModal = document.getElementById('rankTimelineModal');
   if (rankTimelineModal) {
     rankTimelineModal.onclick = () => {
@@ -4482,6 +4644,7 @@ function renderHome() {
     rankTimelinePanel.onclick = (event) => event.stopPropagation();
   }
   syncFreeClaimUI();
+  syncEventCountdownUI();
 }
 
 function renderProfile() {
@@ -5397,6 +5560,7 @@ function renderNotifications() {
 }
 
 function renderRules() {
+  const splitTensEvent = splitTensEventState();
   app.innerHTML = `
     ${renderTopbar('Rules')}
     <main class="view-stack">
@@ -5404,6 +5568,24 @@ function renderRules() {
         <h2>Rules & Fairness</h2>
         <p class="muted">Complete gameplay, ranked, and reward rules in one place.</p>
         <div class="muted">Version: ${state.appVersion || 'dev'}</div>
+      </section>
+
+      <section class="card section rules-section-card">
+        <h3>Active Events</h3>
+        ${
+          splitTensEvent.active
+            ? `<div class="active-events-row">
+                <div>
+                  <strong>Split Tens Event: ON</strong>
+                  <div class="muted">Rule change: 10/10 can be split.</div>
+                </div>
+                <div class="active-events-actions">
+                  <span class="active-events-countdown" id="splitTensCountdownRules">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</span>
+                  <button class="ghost" id="openSplitTensDetailsRulesBtn" type="button">View Details</button>
+                </div>
+              </div>`
+            : '<div class="muted">No active limited-time events.</div>'
+        }
       </section>
 
       <section class="card section rules-section-card">
@@ -5431,6 +5613,7 @@ function renderRules() {
               <li>Hit, stand, double, split, and surrender are available when legal.</li>
               <li>Surrender forfeits 75% of that hand bet.</li>
               <li>Split and double outcomes are tracked as separate hand results.</li>
+              <li>Splitting 10/10 is enabled only during active limited-time events.</li>
             </ul>
           </article>
           <article>
@@ -5483,8 +5666,52 @@ function renderRules() {
         </div>
       </section>
     </main>
+    ${
+      state.eventDetailsModalId === SPLIT_TENS_EVENT_ID && splitTensEvent.active
+        ? `<div class="modal" id="splitTensEventModal">
+            <div class="modal-panel card split-tens-event-modal" role="dialog" aria-modal="true" aria-label="Split tens event details">
+              <div class="split-tens-event-modal-head">
+                <h3>Split Tens Event</h3>
+                <button id="closeSplitTensDetailsBtn" class="ghost" type="button">Close</button>
+              </div>
+              <p class="muted">For the next 24 hours, splitting 10s is allowed.</p>
+              <ul class="rules-list split-tens-event-list">
+                <li><strong>Rule change:</strong> 10/10 can be split.</li>
+                <li><strong>Ends at:</strong> ${formatEventEndsAtLocal(splitTensEvent.event?.endsAt)}</li>
+                <li><strong id="splitTensCountdownModal">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</strong></li>
+              </ul>
+            </div>
+          </div>`
+        : ''
+    }
   `;
   bindShellNav();
+  const openSplitTensDetailsRulesBtn = document.getElementById('openSplitTensDetailsRulesBtn');
+  if (openSplitTensDetailsRulesBtn) {
+    openSplitTensDetailsRulesBtn.onclick = () => {
+      state.eventDetailsModalId = SPLIT_TENS_EVENT_ID;
+      render();
+    };
+  }
+  const splitTensEventModal = document.getElementById('splitTensEventModal');
+  if (splitTensEventModal) {
+    splitTensEventModal.onclick = () => {
+      state.eventDetailsModalId = null;
+      render();
+    };
+  }
+  const closeSplitTensDetailsBtn = document.getElementById('closeSplitTensDetailsBtn');
+  if (closeSplitTensDetailsBtn) {
+    closeSplitTensDetailsBtn.onclick = () => {
+      state.eventDetailsModalId = null;
+      render();
+    };
+  }
+  const splitTensEventModalPanel = app.querySelector('.split-tens-event-modal');
+  if (splitTensEventModalPanel) {
+    splitTensEventModalPanel.onclick = (event) => event.stopPropagation();
+  }
+  syncEventCountdownUI();
 }
 
 function renderHand(hand, index, active, pressureTagged = false) {
@@ -5706,6 +5933,14 @@ function renderMatch() {
   const effectiveBet = hasBetDraft ? draftBet : sanitizeInt(state.currentBet);
   const isBetValid = Number.isInteger(effectiveBet) && effectiveBet >= minBet && effectiveBet <= maxBet;
   const opponentThinking = Boolean(!canAct && !waitingPressure && isBotOpponent && match.phase === 'ACTION_TURN' && match.currentTurn === oppId);
+  const splitTensEventActive = isSplitTensEventActiveClient();
+  const splitLegalForHand = handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4, splitTensEventActive);
+  const splitTensBlocked = Boolean(canAct && isTenTenPair(activeHand) && !splitTensEventActive);
+  const splitButtonTitle = splitLegalForHand
+    ? 'Split pair into two hands'
+    : splitTensBlocked
+      ? 'Splitting 10s is available during limited-time events.'
+      : 'Split requires pair (max 4 hands)';
   const actionHint = canAct
     ? 'Choose an action for your active hand.'
     : waitingPressure
@@ -5902,7 +6137,7 @@ function renderMatch() {
                       <button data-action="hit" title="${canAct ? 'Draw one card' : actionHint}" class="primary" ${!canAct ? 'disabled' : ''}>Hit</button>
                       <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
                       <button data-action="double" title="${canAct ? 'Double your bet and draw one card (re-double allowed while eligible)' : actionHint}" ${!canAct || (activeHand?.doubleCount || 0) >= (match.maxDoublesPerHand || 1) ? 'disabled' : ''}>Double</button>
-                      <button data-action="split" title="${handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4) ? 'Split pair into two hands' : 'Split requires pair (max 4 hands)'}" ${!canAct || !handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4) ? 'disabled' : ''}>Split</button>
+                      <button data-action="split" title="${splitButtonTitle}" ${!canAct || !splitLegalForHand ? 'disabled' : ''}>Split</button>
                       <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender ? 'disabled' : ''}>Surrender</button>
                     </div>
                     <div class="actions-timer-slot">
@@ -5910,6 +6145,7 @@ function renderMatch() {
                     </div>
                   </div>
                   <div class="muted action-hint">${actionHint}</div>
+                  ${splitTensBlocked ? '<div class="muted split-tens-hint">Splitting 10s is available during limited-time events.</div>' : ''}
                   ${
                     isPvpMatch
                       ? `<div class="actions actions-extra">
@@ -6525,9 +6761,18 @@ function render() {
   }
   if (!freeClaimTicker) {
     freeClaimTicker = setInterval(() => {
-      if (!state.token || !state.me || !state.freeClaimNextAt) return;
-      updateFreeClaimCountdown();
-      if (state.view === 'home') syncFreeClaimUI();
+      let needsRender = false;
+      if (state.token && state.me && state.freeClaimNextAt) {
+        updateFreeClaimCountdown();
+        if (state.view === 'home') syncFreeClaimUI();
+      }
+      const eventsChanged = refreshActiveEventsCountdown();
+      if (eventsChanged && ['home', 'rules', 'match'].includes(state.view)) {
+        needsRender = true;
+      } else if (state.activeEvents.length && ['home', 'rules'].includes(state.view)) {
+        syncEventCountdownUI();
+      }
+      if (needsRender) render();
     }, 1000);
   }
   if (!inviteCountdownTicker) {

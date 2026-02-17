@@ -200,6 +200,16 @@ test('10 canSplit false when max split depth reached', () => {
   assert.equal(canSplit(newHand([card('8'), card('8', 'D')], [false, true], 5, RULES.MAX_SPLITS)), false);
 });
 
+test('10b canSplit blocks 10/10 when split tens event is inactive', () => {
+  const hand = newHand([card('10'), card('10', 'D')], [false, true], 5, 0);
+  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: false }), false);
+});
+
+test('10c canSplit allows 10/10 when split tens event is active', () => {
+  const hand = newHand([card('10'), card('10', 'D')], [false, true], 5, 0);
+  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: true }), true);
+});
+
 test('11 applyAction rejects when not in action phase', () => {
   const m = makeMatch({ phase: PHASES.PRESSURE_RESPONSE });
   const res = applyAction(m, 'p1', 'hit');
@@ -286,6 +296,49 @@ test('21 split disallowed after max depth', () => {
   const m = makeMatch({ p1Hand: newHand([card('8'), card('8', 'D')], [false, true], 5, RULES.MAX_SPLITS) });
   const res = applyAction(m, 'p1', 'split');
   assert.equal(res.error, 'Split unavailable');
+});
+
+test('21b split 10/10 is rejected when split tens event is inactive', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('10'), card('10', 'D')], [false, true], 5, 0),
+    p2Hand: newHand([card('9'), card('7', 'S')], [false, true], 5, 0),
+    deck: [card('4', 'S'), card('3', 'C')]
+  });
+  m.splitTensEventActiveOverride = false;
+  const res = applyAction(m, 'p1', 'split');
+  assert.equal(res.error, 'Split tens event inactive');
+});
+
+test('21c split 10/10 is allowed when split tens event is active', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('10'), card('10', 'D')], [false, true], 5, 0),
+    p2Hand: newHand([card('9'), card('7', 'S')], [false, true], 5, 0),
+    deck: [card('4', 'S'), card('3', 'C')]
+  });
+  m.splitTensEventActiveOverride = true;
+  const res = applyAction(m, 'p1', 'split');
+  assert.equal(res.ok, true);
+  assert.equal(m.round.players.p1.hands.length, 2);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+});
+
+test('21d non-10 pairs remain splittable regardless of split tens event state', () => {
+  const hand = newHand([card('8'), card('8', 'D')], [false, true], 5, 0);
+  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: false }), true);
+  assert.equal(canSplit(hand, null, { splitTensEventActiveOverride: true }), true);
+});
+
+test('21e split 10/10 enforcement is checked at action time (event can expire mid-match)', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('10'), card('10', 'D')], [false, true], 5, 0),
+    p2Hand: newHand([card('9'), card('7', 'S')], [false, true], 5, 0),
+    deck: [card('4', 'S'), card('3', 'C')]
+  });
+  m.splitTensEventActiveOverride = true;
+  assert.equal(canSplit(m.round.players.p1.hands[0], m.round.players.p1, m), true);
+  m.splitTensEventActiveOverride = false;
+  const res = applyAction(m, 'p1', 'split');
+  assert.equal(res.error, 'Split tens event inactive');
 });
 
 test('22 pressure decision match increases opponent bet on affected hand', () => {

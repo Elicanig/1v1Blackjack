@@ -94,6 +94,9 @@ const LEADERBOARD_DEFAULT_LIMIT = 25;
 const HIGH_ROLLER_UNLOCK_CHIPS = 10_000;
 const HIGH_ROLLER_MIN_BET = 2500;
 const MAX_BET_HARD_CAP = 10_000_000;
+const SPLIT_TENS_EVENT_ID = 'split_tens_24h';
+const SPLIT_TENS_EVENT_DURATION_MS = 24 * 60 * 60 * 1000;
+const SPLIT_TENS_EVENT_STARTS_AT_MS = parseIsoTimestampMs(process.env.SPLIT_TENS_EVENT_STARTS_AT || '');
 const XP_REWARDS = Object.freeze({
   pvpWin: 40,
   pvpLoss: 15,
@@ -896,6 +899,68 @@ function botTurnDelayMs(match, botId) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function parseIsoTimestampMs(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return null;
+  const parsed = new Date(raw).getTime();
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+}
+
+function splitTensEventWindow() {
+  if (!Number.isFinite(SPLIT_TENS_EVENT_STARTS_AT_MS)) return null;
+  const startsMs = SPLIT_TENS_EVENT_STARTS_AT_MS;
+  const endsMs = startsMs + SPLIT_TENS_EVENT_DURATION_MS;
+  return {
+    startsMs,
+    endsMs,
+    startsAt: new Date(startsMs).toISOString(),
+    endsAt: new Date(endsMs).toISOString()
+  };
+}
+
+function splitTensEventPayloadAt(nowMs = Date.now()) {
+  const window = splitTensEventWindow();
+  if (!window) return null;
+  if (nowMs < window.startsMs || nowMs >= window.endsMs) return null;
+  return {
+    id: SPLIT_TENS_EVENT_ID,
+    title: 'Split Tens Event',
+    description: 'For the next 24 hours, splitting 10s is allowed.',
+    startsAt: window.startsAt,
+    endsAt: window.endsAt,
+    remainingMs: Math.max(0, window.endsMs - nowMs)
+  };
+}
+
+function activeEventsAt(nowMs = Date.now()) {
+  const splitTens = splitTensEventPayloadAt(nowMs);
+  return splitTens ? [splitTens] : [];
+}
+
+function splitTensEventActiveAt(nowMs = Date.now()) {
+  return activeEventsAt(nowMs).some((event) => event.id === SPLIT_TENS_EVENT_ID);
+}
+
+function eventsSnapshotPayload(nowMs = Date.now()) {
+  return {
+    serverNow: new Date(nowMs).toISOString(),
+    activeEvents: activeEventsAt(nowMs)
+  };
+}
+
+function isSplitTensEventActive(context = null) {
+  if (context && typeof context.splitTensEventActiveOverride === 'boolean') {
+    return context.splitTensEventActiveOverride;
+  }
+  const nowMs = Number.isFinite(Number(context?.serverNowMs)) ? Number(context.serverNowMs) : Date.now();
+  return splitTensEventActiveAt(nowMs);
+}
+
+function isTenTenPair(hand) {
+  return Boolean(hand?.cards?.length === 2 && hand.cards[0]?.rank === '10' && hand.cards[1]?.rank === '10');
 }
 
 function deployCommitId() {
@@ -3083,6 +3148,8 @@ function clearRoundPhaseTimer(matchId) {
 // Build per-viewer sanitized state to avoid leaking opponent hole/hit cards.
 function buildClientState(match, viewerId) {
   const round = match.round;
+  const nowMs = Date.now();
+  const eventsSnapshot = eventsSnapshotPayload(nowMs);
   const betLimits = getMatchBetLimits(match);
   const negotiationEnabled = isBetNegotiationEnabled(match);
   const negotiation = negotiationEnabled ? ensureBetNegotiation(match) : null;
@@ -3163,6 +3230,8 @@ function buildClientState(match, viewerId) {
     mode: match.mode || (isPracticeMatch(match) ? 'practice' : 'real'),
     isPractice: isPracticeMatch(match),
     highRoller: String(match?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(match?.highRoller),
+    serverNow: eventsSnapshot.serverNow,
+    activeEvents: eventsSnapshot.activeEvents,
     quickPlayBucket: normalizeQuickPlayBucket(match.quickPlayBucket),
     rankedSeries,
     rankedSeriesHud,
@@ -4338,12 +4407,14 @@ function progressTurn(match, actingPlayerId) {
   maybeEndRound(match);
 }
 
-function canSplit(hand, playerRoundState = null) {
+function canSplit(hand, playerRoundState = null, context = null) {
   if (!hand) return false;
   if (playerRoundState?.hands?.length >= RULES.MAX_HANDS_PER_PLAYER) return false;
   if (hand.cards.length !== 2) return false;
   if (hand.splitDepth >= RULES.MAX_SPLITS) return false;
-  return hand.cards[0].rank === hand.cards[1].rank;
+  if (hand.cards[0].rank !== hand.cards[1].rank) return false;
+  if (isTenTenPair(hand) && !isSplitTensEventActive(context)) return false;
+  return true;
 }
 
 function visibleTotal(cards, hiddenFlags) {
@@ -4351,12 +4422,12 @@ function visibleTotal(cards, hiddenFlags) {
   return handTotal(visibleCards);
 }
 
-function legalActionsForHand(hand, playerRoundState = null) {
+function legalActionsForHand(hand, playerRoundState = null, context = null) {
   if (!hand || hand.locked || hand.stood || hand.bust || hand.surrendered) return [];
   const actions = ['hit', 'stand'];
   if ((hand.actionCount || 0) === 0) actions.push('surrender');
   if ((hand.doubleCount || 0) < RULES.MAX_DOUBLES_PER_HAND) actions.push('double');
-  if (canSplit(hand, playerRoundState)) actions.push('split');
+  if (canSplit(hand, playerRoundState, context)) actions.push('split');
   return actions;
 }
 
@@ -4402,7 +4473,7 @@ function getBotObservation(match, botId) {
   const opponentState = match?.round?.players?.[opponentId];
   const activeHandIndex = Number.isInteger(botState.activeHandIndex) ? botState.activeHandIndex : 0;
   const activeHand = botState.hands?.[activeHandIndex] || null;
-  const allowedActions = legalActionsForHand(activeHand, botState);
+  const allowedActions = legalActionsForHand(activeHand, botState, match);
 
   const observation = {
     phase: match.phase,
@@ -4413,7 +4484,7 @@ function getBotObservation(match, botId) {
       activeHandIndex,
       hands: (botState.hands || []).map((hand, index) => {
         const meta = handMeta(hand.cards || []);
-        const splitEligible = canSplit(hand, botState);
+        const splitEligible = canSplit(hand, botState, match);
         return {
           index,
           cards: (hand.cards || []).map(sanitizeCard).filter(Boolean),
@@ -4451,7 +4522,8 @@ function getBotObservation(match, botId) {
     },
     public: {
       baseBet: match?.round?.baseBet || 0,
-      mode: match?.mode || resolveMatchMode(match?.stakeType)
+      mode: match?.mode || resolveMatchMode(match?.stakeType),
+      splitTensEventActive: isSplitTensEventActive(match)
     }
   };
 
@@ -4503,6 +4575,11 @@ function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   const activeHandIndex = observation.bot?.activeHandIndex ?? 0;
   const hand = observation.bot?.hands?.[activeHandIndex] || null;
   if (!hand) return legal.includes('stand') ? 'stand' : legal[0];
+  const splitTensEventActive = Boolean(observation.public?.splitTensEventActive);
+  if (splitTensEventActive && hand.splitEligible && hand.pairRank === '10' && legal.includes('split') && difficultyKey !== 'easy') {
+    const splitTensChance = difficultyKey === 'medium' ? 0.06 : 0.12;
+    if (secureRandomFloat() < splitTensChance) return 'split';
+  }
   const opponentUpCard = observation.opponent?.hands?.[0]?.upcards?.[0] || null;
   const opponentUpCardTotal = opponentUpCard ? cardValue(opponentUpCard) : 10;
   let ideal = basicStrategyActionFromObservation(hand, opponentUpCardTotal);
@@ -4807,7 +4884,8 @@ function applyAction(match, playerId, action) {
   }
 
   if (normalizedAction === 'split') {
-    if (!canSplit(hand, state)) return { error: 'Split unavailable' };
+    if (isTenTenPair(hand) && !isSplitTensEventActive(match)) return { error: 'Split tens event inactive' };
+    if (!canSplit(hand, state, match)) return { error: 'Split unavailable' };
     if (!canAffordIncrement(match, playerId, hand.bet)) return { error: 'Insufficient chips to split' };
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
     match.round.firstActionTaken = true;
@@ -5560,6 +5638,8 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.get('/api/me', authMiddleware, async (req, res) => {
+  const nowMs = Date.now();
+  const eventsSnapshot = eventsSnapshotPayload(nowMs);
   const friendsData = buildFriendsPayload(req.user);
   const refreshed = refreshChallengesForUser(req.user);
   const refreshedSkills = ensureSkillChallenges(req.user);
@@ -5591,6 +5671,8 @@ app.get('/api/me', authMiddleware, async (req, res) => {
     },
     rankedQueue: rankedQueueStatus(req.user.id),
     rankedOverview,
+    serverNow: eventsSnapshot.serverNow,
+    activeEvents: eventsSnapshot.activeEvents,
     challenges: challengeData.challenges,
     challengeList: challengeData.challengeList,
     challengeResets: challengeData.challengeResets,
