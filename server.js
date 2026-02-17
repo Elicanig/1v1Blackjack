@@ -899,8 +899,17 @@ function resolveMatchMode(stakeType) {
   return resolveStakeType(stakeType) === 'REAL' ? 'real' : 'practice';
 }
 
+function resolveEconomyMode(rawEconomyMode, fallbackMatchMode = 'real') {
+  const mode = String(rawEconomyMode || '').trim().toLowerCase();
+  if (mode === 'no_delta') return 'no_delta';
+  if (mode === 'standard') return 'standard';
+  return String(fallbackMatchMode || '').trim().toLowerCase() === 'practice' ? 'no_delta' : 'standard';
+}
+
 function isPracticeMatch(match) {
   if (!match) return false;
+  if (String(match.economyMode || '').trim().toLowerCase() === 'no_delta') return true;
+  if (String(match.economyMode || '').trim().toLowerCase() === 'standard') return false;
   if (match.mode === 'practice') return true;
   if (match.mode === 'real') return false;
   if (typeof match.isPractice === 'boolean') return match.isPractice;
@@ -3592,6 +3601,7 @@ function buildClientState(match, viewerId) {
     matchType: match.matchType || null,
     participants: match.participants,
     mode: match.mode || (isPracticeMatch(match) ? 'practice' : 'real'),
+    economyMode: match.economyMode || (isPracticeMatch(match) ? 'no_delta' : 'standard'),
     isPractice: isPracticeMatch(match),
     highRoller: String(match?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(match?.highRoller),
     serverNow: eventsSnapshot.serverNow,
@@ -4438,7 +4448,7 @@ function resolveRound(match) {
   const rankedRound = String(match.matchType || '').toUpperCase() === 'RANKED' && realMatch;
   const outcomeForA = netA > 0 ? 'win' : netA < 0 ? 'loss' : 'push';
   const outcomeForB = netA < 0 ? 'win' : netA > 0 ? 'loss' : 'push';
-  if (userA) {
+  if (realMatch && userA) {
     userA.currentMatchWinStreak = matchWinStreakAfterOutcome(userA.currentMatchWinStreak, outcomeForA);
     if (outcomeForA === 'win') {
       userA.bestMatchWinStreak = Math.max(
@@ -4447,7 +4457,7 @@ function resolveRound(match) {
       );
     }
   }
-  if (userB) {
+  if (realMatch && userB) {
     userB.currentMatchWinStreak = matchWinStreakAfterOutcome(userB.currentMatchWinStreak, outcomeForB);
     if (outcomeForB === 'win') {
       userB.bestMatchWinStreak = Math.max(
@@ -5596,8 +5606,12 @@ function createMatch(lobby, options = {}) {
     removeFromRankedQueue(pid);
   }
   const stakeType = resolveStakeType(lobby.stakeType);
-  const mode = resolveMatchMode(stakeType);
-  const isPractice = mode === 'practice';
+  const requestedMode = String(options.matchMode || '').trim().toLowerCase();
+  const mode = requestedMode === 'practice' || requestedMode === 'real'
+    ? requestedMode
+    : resolveMatchMode(stakeType);
+  const economyMode = resolveEconomyMode(options.economyMode, mode);
+  const isPractice = mode === 'practice' || economyMode === 'no_delta';
   const quickPlayBucket = normalizeQuickPlayBucket(options.quickPlayBucket || lobby.quickPlayBucket);
   const rankedBet = Math.max(0, Math.floor(Number(options.rankedBet || lobby.rankedBet) || 0));
   const highRoller = String(options.matchType || lobby.matchType || '').toUpperCase() === 'HIGH_ROLLER' || lobby.type === 'high_roller';
@@ -5643,6 +5657,7 @@ function createMatch(lobby, options = {}) {
     roundNumber: 0,
     stakeType,
     mode,
+    economyMode,
     isPractice,
     practiceBankrollById: isPractice
       ? playerIds.reduce((acc, pid) => {
@@ -6679,11 +6694,16 @@ app.post('/api/lobbies/invite', authMiddleware, async (req, res) => {
 
 async function createBotPracticeLobby(req, res) {
   const { difficulty, stakeType } = req.body || {};
+  const requestedMatchMode = String(req.body?.matchMode || '').trim().toLowerCase();
+  const requestedEconomyMode = String(req.body?.economyMode || '').trim().toLowerCase();
   const highRoller = String(req.body?.matchType || '').toUpperCase() === 'HIGH_ROLLER' || Boolean(req.body?.highRoller);
   if (!['easy', 'medium', 'normal'].includes(difficulty)) {
     return res.status(400).json({ error: 'Difficulty must be easy, medium, or normal' });
   }
-  const resolvedStake = highRoller ? 'REAL' : resolveStakeType(stakeType);
+  const practiceRequested = !highRoller && (requestedMatchMode === 'practice' || requestedEconomyMode === 'no_delta');
+  const resolvedStake = highRoller ? 'REAL' : (practiceRequested ? 'FAKE' : resolveStakeType(stakeType));
+  const resolvedMatchMode = practiceRequested ? 'practice' : resolveMatchMode(resolvedStake);
+  const resolvedEconomyMode = practiceRequested ? 'no_delta' : 'standard';
   if (highRoller && !hasHighRollerAccess(req.user)) {
     return res.status(400).json({ error: highRollerUnlockError() });
   }
@@ -6704,7 +6724,11 @@ async function createBotPracticeLobby(req, res) {
   db.data.lobbies.push(lobby);
   await db.write();
 
-  const match = createMatch(lobby, { botDifficultyById: { [botId]: difficulty } });
+  const match = createMatch(lobby, {
+    botDifficultyById: { [botId]: difficulty },
+    matchMode: resolvedMatchMode,
+    economyMode: resolvedEconomyMode
+  });
   return res.json({
     serverKey: lobby.id,
     lobby,

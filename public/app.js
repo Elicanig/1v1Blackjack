@@ -3426,12 +3426,19 @@ async function cancelRankedQueue({ silent = false } = {}) {
 }
 
 async function startBotMatch(options = {}) {
+  const allowOfflineFallback = Boolean(options.allowOfflineFallback);
   if (offlineModeEnabled()) {
+    if (!allowOfflineFallback) {
+      return setError('Bot matchmaking requires an online connection.');
+    }
     startOfflineBotMatch();
     return;
   }
   const highRoller = Boolean(options.highRoller);
-  const stakeType = options.stakeType || (highRoller ? 'REAL' : state.botStakeType);
+  const matchMode = String(options.matchMode || '').trim().toLowerCase();
+  const economyMode = String(options.economyMode || '').trim().toLowerCase();
+  const forcePractice = matchMode === 'practice' || economyMode === 'no_delta';
+  const stakeType = forcePractice ? 'FAKE' : (options.stakeType || (highRoller ? 'REAL' : state.botStakeType));
   if (highRoller && !guardHighRollerAccess()) return;
   try {
     const data = await api('/api/lobbies/bot', {
@@ -3439,6 +3446,8 @@ async function startBotMatch(options = {}) {
       body: JSON.stringify({
         difficulty: state.selectedBotDifficulty,
         stakeType,
+        matchMode: forcePractice ? 'practice' : undefined,
+        economyMode: forcePractice ? 'no_delta' : undefined,
         highRoller,
         matchType: highRoller ? 'HIGH_ROLLER' : undefined
       })
@@ -3446,13 +3455,21 @@ async function startBotMatch(options = {}) {
     state.currentLobby = null;
     state.currentMatch = data.match;
     goToView('match');
-    setStatus(`${stakeType === 'REAL' ? 'Real-chip' : 'Practice'} bot match started (${state.selectedBotDifficulty})${highRoller ? ' • High Roller' : ''}.`);
+    setStatus(`${forcePractice || stakeType !== 'REAL' ? 'Practice' : 'Real-chip'} bot match started (${state.selectedBotDifficulty})${highRoller ? ' • High Roller' : ''}.`);
   } catch (e) {
     if (/high roller unlocks at/i.test(String(e?.message || ''))) {
       pushToast(HIGH_ROLLER_UNLOCK_MESSAGE);
     }
     setError(e.message);
   }
+}
+
+async function startPracticeBotMatch() {
+  await startBotMatch({
+    stakeType: 'FAKE',
+    matchMode: 'practice',
+    economyMode: 'no_delta'
+  });
 }
 
 async function claimFree100() {
@@ -3868,7 +3885,7 @@ function syncRoundResultModal() {
         <h3 class="result-title">${headline}</h3>
         <div class="muted">${subtitle}</div>
         <div class="result-delta ${delta > 0 ? 'pos' : delta < 0 ? 'neg' : ''}">${sign}${Math.abs(delta)}</div>
-        <div class="muted">${result.isPractice ? 'Practice round' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
+        <div class="muted">${result.isPractice ? 'Practice round • No chips won/lost' : `Bankroll ${Number(bankroll).toLocaleString()}`}</div>
         <div class="result-actions">
           ${
             showRankedContinueRow
@@ -4349,7 +4366,7 @@ function renderHome() {
                     <section class="practice-panel" aria-label="Practice vs bot">
                       <div class="practice-head">
                         <h3>Practice vs Bot</h3>
-                        <p class="muted">Train with presets and risk-free practice mode.</p>
+                        <p class="muted">Starts a live bot match with full gameplay and zero bankroll impact.</p>
                       </div>
                       <div class="practice-controls">
                         <div class="bot-difficulty-grid" id="botDifficultyGrid" role="radiogroup" aria-label="Bot difficulty">
@@ -4366,16 +4383,10 @@ function renderHome() {
                             <span class="bot-diff-range">Bets: ${BOT_BET_RANGES.normal.min}-${BOT_BET_RANGES.normal.max}</span>
                           </button>
                         </div>
-                        <div class="bot-segmented bot-slider stake-slider" id="botStakeSlider" data-stake-slider>
-                          <div class="bot-slider-indicator" style="transform:translateX(${state.botStakeType === 'REAL' ? 0 : 100}%);"></div>
-                          <button type="button" data-stake="REAL" class="${state.botStakeType === 'REAL' ? 'is-selected' : ''}">Real Chips</button>
-                          <button type="button" data-stake="FAKE" class="${state.botStakeType === 'FAKE' ? 'is-selected' : ''}">Practice</button>
-                        </div>
-                        <div class="muted practice-note">Practice uses fake chips and won&apos;t affect your account.</div>
-                        <div class="muted practice-note">Offline bankroll: ${Math.max(0, Math.floor(Number(state.offlineProfile?.bankroll) || OFFLINE_STARTING_BANKROLL)).toLocaleString()} • W-L-P ${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.wins) || 0))}-${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.losses) || 0))}-${Math.max(0, Math.floor(Number(state.offlineProfile?.stats?.pushes) || 0))}</div>
+                        <div class="muted practice-note">Practice mode: no chips won/lost, no ranked/streak/challenge impact.</div>
                         <div class="home-inline-actions">
-                          <button class="ghost bot-play-btn" id="playBotBtn">Play Bot</button>
-                          <button class="gold bot-play-btn" id="playOfflineBotBtn">Play Bot (Offline)</button>
+                          <button class="gold bot-play-btn" id="playPracticeBotBtn">Start Practice Bot</button>
+                          <button class="ghost bot-play-btn" id="playRealBotBtn">Play Real Bot</button>
                         </div>
                       </div>
                     </section>
@@ -4390,7 +4401,7 @@ function renderHome() {
               <button class="ghost leaderboard-expand-btn" id="toggleLeaderboardBtn" type="button">${leaderboardExpanded ? 'Collapse' : 'Expand'}</button>
             </div>
             <div class="muted leaderboard-subhead">${leaderboardExpanded ? `Showing top ${leaderboardVisibleRows.length}` : 'Top 5'}</div>
-            <div class="leaderboard-list compact">
+            <div class="leaderboard-list compact ${leaderboardExpanded ? 'is-expanded' : ''}">
               ${
                 leaderboardVisibleRows.length
                   ? leaderboardVisibleRows.map((row) => `
@@ -4401,7 +4412,9 @@ function renderHome() {
                       <span class="leaderboard-chips">${Number(row.chips || 0).toLocaleString()}</span>
                     </div>
                   `).join('')
-                  : `<div class="muted">${state.leaderboard.loading ? 'Loading leaderboard...' : 'No leaderboard data yet.'}</div>`
+                  : state.leaderboard.loading
+                    ? new Array(5).fill('<div class="leaderboard-row leaderboard-row-skeleton"><span></span><span></span><span></span><span></span></div>').join('')
+                    : '<div class="muted">No leaderboard data yet.</div>'
               }
             </div>
           </section>
@@ -4413,12 +4426,12 @@ function renderHome() {
             <button id="openStatsMoreBtn" class="ghost stats-more-btn" type="button">View more</button>
           </div>
           <div class="kpis compact-kpis">
-            <div class="kpi"><div class="muted">Matches Played</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
-            <div class="kpi"><div class="muted">Hands Won</div><strong>${me.stats.handsWon || 0}</strong></div>
-            <div class="kpi"><div class="muted">Hands Lost</div><strong>${me.stats.handsLost || 0}</strong></div>
-            <div class="kpi"><div class="muted">Hands Pushed</div><strong>${handsPushed}</strong></div>
-            <div class="kpi"><div class="muted">Blackjacks Dealt</div><strong>${me.stats.blackjacks || 0}</strong></div>
-            <div class="kpi"><div class="muted">6-7&apos;s Dealt</div><strong>${sixSevenDealt}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">♟</span>Matches Played</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">▲</span>Hands Won</div><strong>${me.stats.handsWon || 0}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">▼</span>Hands Lost</div><strong>${me.stats.handsLost || 0}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">⟷</span>Hands Pushed</div><strong>${handsPushed}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">♠</span>Blackjacks Dealt</div><strong>${me.stats.blackjacks || 0}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">7</span>6-7&apos;s Dealt</div><strong>${sixSevenDealt}</strong></div>
           </div>
           <div class="free-claim-card">
             <div>
@@ -4699,26 +4712,10 @@ function renderHome() {
       selectBot(button.dataset.bot);
     });
   }
-  const stakeSlider = document.getElementById('botStakeSlider');
-  if (stakeSlider) {
-    stakeSlider.addEventListener('click', (event) => {
-      const button = event.target.closest('[data-stake]');
-      if (!button) return;
-      event.preventDefault();
-      const nextStake = button.dataset.stake === 'REAL' ? 'REAL' : 'FAKE';
-      if (state.botStakeType === nextStake) return;
-      state.botStakeType = nextStake;
-      render();
-    });
-  }
-  const playBotBtn = document.getElementById('playBotBtn');
-  if (playBotBtn) playBotBtn.onclick = () => startBotMatch();
-  const playOfflineBotBtn = document.getElementById('playOfflineBotBtn');
-  if (playOfflineBotBtn) {
-    playOfflineBotBtn.onclick = () => {
-      startOfflineBotMatch();
-    };
-  }
+  const playPracticeBotBtn = document.getElementById('playPracticeBotBtn');
+  if (playPracticeBotBtn) playPracticeBotBtn.onclick = () => startPracticeBotMatch();
+  const playRealBotBtn = document.getElementById('playRealBotBtn');
+  if (playRealBotBtn) playRealBotBtn.onclick = () => startBotMatch({ stakeType: 'REAL' });
   const openStatsMoreBtn = document.getElementById('openStatsMoreBtn');
   if (openStatsMoreBtn) {
     openStatsMoreBtn.onclick = () => {
@@ -5925,9 +5922,9 @@ function renderRules() {
           <article>
             <h4>Elo & Rank Updates</h4>
             <ul class="rules-list">
-              <li>Every ranked game updates Elo and can change rank tiers.</li>
-              <li>High-variance rounds are dampened via luck multiplier on Elo delta.</li>
-              <li>Pushes create minimal Elo movement compared with decisive rounds.</li>
+              <li>Elo finalizes once per completed ranked series (including forfeit outcomes).</li>
+              <li>Series wins and losses are clamped to keep swings stable and readable.</li>
+              <li>Bronze and Silver losses are softened compared with higher ranks.</li>
             </ul>
           </article>
           <article>
@@ -6176,6 +6173,7 @@ function renderMatch() {
   const canEditBet = Boolean(match.canEditBet);
   const canConfirmBet = Boolean(match.canConfirmBet);
   const rankedMatch = String(match.matchType || '').toUpperCase() === 'RANKED';
+  const practiceMode = Boolean(match.isPractice || String(match.mode || '').toLowerCase() === 'practice' || String(match.economyMode || '').toLowerCase() === 'no_delta');
   const rankedSeriesHud = rankedMatch
     ? (match.rankedSeriesHud || {
         seriesGameIndex: Number(match.seriesGameIndex) || 0,
@@ -6213,6 +6211,13 @@ function renderMatch() {
   const splitTensBlocked = Boolean(canAct && isTenTenPair(activeHand) && !splitTensEventActive);
   const hitBlockedAfterDouble = Boolean(canAct && (activeHand?.doubleCount || 0) >= 1);
   const splitTensActiveHint = Boolean(canAct && isTenTenPair(activeHand) && splitTensEventActive);
+  const actionHint = canAct
+    ? 'Choose an action for your active hand.'
+    : waitingPressure
+      ? 'Respond to pressure: Match or Surrender.'
+      : opponentThinking
+        ? 'Opponent thinking...'
+        : 'Waiting for next turn.';
   const splitButtonTitle = splitLegalForHand
     ? 'Split pair into two hands'
     : splitTensBlocked
@@ -6221,13 +6226,6 @@ function renderMatch() {
   const hitButtonTitle = canAct
     ? (hitBlockedAfterDouble ? 'Hit is unavailable after a double on this hand.' : 'Draw one card')
     : actionHint;
-  const actionHint = canAct
-    ? 'Choose an action for your active hand.'
-    : waitingPressure
-      ? 'Respond to pressure: Match or Surrender.'
-      : opponentThinking
-        ? 'Opponent thinking...'
-        : 'Waiting for next turn.';
   const noPenaltyLeave =
     isBotOpponent &&
     (!match.stakesCommitted || match.phase === 'ROUND_INIT' || match.phase === 'RESULT' || match.phase === 'REVEAL');
@@ -6240,6 +6238,9 @@ function renderMatch() {
   const pressureMine = waitingPressure ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const pressureOpp = pressure && pressure.opponentId === oppId ? new Set(pressure?.affectedHandIndices || []) : new Set();
   const turnTimerState = getTurnTimerState(match);
+  const modePill = practiceMode
+    ? '<span class="mode-pill mode-pill-practice">Practice</span>'
+    : (isBotOpponent ? '<span class="mode-pill mode-pill-real">Bot Match</span>' : '');
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -6249,7 +6250,7 @@ function renderMatch() {
           isBettingPhase
             ? `<section class="betting-layout">
                 <div class="betting-header">
-                  <h3>Round ${match.roundNumber} — ${negotiationEnabled ? 'Negotiate your bet' : 'Place your bet'}${match.highRoller ? ' • High Roller' : ''}</h3>
+                  <h3>Round ${match.roundNumber} — ${negotiationEnabled ? 'Negotiate your bet' : 'Place your bet'}${match.highRoller ? ' • High Roller' : ''} ${modePill}</h3>
                   <div class="bankroll-pill"><span class="muted">Bankroll</span> <strong>${(myState.bankroll ?? me.chips).toLocaleString()}</strong></div>
                 </div>
                 <div class="match-zone betting-zone ${supportsBetChat ? 'with-chat' : ''}">
@@ -6372,7 +6373,7 @@ function renderMatch() {
                 <div class="status-strip">
                   <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
                   <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
-                  <div class="strip-item"><span class="muted">Phase</span> <strong class="phase-strong">${phaseLabel}${rankedSeriesHudText ? ` <span class="series-pill">${rankedSeriesHudText}</span>` : ''}</strong></div>
+                  <div class="strip-item"><span class="muted">Phase</span> <strong class="phase-strong">${phaseLabel}${modePill}${rankedSeriesHudText ? ` <span class="series-pill">${rankedSeriesHudText}</span>` : ''}</strong></div>
                   <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ' <span class="streak-flame" aria-hidden="true">🔥</span>' : ''}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
@@ -6383,7 +6384,7 @@ function renderMatch() {
                       <span class="player-tag">Opponent</span>
                       <h4>${playerName(oppId)}</h4>
                       <span class="zone-player-meta">${oppMeta}</span>
-                      <span class="muted player-sub">${isBotOpponent ? 'Bot practice' : opponentConnected ? 'Connected' : 'Disconnected'}</span>
+                      <span class="muted player-sub">${isBotOpponent ? (practiceMode ? 'Bot practice' : 'Bot match') : opponentConnected ? 'Connected' : 'Disconnected'}</span>
                     </div>
                   </div>
                   <div class="hands">
@@ -6480,6 +6481,7 @@ function renderMatch() {
                           } / Opponent ${opponentConnected ? 'online' : 'offline'}`
                     }
                   </div>
+                  ${practiceMode ? '<div class="muted">Practice mode active: No chips won/lost.</div>' : ''}
                   <div class="muted">AFK protection enabled: inactive turns auto-stand after ${Math.round((match.turnTimeoutMs || 30000) / 1000)}s.</div>
                   <div class="muted">${actionHint}</div>
                 </details>
