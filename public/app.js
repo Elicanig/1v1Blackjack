@@ -46,11 +46,46 @@ const RANKED_TIER_META = Object.freeze({
 });
 const RANKED_TIER_ORDER = ['LEGENDARY', 'DIAMOND', 'GOLD', 'SILVER', 'BRONZE'];
 const TITLE_DEFS = Object.freeze([
-  { key: '', label: 'None', unlockHint: 'No title equipped' },
-  { key: 'HIGH_ROLLER', label: 'High Roller', unlockHint: 'Play 10 real matches with bets >= 2,500.' },
-  { key: 'GIANT_KILLER', label: 'Giant Killer', unlockHint: 'Beat a player with higher level or bankroll.' },
-  { key: 'STREAK_LORD', label: 'Streak Lord', unlockHint: 'Reach a 10-match win streak.' }
+  { key: '', label: 'None', unlockHint: 'No title equipped', category: 'utility' },
+  { key: 'HIGH_ROLLER', label: 'High Roller', unlockHint: 'Play 10 high roller matches.', category: 'skill' },
+  { key: 'GIANT_KILLER', label: 'Giant Killer', unlockHint: 'Beat a higher-level or richer opponent.', category: 'skill' },
+  { key: 'STREAK_LORD', label: 'Streak Lord', unlockHint: 'Reach a 10-match win streak.', category: 'skill' },
+  { key: 'RISING_STAR', label: 'Rising Star', unlockHint: 'Reach level 10.', category: 'level' },
+  { key: 'TABLE_REGULAR', label: 'Table Regular', unlockHint: 'Reach level 25.', category: 'level' },
+  { key: 'VETERAN', label: 'Veteran', unlockHint: 'Reach level 50.', category: 'level' },
+  { key: 'ELITE_GRINDER', label: 'Elite Grinder', unlockHint: 'Reach level 75.', category: 'level' },
+  { key: 'LEGEND', label: 'Legend', unlockHint: 'Reach level 100.', category: 'level' },
+  { key: 'BLACKJACK_MAGNET', label: 'Blackjack Magnet', unlockHint: 'Deal 25 natural blackjacks.', category: 'skill' },
+  { key: 'NATURAL_BORN', label: 'Natural Born', unlockHint: 'Deal 75 natural blackjacks.', category: 'skill' },
+  { key: 'SPLIT_SPECIALIST', label: 'Split Specialist', unlockHint: 'Use Split 25 times.', category: 'skill' },
+  { key: 'DOUBLE_TROUBLE', label: 'Double Trouble', unlockHint: 'Use Double 25 times.', category: 'skill' },
+  { key: 'PUSH_MASTER', label: 'Push Master', unlockHint: 'Record 40 pushes.', category: 'skill' },
+  { key: 'ROAD_WARRIOR', label: 'Road Warrior', unlockHint: 'Complete 100 matches.', category: 'skill' },
+  { key: 'TABLE_SHARK', label: 'Table Shark', unlockHint: 'Win 150 hands.', category: 'skill' },
+  { key: 'CHIP_COLLECTOR', label: 'Chip Collector', unlockHint: 'Win 5,000 chips total.', category: 'skill' },
+  { key: 'CHIP_TITAN', label: 'Chip Titan', unlockHint: 'Win 20,000 chips total.', category: 'skill' },
+  { key: 'RANKED_CONTENDER', label: 'Ranked Contender', unlockHint: 'Win 10 ranked series.', category: 'skill' },
+  { key: 'RANKED_CONQUEROR', label: 'Ranked Conqueror', unlockHint: 'Win 30 ranked series.', category: 'skill' },
+  { key: 'PVP_DUELIST', label: 'PvP Duelist', unlockHint: 'Win 25 PvP matches.', category: 'skill' },
+  { key: 'SEVEN_SENSE', label: 'Seven Sense', unlockHint: "Get 20 starting 6-7's.", category: 'skill' },
+  { key: 'DAILY_GRINDER', label: 'Daily Grinder', unlockHint: 'Reach a 7-day daily win streak.', category: 'skill' },
+  { key: 'UNBREAKABLE', label: 'Unbreakable', unlockHint: 'Reach a 15-match win streak.', category: 'skill' }
 ]);
+const TITLE_DEF_MAP = new Map(TITLE_DEFS.filter((entry) => entry.key).map((entry) => [entry.key, entry]));
+const PROFILE_BORDER_DEFS = Object.freeze([
+  { id: 'NONE', name: 'None', minLevelRequired: 1, tier: 'Default', previewToken: 'none' },
+  { id: 'BRONZE_TRIM', name: 'Bronze Trim', minLevelRequired: 10, tier: 'Common', previewToken: 'bronze-trim' },
+  { id: 'GILDED_EDGE', name: 'Gilded Edge', minLevelRequired: 20, tier: 'Uncommon', previewToken: 'gilded-edge' },
+  { id: 'EMERALD_CIRCUIT', name: 'Emerald Circuit', minLevelRequired: 30, tier: 'Rare', previewToken: 'emerald-circuit' },
+  { id: 'NEBULA_FRAME', name: 'Nebula Frame', minLevelRequired: 40, tier: 'Epic', previewToken: 'nebula-frame' },
+  { id: 'MYTHIC_CREST', name: 'Mythic Crest', minLevelRequired: 50, tier: 'Mythic', previewToken: 'mythic-crest' },
+  { id: 'ROYAL_AURORA', name: 'Royal Aurora', minLevelRequired: 60, tier: 'Mythic', previewToken: 'royal-aurora' },
+  { id: 'OBSIDIAN_CROWN', name: 'Obsidian Crown', minLevelRequired: 70, tier: 'Legendary', previewToken: 'obsidian-crown' },
+  { id: 'SOLAR_FLARE', name: 'Solar Flare', minLevelRequired: 80, tier: 'Legendary', previewToken: 'solar-flare' },
+  { id: 'CELESTIAL_LATTICE', name: 'Celestial Lattice', minLevelRequired: 90, tier: 'Ascendant', previewToken: 'celestial-lattice' },
+  { id: 'ETERNAL_SOVEREIGN', name: 'Eternal Sovereign', minLevelRequired: 100, tier: 'Ascendant', previewToken: 'eternal-sovereign' }
+]);
+const PROFILE_BORDER_DEF_MAP = new Map(PROFILE_BORDER_DEFS.map((entry) => [entry.id, entry]));
 const CORE_FAVORITE_STAT_KEYS = new Set([
   'TOTAL_MATCHES',
   'HANDS_WON',
@@ -487,11 +522,14 @@ const state = {
   profileSections: {
     identity: true,
     progress: true,
+    borders: false,
     social: true,
     titles: false,
     security: false
   },
+  profileTitleFilter: 'ALL',
   profileSaving: false,
+  profileBorderSavingId: '',
   rankTimelineModalOpen: false,
   rankedForfeitModalOpen: false,
   pendingSeriesResult: null,
@@ -566,6 +604,10 @@ function ensureOfflineIdentity() {
     unlockedTitles: [],
     selectedTitle: '',
     selectedTitleKey: '',
+    titleCatalog: [],
+    selectedBorderId: 'NONE',
+    profileBorders: [],
+    nextBorderUnlockLevel: 10,
     customStatText: '',
     favoriteStatKey: 'TOTAL_MATCHES',
     pvpWins: 0,
@@ -1363,6 +1405,77 @@ function deriveExpandedStats(me) {
   };
 }
 
+function normalizeProfileBorderIdClient(value) {
+  const key = String(value || '').trim().toUpperCase();
+  return PROFILE_BORDER_DEF_MAP.has(key) ? key : 'NONE';
+}
+
+function profileBordersForUser(me = {}) {
+  const level = Math.max(1, Math.floor(Number(me?.level) || 1));
+  const serverBorders = Array.isArray(me.profileBorders) ? me.profileBorders : [];
+  if (serverBorders.length) {
+    return serverBorders.map((border) => {
+      const normalizedId = normalizeProfileBorderIdClient(border?.id);
+      const fallback = PROFILE_BORDER_DEF_MAP.get(normalizedId);
+      const minLevelRequired = Math.max(1, Math.floor(Number(border?.minLevelRequired) || Number(fallback?.minLevelRequired) || 1));
+      return {
+        id: normalizedId,
+        name: String(border?.name || fallback?.name || 'Unknown'),
+        tier: String(border?.tier || fallback?.tier || 'Default'),
+        minLevelRequired,
+        previewToken: String(border?.previewToken || fallback?.previewToken || 'none'),
+        unlocked: Boolean(border?.unlocked) || level >= minLevelRequired
+      };
+    });
+  }
+  return PROFILE_BORDER_DEFS.map((border) => ({
+    ...border,
+    unlocked: level >= border.minLevelRequired
+  }));
+}
+
+function titleCatalogForUserClient(me = {}) {
+  const unlockedSet = new Set(
+    (Array.isArray(me.unlockedTitles) ? me.unlockedTitles : [])
+      .map((key) => String(key || '').trim().toUpperCase())
+      .filter(Boolean)
+  );
+  const serverCatalog = Array.isArray(me.titleCatalog) ? me.titleCatalog : [];
+  if (serverCatalog.length) {
+    return serverCatalog
+      .map((entry) => {
+        const key = String(entry?.key || '').trim().toUpperCase();
+        if (!key) return null;
+        const fallback = TITLE_DEF_MAP.get(key);
+        return {
+          key,
+          label: String(entry?.label || fallback?.label || key),
+          category: String(entry?.category || fallback?.category || 'skill').toLowerCase(),
+          requirementText: String(entry?.requirementText || fallback?.unlockHint || entry?.description || ''),
+          description: String(entry?.description || fallback?.unlockHint || ''),
+          unlocked: Boolean(entry?.unlocked) || unlockedSet.has(key)
+        };
+      })
+      .filter(Boolean);
+  }
+  return TITLE_DEFS
+    .filter((entry) => entry.key)
+    .map((entry) => ({
+      key: entry.key,
+      label: entry.label,
+      category: entry.category || 'skill',
+      requirementText: entry.unlockHint || '',
+      description: entry.unlockHint || '',
+      unlocked: unlockedSet.has(entry.key)
+    }));
+}
+
+function normalizeTitleFilter(value) {
+  const key = String(value || 'ALL').trim().toUpperCase();
+  if (['ALL', 'UNLOCKED', 'LOCKED'].includes(key)) return key;
+  return 'ALL';
+}
+
 function normalizeFavoriteStatKey(value) {
   const normalized = String(value || '').trim().toUpperCase();
   return FAVORITE_STAT_DEFS.some((entry) => entry.key === normalized) ? normalized : FAVORITE_STAT_DEFS[0].key;
@@ -2157,8 +2270,10 @@ async function loadMe() {
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
     state.favoriteStatFilter = '';
-    state.profileSections = { identity: true, progress: true, social: true, titles: false, security: false };
+    state.profileSections = { identity: true, progress: true, borders: false, social: true, titles: false, security: false };
+    state.profileTitleFilter = 'ALL';
     state.profileSaving = false;
+    state.profileBorderSavingId = '';
     state.rankTimelineModalOpen = false;
     state.rankedForfeitModalOpen = false;
     state.pendingSeriesResult = null;
@@ -2721,6 +2836,34 @@ async function saveFavoriteStatPreference(nextKey) {
     render();
   } catch (e) {
     setError(e.message);
+  }
+}
+
+async function equipProfileBorder(borderId) {
+  if (!state.me || state.profileBorderSavingId) return;
+  const requested = normalizeProfileBorderIdClient(borderId);
+  if (!requested) return;
+  const previous = state.me.selectedBorderId || 'NONE';
+  state.profileBorderSavingId = requested;
+  state.me = { ...state.me, selectedBorderId: requested };
+  render();
+  try {
+    const data = await api('/api/profile/border', {
+      method: 'PATCH',
+      body: JSON.stringify({ selectedBorderId: requested })
+    });
+    if (data?.user) {
+      state.me = { ...state.me, ...data.user };
+    } else {
+      state.me = { ...state.me, selectedBorderId: requested };
+    }
+    pushToast('Profile border equipped.');
+  } catch (e) {
+    state.me = { ...state.me, selectedBorderId: previous };
+    setError(e.message);
+  } finally {
+    state.profileBorderSavingId = '';
+    if (state.view === 'profile') render();
   }
 }
 
@@ -4681,7 +4824,7 @@ function renderProfile() {
   const preview = `https://api.dicebear.com/9.x/${encodeURIComponent(me.avatarStyle || 'adventurer')}/svg?seed=${encodeURIComponent(
     me.avatarSeed || me.username
   )}`;
-  const unlockedSet = new Set(Array.isArray(me.unlockedTitles) ? me.unlockedTitles : []);
+  const titleCatalog = titleCatalogForUserClient(me);
   const level = Math.max(1, Math.floor(Number(me.level) || 1));
   const levelProgress = Math.max(0, Math.min(1, Number(me.levelProgress) || 0));
   const levelPercent = Math.round(levelProgress * 100);
@@ -4689,6 +4832,19 @@ function renderProfile() {
   const rankElo = Math.max(0, Math.floor(Number(me.rankedElo) || 0));
   const rankWins = Math.max(0, Math.floor(Number(me.rankedWins) || 0));
   const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
+  const selectedBorderId = normalizeProfileBorderIdClient(me.selectedBorderId);
+  const profileBorders = profileBordersForUser(me);
+  const selectedBorder = profileBorders.find((border) => border.id === selectedBorderId) || profileBorders[0] || PROFILE_BORDER_DEFS[0];
+  const titleFilter = normalizeTitleFilter(state.profileTitleFilter);
+  state.profileTitleFilter = titleFilter;
+  const filteredTitleCatalog = titleCatalog.filter((entry) => {
+    if (titleFilter === 'UNLOCKED') return Boolean(entry.unlocked);
+    if (titleFilter === 'LOCKED') return !entry.unlocked;
+    return true;
+  });
+  const nextBorderUnlockLevel = Number.isFinite(Number(me.nextBorderUnlockLevel))
+    ? Math.max(1, Math.floor(Number(me.nextBorderUnlockLevel)))
+    : ((profileBorders.find((border) => level < border.minLevelRequired)?.minLevelRequired) || null);
   const favoriteStats = favoriteStatOptionsForUser(me);
   const selectedFavoriteKey = normalizeFavoriteStatKey(me.favoriteStatKey);
   const selectedFavorite = favoriteStats.find((entry) => entry.key === selectedFavoriteKey) || favoriteStats[0];
@@ -4705,6 +4861,7 @@ function renderProfile() {
   const defaultProfileSections = {
     identity: true,
     progress: true,
+    borders: false,
     social: true,
     titles: false,
     security: false
@@ -4793,24 +4950,69 @@ function renderProfile() {
       <button id="openFavoriteStatModalBtn" class="primary profile-favorite-open-btn" type="button">Choose Favorite Stat</button>
     </div>
   `;
+  const bordersBody = `
+    <div class="profile-border-head">
+      <div>
+        <label>Profile Border</label>
+        <div class="muted">Cosmetic frame unlocked every 10 levels.</div>
+      </div>
+      <div class="profile-border-current muted">Equipped: <strong>${selectedBorder?.name || 'None'}</strong></div>
+    </div>
+    <div class="profile-borders-grid">
+      ${profileBorders.map((border) => {
+        const unlocked = Boolean(border.unlocked);
+        const equipped = selectedBorderId === border.id;
+        const pending = state.profileBorderSavingId === border.id;
+        return `<article class="profile-border-option ${unlocked ? 'unlocked' : 'locked'} ${equipped ? 'equipped' : ''}">
+          <div class="profile-border-preview profile-border-frame profile-border-token-${border.previewToken}" aria-hidden="true"></div>
+          <div class="profile-border-option-info">
+            <strong>${border.name}</strong>
+            <span class="muted">${border.tier} • ${unlocked ? 'Unlocked' : `Unlocks at level ${border.minLevelRequired}`}</span>
+          </div>
+          <div class="profile-border-option-actions">
+            ${
+              unlocked
+                ? `<button class="${equipped ? 'ghost' : 'primary'}" type="button" data-profile-border-equip="${border.id}" ${equipped || pending || state.profileBorderSavingId ? 'disabled' : ''}>
+                    ${pending ? 'Equipping...' : equipped ? 'Equipped' : 'Equip'}
+                  </button>`
+                : `<span class="muted">Locked</span>`
+            }
+          </div>
+        </article>`;
+      }).join('')}
+    </div>
+    <div class="muted profile-border-next">${nextBorderUnlockLevel ? `Next border at Level ${nextBorderUnlockLevel}` : 'All profile borders unlocked.'}</div>
+  `;
   const titlesBody = `
     <div class="titles-equip">
       <label>Displayed Title</label>
       <select name="selected_title">
-        ${TITLE_DEFS.map((entry) => {
-          if (!entry.key) return '<option value="">None</option>';
-          const unlocked = unlockedSet.has(entry.key);
+        <option value="">None</option>
+        ${titleCatalog.map((entry) => {
+          const unlocked = Boolean(entry.unlocked);
           return `<option value="${entry.key}" ${me.selectedTitleKey === entry.key ? 'selected' : ''} ${unlocked ? '' : 'disabled'}>${entry.label}${unlocked ? '' : ' (Locked)'}</option>`;
         }).join('')}
       </select>
+      <label class="title-filter-row">
+        <span>Filter</span>
+        <select id="profileTitleFilterSelect">
+          <option value="ALL" ${titleFilter === 'ALL' ? 'selected' : ''}>All</option>
+          <option value="UNLOCKED" ${titleFilter === 'UNLOCKED' ? 'selected' : ''}>Unlocked</option>
+          <option value="LOCKED" ${titleFilter === 'LOCKED' ? 'selected' : ''}>Locked</option>
+        </select>
+      </label>
       <div class="titles-list">
-        ${TITLE_DEFS.filter((entry) => entry.key).map((entry) => {
-          const unlocked = unlockedSet.has(entry.key);
-          return `<div class="title-row ${unlocked ? 'unlocked' : 'locked'}" title="${unlocked ? 'Unlocked' : entry.unlockHint}">
-            <span>${unlocked ? '✓' : '🔒'} ${entry.label}</span>
-            <span class="muted">${unlocked ? 'Ready to equip' : entry.unlockHint}</span>
-          </div>`;
-        }).join('')}
+        ${
+          filteredTitleCatalog.length
+            ? filteredTitleCatalog.map((entry) => {
+                const unlocked = Boolean(entry.unlocked);
+                return `<div class="title-row ${unlocked ? 'unlocked' : 'locked'}" title="${unlocked ? 'Unlocked' : entry.requirementText}">
+                  <span>${unlocked ? '✓' : '🔒'} ${entry.label}</span>
+                  <span class="muted">${unlocked ? 'Ready to equip' : entry.requirementText}</span>
+                </div>`;
+              }).join('')
+            : '<div class="title-row locked"><span>No titles in this filter.</span><span class="muted">Try a different filter.</span></div>'
+        }
       </div>
     </div>
   `;
@@ -4826,15 +5028,18 @@ function renderProfile() {
     ${renderTopbar('Profile')}
     <main class="view-stack">
       <div class="card section profile-shell">
-        <div class="row profile-name-row" style="align-items:center;gap:8px;margin-bottom:8px">
-          <strong>${me.username}</strong>
-          ${renderRankTierBadge(me)}
-          ${renderBadgePill(me.dynamicBadge)}
-          ${me.selectedTitle ? `<span class="nameplate-title">${me.selectedTitle}</span>` : ''}
+        <div class="profile-header-card profile-border-frame profile-border-token-${selectedBorder?.previewToken || 'none'}">
+          <div class="row profile-name-row" style="align-items:center;gap:8px;margin-bottom:0">
+            <strong>${me.username}</strong>
+            ${renderRankTierBadge(me)}
+            ${renderBadgePill(me.dynamicBadge)}
+            ${me.selectedTitle ? `<span class="nameplate-title">${me.selectedTitle}</span>` : ''}
+          </div>
         </div>
         <form id="profileForm" class="profile-form">
           ${renderProfileSection('identity', 'Identity', identityBody)}
           ${renderProfileSection('progress', 'Progress & Rank', progressBody)}
+          ${renderProfileSection('borders', 'Profile Border', bordersBody)}
           ${renderProfileSection('social', 'Social', socialBody)}
           ${renderProfileSection('titles', 'Titles', titlesBody)}
           ${renderProfileSection('security', 'Security', securityBody)}
@@ -4888,6 +5093,20 @@ function renderProfile() {
       if (!key) return;
       state.profileSections[key] = !Boolean(state.profileSections[key]);
       render();
+    };
+  });
+  const profileTitleFilterSelect = document.getElementById('profileTitleFilterSelect');
+  if (profileTitleFilterSelect) {
+    profileTitleFilterSelect.onchange = (event) => {
+      state.profileTitleFilter = normalizeTitleFilter(event.target.value);
+      render();
+    };
+  }
+  app.querySelectorAll('[data-profile-border-equip]').forEach((btn) => {
+    btn.onclick = () => {
+      const borderId = String(btn.dataset.profileBorderEquip || '').trim().toUpperCase();
+      if (!borderId) return;
+      equipProfileBorder(borderId);
     };
   });
   const togglePinBtn = document.getElementById('togglePinBtn');

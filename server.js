@@ -104,11 +104,211 @@ const XP_REWARDS = Object.freeze({
   botLoss: 5,
   challenge: 75
 });
-const TITLE_DEFS = Object.freeze({
-  HIGH_ROLLER: { key: 'HIGH_ROLLER', label: 'High Roller' },
-  GIANT_KILLER: { key: 'GIANT_KILLER', label: 'Giant Killer' },
-  STREAK_LORD: { key: 'STREAK_LORD', label: 'Streak Lord' }
-});
+const PROFILE_BORDER_DEFS = Object.freeze([
+  { id: 'NONE', name: 'None', minLevelRequired: 1, tier: 'Default', previewToken: 'none' },
+  { id: 'BRONZE_TRIM', name: 'Bronze Trim', minLevelRequired: 10, tier: 'Common', previewToken: 'bronze-trim' },
+  { id: 'GILDED_EDGE', name: 'Gilded Edge', minLevelRequired: 20, tier: 'Uncommon', previewToken: 'gilded-edge' },
+  { id: 'EMERALD_CIRCUIT', name: 'Emerald Circuit', minLevelRequired: 30, tier: 'Rare', previewToken: 'emerald-circuit' },
+  { id: 'NEBULA_FRAME', name: 'Nebula Frame', minLevelRequired: 40, tier: 'Epic', previewToken: 'nebula-frame' },
+  { id: 'MYTHIC_CREST', name: 'Mythic Crest', minLevelRequired: 50, tier: 'Mythic', previewToken: 'mythic-crest' },
+  { id: 'ROYAL_AURORA', name: 'Royal Aurora', minLevelRequired: 60, tier: 'Mythic', previewToken: 'royal-aurora' },
+  { id: 'OBSIDIAN_CROWN', name: 'Obsidian Crown', minLevelRequired: 70, tier: 'Legendary', previewToken: 'obsidian-crown' },
+  { id: 'SOLAR_FLARE', name: 'Solar Flare', minLevelRequired: 80, tier: 'Legendary', previewToken: 'solar-flare' },
+  { id: 'CELESTIAL_LATTICE', name: 'Celestial Lattice', minLevelRequired: 90, tier: 'Ascendant', previewToken: 'celestial-lattice' },
+  { id: 'ETERNAL_SOVEREIGN', name: 'Eternal Sovereign', minLevelRequired: 100, tier: 'Ascendant', previewToken: 'eternal-sovereign' }
+]);
+const PROFILE_BORDER_DEFS_BY_ID = Object.freeze(
+  Object.fromEntries(PROFILE_BORDER_DEFS.map((border) => [border.id, border]))
+);
+const TITLE_DEFS_LIST = Object.freeze([
+  {
+    key: 'HIGH_ROLLER',
+    label: 'High Roller',
+    category: 'skill',
+    unlockCondition: { type: 'highRollerMatches', threshold: 10 },
+    requirementText: 'Play 10 high roller matches.',
+    description: 'Play 10 high roller matches.'
+  },
+  {
+    key: 'GIANT_KILLER',
+    label: 'Giant Killer',
+    category: 'skill',
+    unlockCondition: { type: 'manual' },
+    requirementText: 'Beat a higher-level or richer opponent.',
+    description: 'Beat a higher-level or richer opponent.'
+  },
+  {
+    key: 'STREAK_LORD',
+    label: 'Streak Lord',
+    category: 'skill',
+    unlockCondition: { type: 'bestMatchWinStreak', threshold: 10 },
+    requirementText: 'Reach a 10-match win streak.',
+    description: 'Reach a 10-match win streak.'
+  },
+  {
+    key: 'RISING_STAR',
+    label: 'Rising Star',
+    category: 'level',
+    unlockCondition: { type: 'level', threshold: 10 },
+    requirementText: 'Reach level 10.',
+    description: 'A strong start at the tables.'
+  },
+  {
+    key: 'TABLE_REGULAR',
+    label: 'Table Regular',
+    category: 'level',
+    unlockCondition: { type: 'level', threshold: 25 },
+    requirementText: 'Reach level 25.',
+    description: 'A familiar face in every lobby.'
+  },
+  {
+    key: 'VETERAN',
+    label: 'Veteran',
+    category: 'level',
+    unlockCondition: { type: 'level', threshold: 50 },
+    requirementText: 'Reach level 50.',
+    description: 'Experience and composure under pressure.'
+  },
+  {
+    key: 'ELITE_GRINDER',
+    label: 'Elite Grinder',
+    category: 'level',
+    unlockCondition: { type: 'level', threshold: 75 },
+    requirementText: 'Reach level 75.',
+    description: 'Relentless sessions and steady gains.'
+  },
+  {
+    key: 'LEGEND',
+    label: 'Legend',
+    category: 'level',
+    unlockCondition: { type: 'level', threshold: 100 },
+    requirementText: 'Reach level 100.',
+    description: 'A true blackjack legend.'
+  },
+  {
+    key: 'BLACKJACK_MAGNET',
+    label: 'Blackjack Magnet',
+    category: 'skill',
+    unlockCondition: { type: 'blackjacks', threshold: 25 },
+    requirementText: 'Deal 25 natural blackjacks.',
+    description: 'Naturals seem to find you.'
+  },
+  {
+    key: 'NATURAL_BORN',
+    label: 'Natural Born',
+    category: 'skill',
+    unlockCondition: { type: 'blackjacks', threshold: 75 },
+    requirementText: 'Deal 75 natural blackjacks.',
+    description: 'Born for blackjack.'
+  },
+  {
+    key: 'SPLIT_SPECIALIST',
+    label: 'Split Specialist',
+    category: 'skill',
+    unlockCondition: { type: 'splitsAttempted', threshold: 25 },
+    requirementText: 'Use Split 25 times.',
+    description: 'You see value in every pair.'
+  },
+  {
+    key: 'DOUBLE_TROUBLE',
+    label: 'Double Trouble',
+    category: 'skill',
+    unlockCondition: { type: 'doublesAttempted', threshold: 25 },
+    requirementText: 'Use Double 25 times.',
+    description: 'Aggressive pressure pays off.'
+  },
+  {
+    key: 'PUSH_MASTER',
+    label: 'Push Master',
+    category: 'skill',
+    unlockCondition: { type: 'pushes', threshold: 40 },
+    requirementText: 'Record 40 pushes.',
+    description: 'Impossible to put away.'
+  },
+  {
+    key: 'ROAD_WARRIOR',
+    label: 'Road Warrior',
+    category: 'skill',
+    unlockCondition: { type: 'matchesPlayed', threshold: 100 },
+    requirementText: 'Complete 100 matches.',
+    description: 'You have seen every table state.'
+  },
+  {
+    key: 'TABLE_SHARK',
+    label: 'Table Shark',
+    category: 'skill',
+    unlockCondition: { type: 'handsWon', threshold: 150 },
+    requirementText: 'Win 150 hands.',
+    description: 'Efficient, sharp, and dangerous.'
+  },
+  {
+    key: 'CHIP_COLLECTOR',
+    label: 'Chip Collector',
+    category: 'skill',
+    unlockCondition: { type: 'totalChipsWon', threshold: 5000 },
+    requirementText: 'Win 5,000 chips total.',
+    description: 'Stacking chips consistently.'
+  },
+  {
+    key: 'CHIP_TITAN',
+    label: 'Chip Titan',
+    category: 'skill',
+    unlockCondition: { type: 'totalChipsWon', threshold: 20000 },
+    requirementText: 'Win 20,000 chips total.',
+    description: 'A heavyweight of the tables.'
+  },
+  {
+    key: 'RANKED_CONTENDER',
+    label: 'Ranked Contender',
+    category: 'skill',
+    unlockCondition: { type: 'rankedWins', threshold: 10 },
+    requirementText: 'Win 10 ranked series.',
+    description: 'You belong in the ranked queue.'
+  },
+  {
+    key: 'RANKED_CONQUEROR',
+    label: 'Ranked Conqueror',
+    category: 'skill',
+    unlockCondition: { type: 'rankedWins', threshold: 30 },
+    requirementText: 'Win 30 ranked series.',
+    description: 'A feared ranked finisher.'
+  },
+  {
+    key: 'PVP_DUELIST',
+    label: 'PvP Duelist',
+    category: 'skill',
+    unlockCondition: { type: 'pvpWins', threshold: 25 },
+    requirementText: 'Win 25 PvP matches.',
+    description: 'Battle-tested against real opponents.'
+  },
+  {
+    key: 'SEVEN_SENSE',
+    label: 'Seven Sense',
+    category: 'skill',
+    unlockCondition: { type: 'sixSevenDealt', threshold: 20 },
+    requirementText: "Get 20 starting 6-7's.",
+    description: "You always feel the 6-7 coming."
+  },
+  {
+    key: 'DAILY_GRINDER',
+    label: 'Daily Grinder',
+    category: 'skill',
+    unlockCondition: { type: 'dailyWinStreak', threshold: 7 },
+    requirementText: 'Reach a 7-day daily win streak.',
+    description: 'Consistent every day.'
+  },
+  {
+    key: 'UNBREAKABLE',
+    label: 'Unbreakable',
+    category: 'skill',
+    unlockCondition: { type: 'bestMatchWinStreak', threshold: 15 },
+    requirementText: 'Reach a 15-match win streak.',
+    description: 'The streak keeps climbing.'
+  }
+]);
+const TITLE_DEFS = Object.freeze(
+  Object.fromEntries(TITLE_DEFS_LIST.map((title) => [title.key, title]))
+);
 const FAVORITE_STAT_KEYS = Object.freeze([
   'TOTAL_MATCHES',
   'HANDS_WON',
@@ -383,6 +583,10 @@ for (const user of db.data.users) {
     user.selectedTitle = '';
     dbTouched = true;
   }
+  if (typeof user.selectedBorderId !== 'string') {
+    user.selectedBorderId = 'NONE';
+    dbTouched = true;
+  }
   if (typeof user.customStatText !== 'string') {
     user.customStatText = '';
     dbTouched = true;
@@ -480,7 +684,10 @@ for (const user of db.data.users) {
   if (ensureRankedState(user)) {
     dbTouched = true;
   }
-  if (ensureTitleState(user)) {
+  if (recomputeTitleUnlocks(user)) {
+    dbTouched = true;
+  }
+  if (ensureProfileBorderState(user)) {
     dbTouched = true;
   }
   const cleanCustomStat = sanitizeCustomStatText(user.customStatText || '');
@@ -1245,9 +1452,87 @@ function levelProgressFromXp(xp) {
   };
 }
 
+function normalizeProfileBorderId(borderId) {
+  const key = String(borderId || '').trim().toUpperCase();
+  return PROFILE_BORDER_DEFS_BY_ID[key] ? key : 'NONE';
+}
+
+function profileBorderUnlockIdsForLevel(level) {
+  const safeLevel = Math.max(1, Math.floor(Number(level) || 1));
+  return PROFILE_BORDER_DEFS
+    .filter((border) => safeLevel >= Math.max(1, Math.floor(Number(border.minLevelRequired) || 1)))
+    .map((border) => border.id);
+}
+
+function nextProfileBorderUnlockLevel(level) {
+  const safeLevel = Math.max(1, Math.floor(Number(level) || 1));
+  const next = PROFILE_BORDER_DEFS.find((border) => Math.floor(Number(border.minLevelRequired) || 1) > safeLevel);
+  return next ? Math.floor(Number(next.minLevelRequired) || 1) : null;
+}
+
+function ensureProfileBorderState(user) {
+  if (!user) return false;
+  let changed = false;
+  const unlockedIds = profileBorderUnlockIdsForLevel(levelFromXp(user?.xp || 0));
+  const normalizedSelected = normalizeProfileBorderId(user?.selectedBorderId);
+  if (normalizedSelected !== user?.selectedBorderId) {
+    user.selectedBorderId = normalizedSelected;
+    changed = true;
+  }
+  if (!unlockedIds.includes(user.selectedBorderId)) {
+    user.selectedBorderId = 'NONE';
+    changed = true;
+  }
+  return changed;
+}
+
 function normalizeTitleKey(titleKey) {
   const key = String(titleKey || '').trim().toUpperCase();
   return TITLE_DEFS[key] ? key : '';
+}
+
+function titleMetricValueForUser(user, metricType) {
+  const level = levelFromXp(user?.xp || 0);
+  switch (String(metricType || '').trim()) {
+    case 'level':
+      return level;
+    case 'blackjacks':
+      return Math.max(0, Math.floor(Number(user?.stats?.blackjacks) || 0));
+    case 'splitsAttempted':
+      return Math.max(0, Math.floor(Number(user?.stats?.splitsAttempted) || 0));
+    case 'doublesAttempted':
+      return Math.max(0, Math.floor(Number(user?.stats?.doublesAttempted) || 0));
+    case 'pushes':
+      return Math.max(0, Math.floor(Number(user?.stats?.pushes) || 0));
+    case 'matchesPlayed':
+      return Math.max(0, Math.floor(Number(user?.stats?.matchesPlayed) || 0));
+    case 'handsWon':
+      return Math.max(0, Math.floor(Number(user?.stats?.handsWon) || 0));
+    case 'totalChipsWon':
+      return Math.max(0, Math.floor(Number(user?.stats?.totalChipsWon) || 0));
+    case 'rankedWins':
+      return Math.max(0, Math.floor(Number(user?.rankedWins) || 0));
+    case 'pvpWins':
+      return Math.max(0, Math.floor(Number(user?.pvpWins) || 0));
+    case 'sixSevenDealt':
+      return Math.max(0, Math.floor(Number(user?.stats?.sixSevenDealt) || 0));
+    case 'dailyWinStreak':
+      return Math.max(0, Math.floor(Number(user?.dailyWinStreakCount) || 0));
+    case 'bestMatchWinStreak':
+      return Math.max(0, Math.floor(Number(user?.bestMatchWinStreak) || 0));
+    case 'highRollerMatches':
+      return Math.max(0, Math.floor(Number(user?.highRollerMatchCount) || 0));
+    default:
+      return 0;
+  }
+}
+
+function titleUnlockConditionMet(user, unlockCondition) {
+  if (!unlockCondition || typeof unlockCondition !== 'object') return false;
+  const conditionType = String(unlockCondition.type || '').trim();
+  if (!conditionType || conditionType === 'manual') return false;
+  const threshold = Math.max(1, Math.floor(Number(unlockCondition.threshold) || 0));
+  return titleMetricValueForUser(user, conditionType) >= threshold;
 }
 
 function ensureTitleState(user) {
@@ -1278,14 +1563,65 @@ function ensureTitleState(user) {
   return changed;
 }
 
-function unlockTitle(user, titleKey) {
+function recomputeTitleUnlocks(user) {
+  if (!user) return false;
+  let changed = ensureTitleState(user);
+  let unlockedAny = false;
+  for (const definition of TITLE_DEFS_LIST) {
+    if (!definition || !definition.key) continue;
+    if (!titleUnlockConditionMet(user, definition.unlockCondition)) continue;
+    if (user.unlockedTitles.includes(definition.key)) continue;
+    user.unlockedTitles.push(definition.key);
+    changed = true;
+    unlockedAny = true;
+  }
+  if (user.selectedTitle && !user.unlockedTitles.includes(user.selectedTitle)) {
+    user.selectedTitle = '';
+    changed = true;
+  }
+  if (unlockedAny || changed) invalidateLeaderboardCache();
+  return changed;
+}
+
+function titleCatalogForUser(user) {
+  const unlockedSet = new Set(
+    (Array.isArray(user?.unlockedTitles) ? user.unlockedTitles : [])
+      .map((titleKey) => normalizeTitleKey(titleKey))
+      .filter(Boolean)
+  );
+  return TITLE_DEFS_LIST.map((definition) => {
+    const unlockCondition = definition?.unlockCondition && typeof definition.unlockCondition === 'object'
+      ? {
+          type: String(definition.unlockCondition.type || ''),
+          threshold: Number.isFinite(Number(definition.unlockCondition.threshold))
+            ? Math.max(1, Math.floor(Number(definition.unlockCondition.threshold)))
+            : null
+        }
+      : null;
+    const progressValue = unlockCondition?.type && unlockCondition.type !== 'manual'
+      ? titleMetricValueForUser(user, unlockCondition.type)
+      : null;
+    return {
+      key: definition.key,
+      label: definition.label,
+      category: definition.category || 'skill',
+      description: definition.description || '',
+      requirementText: definition.requirementText || definition.description || '',
+      unlockCondition,
+      unlocked: unlockedSet.has(definition.key),
+      progressValue: progressValue === null ? null : Math.max(0, Math.floor(Number(progressValue) || 0))
+    };
+  });
+}
+
+function unlockTitle(user, titleKey, { suppressInvalidate = false } = {}) {
   if (!user) return false;
   ensureTitleState(user);
   const normalized = normalizeTitleKey(titleKey);
   if (!normalized) return false;
   if (user.unlockedTitles.includes(normalized)) return false;
   user.unlockedTitles.push(normalized);
-  invalidateLeaderboardCache();
+  if (!suppressInvalidate) invalidateLeaderboardCache();
   return true;
 }
 
@@ -1451,13 +1787,18 @@ function awardXp(user, amount) {
   if (afterLevel > beforeLevel) {
     applyLevelRewards(user, beforeLevel, afterLevel);
   }
+  recomputeTitleUnlocks(user);
+  ensureProfileBorderState(user);
   invalidateLeaderboardCache();
   return user.xp;
 }
 
 function selectedTitleLabelForUser(user) {
   const key = normalizeTitleKey(user?.selectedTitle);
-  return key ? TITLE_DEFS[key]?.label || '' : '';
+  if (!key) return '';
+  const unlocked = new Set((Array.isArray(user?.unlockedTitles) ? user.unlockedTitles : []).map((value) => normalizeTitleKey(value)).filter(Boolean));
+  if (!unlocked.has(key)) return '';
+  return TITLE_DEFS[key]?.label || '';
 }
 
 function normalizeUsername(username) {
@@ -1480,8 +1821,13 @@ function sanitizeUser(user) {
   const unlockedTitles = (Array.isArray(user?.unlockedTitles) ? user.unlockedTitles : [])
     .map((titleKey) => normalizeTitleKey(titleKey))
     .filter(Boolean);
+  const unlockedTitleSet = new Set(unlockedTitles);
   const selectedTitleKey = normalizeTitleKey(user?.selectedTitle);
-  const selectedTitle = selectedTitleKey ? TITLE_DEFS[selectedTitleKey]?.label || '' : '';
+  const selectedTitleKeySafe = unlockedTitleSet.has(selectedTitleKey) ? selectedTitleKey : '';
+  const selectedTitle = selectedTitleKeySafe ? TITLE_DEFS[selectedTitleKeySafe]?.label || '' : '';
+  const unlockedBorderIds = profileBorderUnlockIdsForLevel(levelMeta.level);
+  const selectedBorderCandidate = normalizeProfileBorderId(user?.selectedBorderId);
+  const selectedBorderId = unlockedBorderIds.includes(selectedBorderCandidate) ? selectedBorderCandidate : 'NONE';
   const customStatText = sanitizeCustomStatText(user?.customStatText || '');
   const favoriteStatKey = sanitizeFavoriteStatKey(user?.favoriteStatKey);
   return {
@@ -1528,16 +1874,32 @@ function sanitizeUser(user) {
     bestMatchWinStreak: Math.max(0, Math.floor(Number(user?.bestMatchWinStreak) || 0)),
     highRollerMatchCount: Math.max(0, Math.floor(Number(user?.highRollerMatchCount) || 0)),
     unlockedTitles,
-    selectedTitleKey,
+    selectedTitleKey: selectedTitleKeySafe,
     selectedTitle,
+    selectedBorderId,
     customStatText,
     favoriteStatKey
   };
 }
 
 function sanitizeSelfUser(user) {
+  const levelMeta = levelProgressFromXp(user?.xp || 0);
+  const unlockedBorderIds = profileBorderUnlockIdsForLevel(levelMeta.level);
+  const nextBorderUnlockLevel = nextProfileBorderUnlockLevel(levelMeta.level);
+  const profileBorders = PROFILE_BORDER_DEFS.map((border) => ({
+    id: border.id,
+    name: border.name,
+    minLevelRequired: Math.max(1, Math.floor(Number(border.minLevelRequired) || 1)),
+    tier: border.tier,
+    previewToken: border.previewToken,
+    unlocked: unlockedBorderIds.includes(border.id)
+  }));
   return {
     ...sanitizeUser(user),
+    titleCatalog: titleCatalogForUser(user),
+    unlockedBorderIds,
+    nextBorderUnlockLevel,
+    profileBorders,
     pinMasked: '****',
     pin: user.pin || null
   };
@@ -2901,6 +3263,8 @@ function finalizeRankedSeriesElo(series, {
   loser.rankedLossStreak = Math.max(0, Math.floor(Number(loser.rankedLossStreak) || 0) + 1);
   ensureRankedState(user1);
   ensureRankedState(user2);
+  recomputeTitleUnlocks(user1);
+  recomputeTitleUnlocks(user2);
 
   const now = nowIso();
   const seriesElo = {
@@ -4155,9 +4519,10 @@ function resolveRound(match) {
 
   for (const user of [userA, userB]) {
     if (!user) continue;
-    ensureTitleState(user);
     if (Math.floor(Number(user.highRollerMatchCount) || 0) >= 10) unlockTitle(user, 'HIGH_ROLLER');
     if (Math.floor(Number(user.currentMatchWinStreak) || 0) >= 10) unlockTitle(user, 'STREAK_LORD');
+    recomputeTitleUnlocks(user);
+    ensureProfileBorderState(user);
   }
 
   if (realMatch) {
@@ -5554,6 +5919,7 @@ function buildNewUser(username) {
     peakRankTier: rankedTierFromElo(RANKED_BASE_ELO).key,
     unlockedTitles: [],
     selectedTitle: '',
+    selectedBorderId: 'NONE',
     customStatText: '',
     favoriteStatKey: FAVORITE_STAT_DEFAULT,
     headToHead: {}
@@ -5645,8 +6011,10 @@ app.get('/api/me', authMiddleware, async (req, res) => {
   const friendsData = buildFriendsPayload(req.user);
   const refreshed = refreshChallengesForUser(req.user);
   const refreshedSkills = ensureSkillChallenges(req.user);
+  const unlockedTitlesChanged = recomputeTitleUnlocks(req.user);
+  const borderStateChanged = ensureProfileBorderState(req.user);
   const notificationsState = notificationsForUser(req.user, { limit: 30, markSeen: false });
-  if (refreshed || refreshedSkills || notificationsState.changed) await db.write();
+  if (refreshed || refreshedSkills || notificationsState.changed || unlockedTitlesChanged || borderStateChanged) await db.write();
   const freeClaim = freeClaimMeta(req.user);
   const challengeData = buildChallengePayload(req.user);
   const rankedOverview = rankedOverviewForUser(req.user);
@@ -5781,7 +6149,7 @@ app.patch('/api/profile/favorite-stat', authMiddleware, async (req, res) => {
 });
 
 app.patch('/api/profile/title', authMiddleware, async (req, res) => {
-  ensureTitleState(req.user);
+  recomputeTitleUnlocks(req.user);
   const requested = normalizeTitleKey(req.body?.selectedTitle || req.body?.titleKey || '');
   if (!requested) {
     req.user.selectedTitle = '';
@@ -5796,6 +6164,24 @@ app.patch('/api/profile/title', authMiddleware, async (req, res) => {
   invalidateLeaderboardCache();
   await db.write();
   return res.json({ ok: true, selectedTitle: requested, user: sanitizeSelfUser(req.user) });
+});
+
+app.patch('/api/profile/border', authMiddleware, async (req, res) => {
+  ensureProfileBorderState(req.user);
+  const requestedRaw = String(req.body?.selectedBorderId || req.body?.borderId || '').trim().toUpperCase();
+  if (requestedRaw && !PROFILE_BORDER_DEFS_BY_ID[requestedRaw]) {
+    return res.status(400).json({ error: 'Unknown profile border' });
+  }
+  const requested = requestedRaw || 'NONE';
+  const borderDef = PROFILE_BORDER_DEFS_BY_ID[requested];
+  const userLevel = levelFromXp(req.user?.xp || 0);
+  if (borderDef && userLevel < Math.max(1, Math.floor(Number(borderDef.minLevelRequired) || 1))) {
+    return res.status(403).json({ error: `Border unlocks at level ${borderDef.minLevelRequired}` });
+  }
+  req.user.selectedBorderId = requested;
+  ensureProfileBorderState(req.user);
+  await db.write();
+  return res.json({ ok: true, selectedBorderId: req.user.selectedBorderId, user: sanitizeSelfUser(req.user) });
 });
 
 app.get('/api/friends', authMiddleware, (req, res) => {
@@ -6594,8 +6980,8 @@ app.post('/api/challenges/claim', authMiddleware, async (req, res) => {
   target.claimedAt = nowIso();
   const bankroll = creditUserBankroll(req.user, target.rewardChips);
   awardXp(req.user, XP_REWARDS.challenge);
-  ensureTitleState(req.user);
-  if (Math.floor(Number(req.user.currentMatchWinStreak) || 0) >= 10) unlockTitle(req.user, 'STREAK_LORD');
+  recomputeTitleUnlocks(req.user);
+  ensureProfileBorderState(req.user);
   await db.write();
   emitUserUpdate(req.user.id);
   return res.json({
@@ -6980,6 +7366,9 @@ export {
   markNotificationsSeenForUser,
   notificationsForUser,
   levelRewardForLevel,
+  profileBorderUnlockIdsForLevel,
+  nextProfileBorderUnlockLevel,
+  recomputeTitleUnlocks,
   sampleBlackjackFrequency,
   getBotObservation,
   chooseBotActionFromObservation

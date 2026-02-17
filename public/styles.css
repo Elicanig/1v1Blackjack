@@ -3253,6 +3253,126 @@ select:focus-visible {
   gap: 12px;
 }
 
+.profile-header-card {
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: rgba(10, 20, 17, 0.72);
+}
+
+.profile-border-frame {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--profile-border-stroke, rgba(230, 238, 225, 0.2));
+  box-shadow:
+    inset 0 0 0 1px var(--profile-border-inset, rgba(230, 238, 225, 0.08)),
+    0 0 18px var(--profile-border-glow, transparent);
+}
+
+.profile-border-frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--profile-border-overlay, transparent);
+  background-size: 220% 220%;
+  opacity: var(--profile-border-overlay-opacity, 0);
+  animation: profileBorderShimmer 12s linear infinite;
+}
+
+@keyframes profileBorderShimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 220% 50%; }
+}
+
+.profile-border-token-none {
+  --profile-border-stroke: rgba(230, 238, 225, 0.2);
+  --profile-border-inset: rgba(230, 238, 225, 0.08);
+  --profile-border-glow: transparent;
+  --profile-border-overlay: transparent;
+  --profile-border-overlay-opacity: 0;
+}
+
+.profile-border-token-bronze-trim {
+  --profile-border-stroke: rgba(181, 120, 66, 0.56);
+  --profile-border-inset: rgba(181, 120, 66, 0.2);
+  --profile-border-glow: rgba(181, 120, 66, 0.22);
+  --profile-border-overlay: linear-gradient(120deg, rgba(214, 166, 120, 0.16), rgba(0, 0, 0, 0));
+  --profile-border-overlay-opacity: 0.35;
+}
+
+.profile-border-token-gilded-edge {
+  --profile-border-stroke: rgba(205, 167, 100, 0.62);
+  --profile-border-inset: rgba(205, 167, 100, 0.24);
+  --profile-border-glow: rgba(205, 167, 100, 0.28);
+  --profile-border-overlay: linear-gradient(120deg, rgba(241, 216, 165, 0.22), rgba(64, 45, 18, 0.12), rgba(241, 216, 165, 0.18));
+  --profile-border-overlay-opacity: 0.52;
+}
+
+.profile-border-token-emerald-circuit {
+  --profile-border-stroke: rgba(89, 201, 164, 0.58);
+  --profile-border-inset: rgba(89, 201, 164, 0.22);
+  --profile-border-glow: rgba(89, 201, 164, 0.26);
+  --profile-border-overlay: linear-gradient(125deg, rgba(130, 245, 207, 0.16), rgba(23, 68, 54, 0.18), rgba(130, 245, 207, 0.12));
+  --profile-border-overlay-opacity: 0.52;
+}
+
+.profile-border-token-nebula-frame {
+  --profile-border-stroke: rgba(151, 132, 222, 0.58);
+  --profile-border-inset: rgba(151, 132, 222, 0.22);
+  --profile-border-glow: rgba(151, 132, 222, 0.3);
+  --profile-border-overlay: linear-gradient(125deg, rgba(224, 145, 232, 0.18), rgba(82, 67, 143, 0.2), rgba(129, 187, 252, 0.16));
+  --profile-border-overlay-opacity: 0.58;
+}
+
+.profile-border-token-mythic-crest {
+  --profile-border-stroke: rgba(239, 201, 125, 0.7);
+  --profile-border-inset: rgba(239, 201, 125, 0.28);
+  --profile-border-glow: rgba(239, 201, 125, 0.32);
+  --profile-border-overlay: linear-gradient(125deg, rgba(255, 224, 150, 0.24), rgba(255, 132, 132, 0.18), rgba(255, 224, 150, 0.2));
+  --profile-border-overlay-opacity: 0.64;
+}
+
+.profile-border-token-royal-aurora {
+  --profile-border-stroke: rgba(119, 208, 255, 0.66);
+  --profile-border-inset: rgba(119, 208, 255, 0.26);
+  --profile-border-glow: rgba(119, 208, 255, 0.34);
+  --profile-border-overlay: linear-gradient(130deg, rgba(132, 253, 232, 0.2), rgba(100, 167, 255, 0.24), rgba(194, 164, 255, 0.2));
+  --profile-border-overlay-opacity: 0.62;
+}
+
+.profile-border-token-obsidian-crown {
+  --profile-border-stroke: rgba(167, 179, 205, 0.64);
+  --profile-border-inset: rgba(167, 179, 205, 0.24);
+  --profile-border-glow: rgba(167, 179, 205, 0.3);
+  --profile-border-overlay: linear-gradient(140deg, rgba(90, 109, 142, 0.28), rgba(35, 46, 73, 0.2), rgba(178, 190, 218, 0.2));
+  --profile-border-overlay-opacity: 0.58;
+}
+
+.profile-border-token-solar-flare {
+  --profile-border-stroke: rgba(247, 165, 90, 0.7);
+  --profile-border-inset: rgba(247, 165, 90, 0.28);
+  --profile-border-glow: rgba(247, 165, 90, 0.34);
+  --profile-border-overlay: linear-gradient(130deg, rgba(255, 226, 147, 0.24), rgba(255, 137, 101, 0.2), rgba(255, 226, 147, 0.2));
+  --profile-border-overlay-opacity: 0.66;
+}
+
+.profile-border-token-celestial-lattice {
+  --profile-border-stroke: rgba(186, 214, 255, 0.72);
+  --profile-border-inset: rgba(186, 214, 255, 0.3);
+  --profile-border-glow: rgba(186, 214, 255, 0.36);
+  --profile-border-overlay: linear-gradient(132deg, rgba(222, 248, 255, 0.25), rgba(122, 164, 255, 0.25), rgba(243, 199, 255, 0.22));
+  --profile-border-overlay-opacity: 0.7;
+}
+
+.profile-border-token-eternal-sovereign {
+  --profile-border-stroke: rgba(255, 215, 140, 0.78);
+  --profile-border-inset: rgba(255, 215, 140, 0.32);
+  --profile-border-glow: rgba(255, 215, 140, 0.4);
+  --profile-border-overlay: linear-gradient(132deg, rgba(255, 238, 173, 0.26), rgba(166, 214, 255, 0.26), rgba(255, 182, 120, 0.24));
+  --profile-border-overlay-opacity: 0.72;
+}
+
 .profile-form {
   display: grid;
   gap: 12px;
@@ -3362,6 +3482,69 @@ select:focus-visible {
   color: #f1e4c8;
 }
 
+.profile-border-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.profile-border-current strong {
+  color: #f2dfb7;
+}
+
+.profile-borders-grid {
+  display: grid;
+  gap: 8px;
+  max-height: 270px;
+  overflow: auto;
+}
+
+.profile-border-option {
+  border: 1px solid rgba(230, 238, 225, 0.12);
+  border-radius: 10px;
+  background: rgba(10, 20, 17, 0.64);
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.profile-border-option.locked {
+  opacity: 0.78;
+}
+
+.profile-border-option.equipped {
+  border-color: rgba(205, 167, 100, 0.6);
+  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.2) inset;
+}
+
+.profile-border-preview {
+  min-height: 38px;
+  border-radius: 10px;
+  background: rgba(13, 25, 21, 0.78);
+}
+
+.profile-border-option-info {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.profile-border-option-info strong {
+  font-size: 0.9rem;
+}
+
+.profile-border-option-actions {
+  display: inline-flex;
+  align-items: center;
+}
+
+.profile-border-next {
+  margin-top: 2px;
+}
+
 .profile-favorite-open-btn {
   width: fit-content;
 }
@@ -3387,6 +3570,13 @@ select:focus-visible {
 
 .titles-equip {
   display: grid;
+  gap: 8px;
+}
+
+.title-filter-row {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 180px);
+  align-items: center;
   gap: 8px;
 }
 
@@ -4141,6 +4331,25 @@ select:focus-visible {
 
   .profile-summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .profile-border-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .profile-border-option {
+    grid-template-columns: 1fr;
+    justify-items: stretch;
+  }
+
+  .profile-border-option-actions {
+    justify-content: flex-start;
+  }
+
+  .title-filter-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
   }
 
   .profile-security-row {
