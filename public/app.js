@@ -20,6 +20,7 @@ let inviteCountdownTicker = null;
 let matchTurnTicker = null;
 let challengeCountdownTicker = null;
 let quickPlayConnectTimer = null;
+let viewTransitionTimer = null;
 const PERMISSION_ERROR_PATTERNS = [
   /not allowed by the user agent/i,
   /not allowed by the platform/i,
@@ -69,9 +70,25 @@ const TITLE_DEFS = Object.freeze([
   { key: 'PVP_DUELIST', label: 'PvP Duelist', unlockHint: 'Win 25 PvP matches.', category: 'skill' },
   { key: 'SEVEN_SENSE', label: 'Seven Sense', unlockHint: "Get 20 starting 6-7's.", category: 'skill' },
   { key: 'DAILY_GRINDER', label: 'Daily Grinder', unlockHint: 'Reach a 7-day daily win streak.', category: 'skill' },
-  { key: 'UNBREAKABLE', label: 'Unbreakable', unlockHint: 'Reach a 15-match win streak.', category: 'skill' }
+  { key: 'UNBREAKABLE', label: 'Unbreakable', unlockHint: 'Reach a 15-match win streak.', category: 'skill' },
+  { key: 'ACE_ENGINEER', label: 'Ace Engineer', unlockHint: 'Use Double 75 times.', category: 'skill' },
+  { key: 'TABLE_ARCHITECT', label: 'Table Architect', unlockHint: 'Use Split 75 times.', category: 'skill' },
+  { key: 'IRON_BANKROLL', label: 'Iron Bankroll', unlockHint: 'Win 50,000 chips total.', category: 'skill' },
+  { key: 'SERIES_GENERAL', label: 'Series General', unlockHint: 'Win 60 ranked series.', category: 'skill' },
+  { key: 'HEADHUNTER', label: 'Headhunter', unlockHint: 'Win 80 PvP matches.', category: 'skill' },
+  { key: 'WINDFALL', label: 'Windfall', unlockHint: 'Win 300 hands.', category: 'skill' },
+  { key: 'TABLE_ANCHOR', label: 'Table Anchor', unlockHint: 'Complete 250 matches.', category: 'skill' },
+  { key: 'IMMORTAL_STREAK', label: 'Immortal Streak', unlockHint: 'Reach a 20-match win streak.', category: 'skill' }
 ]);
 const TITLE_DEF_MAP = new Map(TITLE_DEFS.filter((entry) => entry.key).map((entry) => [entry.key, entry]));
+const DECK_SKIN_DEFS = Object.freeze([
+  { id: 'CLASSIC', name: 'Classic Felt', description: 'Traditional white cards and emerald backs.', minLevelRequired: 1, token: 'classic' },
+  { id: 'GOLD', name: 'Gold Reserve', description: 'Warm ivory cards with gilded trim.', minLevelRequired: 10, token: 'gold' },
+  { id: 'NEON', name: 'Neon Pulse', description: 'Cyber-glow accents with crisp contrast.', minLevelRequired: 20, token: 'neon' },
+  { id: 'OBSIDIAN', name: 'Obsidian Luxe', description: 'Dark premium face with metallic highlights.', minLevelRequired: 35, token: 'obsidian' },
+  { id: 'AURORA', name: 'Aurora Royale', description: 'Prismatic finish with subtle shimmer.', minLevelRequired: 50, token: 'aurora' }
+]);
+const DECK_SKIN_MAP = new Map(DECK_SKIN_DEFS.map((entry) => [entry.id, entry]));
 const PROFILE_BORDER_DEFS = Object.freeze([
   { id: 'NONE', name: 'None', minLevelRequired: 1, tier: 'Default', previewToken: 'none' },
   { id: 'BRONZE_TRIM', name: 'Bronze Trim', minLevelRequired: 10, tier: 'Common', previewToken: 'bronze-trim' },
@@ -408,7 +425,7 @@ function applyGlowFollowClasses() {
     return;
   }
   app
-    .querySelectorAll('button.primary, button.gold, button.ghost, .pvp-cta, .tabs .nav-pill, .nav button:not(.warn), .card.section')
+    .querySelectorAll('button.primary, button.gold, button.ghost, .pvp-cta, .tabs .nav-pill, .nav button:not(.warn), .kpi, .leaderboard-row, .friend, .title-row')
     .forEach((el) => el.classList.add('glow-follow'));
 }
 
@@ -519,6 +536,7 @@ const state = {
   favoriteStatModalOpen: false,
   favoriteStatDraftKey: '',
   favoriteStatFilter: '',
+  titleInfoModalKey: '',
   profileSections: {
     identity: true,
     progress: true,
@@ -536,6 +554,13 @@ const state = {
   rankedSeriesResultModal: null,
   rankedSeriesResultAnimKey: '',
   rankedSeriesResultAnimRaf: null,
+  xpUi: {
+    progress: 0,
+    targetProgress: 0,
+    level: 1,
+    pulseUntil: 0,
+    animRaf: null
+  },
   network: {
     offlineMode: !navigator.onLine,
     lastCheckedAt: 0,
@@ -606,6 +631,7 @@ function ensureOfflineIdentity() {
     selectedTitleKey: '',
     titleCatalog: [],
     selectedBorderId: 'NONE',
+    selectedDeckSkin: 'CLASSIC',
     profileBorders: [],
     nextBorderUnlockLevel: 10,
     customStatText: '',
@@ -614,6 +640,73 @@ function ensureOfflineIdentity() {
     pvpLosses: 0,
     dailyWinStreakCount: 0
   };
+  setXpUiSnapshot(state.me.level, state.me.levelProgress);
+}
+
+function syncXpBars() {
+  const progressPct = Math.max(0, Math.min(100, Math.round((Number(state.xpUi.progress) || 0) * 100)));
+  app.querySelectorAll('[data-xp-fill]').forEach((node) => {
+    node.style.width = `${progressPct}%`;
+  });
+  app.querySelectorAll('[data-xp-level]').forEach((node) => {
+    node.textContent = `Level ${Math.max(1, Math.floor(Number(state.xpUi.level) || 1))}`;
+  });
+}
+
+function setXpUiSnapshot(level, progress, { pulse = false } = {}) {
+  state.xpUi.level = Math.max(1, Math.floor(Number(level) || 1));
+  state.xpUi.progress = Math.max(0, Math.min(1, Number(progress) || 0));
+  state.xpUi.targetProgress = state.xpUi.progress;
+  if (pulse) state.xpUi.pulseUntil = Date.now() + 1400;
+}
+
+function animateXpProgressTo(targetProgress) {
+  const target = Math.max(0, Math.min(1, Number(targetProgress) || 0));
+  const start = Math.max(0, Math.min(1, Number(state.xpUi.progress) || 0));
+  state.xpUi.targetProgress = target;
+  if (Math.abs(target - start) < 0.003) {
+    state.xpUi.progress = target;
+    syncXpBars();
+    return;
+  }
+  if (Number.isFinite(state.xpUi.animRaf)) {
+    cancelAnimationFrame(state.xpUi.animRaf);
+    state.xpUi.animRaf = null;
+  }
+  const durationMs = 860;
+  const startedAt = performance.now();
+  const step = (now) => {
+    const elapsed = Math.max(0, now - startedAt);
+    const t = Math.min(1, elapsed / durationMs);
+    const eased = 1 - Math.pow(1 - t, 3);
+    state.xpUi.progress = start + ((target - start) * eased);
+    syncXpBars();
+    if (t < 1) {
+      state.xpUi.animRaf = requestAnimationFrame(step);
+    } else {
+      state.xpUi.progress = target;
+      syncXpBars();
+      state.xpUi.animRaf = null;
+    }
+  };
+  state.xpUi.animRaf = requestAnimationFrame(step);
+}
+
+function syncXpUiFromUser(nextUser, previousUser = null) {
+  const nextLevel = Math.max(1, Math.floor(Number(nextUser?.level) || 1));
+  const nextProgress = Math.max(0, Math.min(1, Number(nextUser?.levelProgress) || 0));
+  if (!previousUser) {
+    setXpUiSnapshot(nextLevel, nextProgress);
+    return;
+  }
+  const prevLevel = Math.max(1, Math.floor(Number(previousUser?.level) || 1));
+  const prevProgress = Math.max(0, Math.min(1, Number(previousUser?.levelProgress) || 0));
+  if (nextLevel > prevLevel) {
+    setXpUiSnapshot(nextLevel, nextProgress, { pulse: true });
+    return;
+  }
+  setXpUiSnapshot(nextLevel, prevProgress, { pulse: nextProgress > prevProgress });
+  animateXpProgressTo(nextProgress);
 }
 
 async function checkServerReachable() {
@@ -1434,6 +1527,35 @@ function profileBordersForUser(me = {}) {
   }));
 }
 
+function normalizeDeckSkinId(value) {
+  const key = String(value || '').trim().toUpperCase();
+  return DECK_SKIN_MAP.has(key) ? key : 'CLASSIC';
+}
+
+function deckSkinsForUser(me = {}) {
+  const level = Math.max(1, Math.floor(Number(me?.level) || 1));
+  return DECK_SKIN_DEFS.map((skin) => ({
+    ...skin,
+    unlocked: level >= skin.minLevelRequired
+  }));
+}
+
+function deckSkinForUser(me = state.me) {
+  const normalizedId = normalizeDeckSkinId(me?.selectedDeckSkin || 'CLASSIC');
+  const def = DECK_SKIN_MAP.get(normalizedId) || DECK_SKIN_DEFS[0];
+  const level = Math.max(1, Math.floor(Number(me?.level) || 1));
+  if (level < def.minLevelRequired) return DECK_SKIN_DEFS[0];
+  return def;
+}
+
+function streakBonusPercent(me = state.me) {
+  const streak = Math.max(0, Math.floor(Number(me?.currentMatchWinStreak) || 0));
+  if (streak >= 10) return 15;
+  if (streak >= 6) return 10;
+  if (streak >= 3) return 5;
+  return 0;
+}
+
 function titleCatalogForUserClient(me = {}) {
   const unlockedSet = new Set(
     (Array.isArray(me.unlockedTitles) ? me.unlockedTitles : [])
@@ -1468,6 +1590,12 @@ function titleCatalogForUserClient(me = {}) {
       description: entry.unlockHint || '',
       unlocked: unlockedSet.has(entry.key)
     }));
+}
+
+function titleCatalogEntryByKeyClient(me = {}, key = '') {
+  const normalizedKey = String(key || '').trim().toUpperCase();
+  if (!normalizedKey) return null;
+  return titleCatalogForUserClient(me).find((entry) => entry.key === normalizedKey) || null;
 }
 
 function normalizeTitleFilter(value) {
@@ -2111,7 +2239,9 @@ function connectSocket() {
   });
   state.socket.on('user:update', ({ user }) => {
     if (!user || !state.me || user.id !== state.me.id) return;
+    const previousMe = { ...state.me };
     state.me = { ...state.me, ...user };
+    syncXpUiFromUser(state.me, previousMe);
     loadLeaderboard({ silent: true });
     if (state.view === 'ranked' || state.view === 'home') {
       loadRankedOverview({ silent: true });
@@ -2149,7 +2279,9 @@ async function loadMe() {
     const auth = await api('/api/auth/me', { method: 'POST', body: JSON.stringify({ authToken: state.token }) });
     if (!auth?.ok) throw new Error('Invalid auth');
     const data = await api('/api/me');
+    const previousMe = state.me ? { ...state.me } : null;
     state.me = data.user;
+    syncXpUiFromUser(state.me, previousMe);
     state.rankedOverview = data.rankedOverview || null;
     applyEventsSnapshot(data.serverNow, data.activeEvents || []);
     if (!rankedQueueIsActive()) {
@@ -2270,6 +2402,7 @@ async function loadMe() {
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
     state.favoriteStatFilter = '';
+    state.titleInfoModalKey = '';
     state.profileSections = { identity: true, progress: true, borders: false, social: true, titles: false, security: false };
     state.profileTitleFilter = 'ALL';
     state.profileSaving = false;
@@ -2281,6 +2414,8 @@ async function loadMe() {
     state.rankedSeriesResultAnimKey = '';
     if (Number.isFinite(state.rankedSeriesResultAnimRaf)) cancelAnimationFrame(state.rankedSeriesResultAnimRaf);
     state.rankedSeriesResultAnimRaf = null;
+    if (Number.isFinite(state.xpUi.animRaf)) cancelAnimationFrame(state.xpUi.animRaf);
+    state.xpUi.animRaf = null;
     render();
   }
 }
@@ -2297,6 +2432,7 @@ function goToView(view) {
       state.favoriteStatModalOpen = false;
       state.favoriteStatDraftKey = '';
       state.favoriteStatFilter = '';
+      state.titleInfoModalKey = '';
     }
   }
   state.view = view;
@@ -2776,6 +2912,7 @@ async function saveProfile(form) {
   if (state.profileSaving) return;
   const avatarStyle = form.querySelector('[name="avatar_style"]').value.trim();
   const avatarSeed = form.querySelector('[name="avatar_seed"]').value.trim();
+  const selectedDeckSkin = normalizeDeckSkinId(form.querySelector('[name="selected_deck_skin"]')?.value || 'CLASSIC');
   const customStatText = String(form.querySelector('[name="custom_stat_text"]')?.value || '').slice(0, 120);
   const selectedTitle = String(form.querySelector('[name="selected_title"]')?.value || '').trim();
   const saveBtn = form.querySelector('#saveProfileBtn');
@@ -2794,11 +2931,15 @@ async function saveProfile(form) {
       method: 'PATCH',
       body: JSON.stringify({ customStatText })
     });
+    const deckSkinData = await api('/api/profile/deck-skin', {
+      method: 'PATCH',
+      body: JSON.stringify({ selectedDeckSkin })
+    });
     const titleData = await api('/api/profile/title', {
       method: 'PATCH',
       body: JSON.stringify({ selectedTitle })
     });
-    const updatedUser = titleData?.user || customStatData?.user || profileData?.user || null;
+    const updatedUser = titleData?.user || deckSkinData?.user || customStatData?.user || profileData?.user || null;
     if (updatedUser) {
       state.me = { ...state.me, ...updatedUser };
     }
@@ -3562,10 +3703,12 @@ async function claimChallenge(id) {
         completedAt: state.challenges[entry.tier][entry.index]?.completedAt || new Date().toISOString()
       });
     }
+    const previousMe = state.me ? { ...state.me } : null;
     state.me.chips = Math.max(0, Math.floor(Number(data?.chips) || Number(state.me?.chips) || 0));
     state.bankrollDisplay = Math.max(0, Math.floor(Number(data?.bankroll ?? data?.chips ?? state.bankrollDisplay ?? state.me.chips) || 0));
     if (Number.isFinite(Number(data?.xp))) state.me.xp = Math.max(0, Math.floor(Number(data.xp)));
     if (Number.isFinite(Number(data?.level))) state.me.level = Math.max(1, Math.floor(Number(data.level)));
+    syncXpUiFromUser(state.me, previousMe);
     setStatus(`Challenge claimed: +${Math.max(0, Math.floor(Number(data?.reward) || 0))} chips`);
     delete state.challengeClaimPendingById[challengeId];
     render();
@@ -3643,6 +3786,7 @@ function logout() {
   state.favoriteStatModalOpen = false;
   state.favoriteStatDraftKey = '';
   state.favoriteStatFilter = '';
+  state.titleInfoModalKey = '';
   state.rankTimelineModalOpen = false;
   state.rankedForfeitModalOpen = false;
   state.pendingSeriesResult = null;
@@ -3650,6 +3794,8 @@ function logout() {
   state.rankedSeriesResultAnimKey = '';
   if (Number.isFinite(state.rankedSeriesResultAnimRaf)) cancelAnimationFrame(state.rankedSeriesResultAnimRaf);
   state.rankedSeriesResultAnimRaf = null;
+  if (Number.isFinite(state.xpUi.animRaf)) cancelAnimationFrame(state.xpUi.animRaf);
+  state.xpUi = { progress: 0, targetProgress: 0, level: 1, pulseUntil: 0, animRaf: null };
   state.presenceByUser = {};
   state.statsMoreOpen = false;
   state.cardAnimState = { enterUntilById: {}, revealUntilById: {}, shiftUntilById: {}, tiltById: {} };
@@ -4252,7 +4398,13 @@ function renderHome() {
   const rankedDisabledReason = rankedCanQueue
     ? ''
     : (rankedOverview?.disabledReason || `Need ${rankedFixedBet.toLocaleString()} chips for ranked.`);
+  const handsWon = Math.max(0, Math.floor(Number(me.stats.handsWon) || 0));
+  const handsLost = Math.max(0, Math.floor(Number(me.stats.handsLost) || 0));
   const handsPushed = Math.max(0, Math.floor(Number(me.stats.pushes ?? me.stats.handsPush) || 0));
+  const totalResolvedHands = Math.max(1, handsWon + handsLost + handsPushed);
+  const handWinPct = Math.round((handsWon / totalResolvedHands) * 100);
+  const handLossPct = Math.round((handsLost / totalResolvedHands) * 100);
+  const handPushPct = Math.max(0, 100 - handWinPct - handLossPct);
   const sixSevenDealt = Math.max(0, Math.floor(Number(me.stats.sixSevenDealt) || 0));
   const betHistoryPreview = (me.betHistory || []).slice(0, 6);
   const betHistoryAll = (me.betHistory || []).slice(0, 15);
@@ -4262,6 +4414,13 @@ function renderHome() {
   const rankLosses = Math.max(0, Math.floor(Number(me.rankedLosses) || 0));
   const highRollerUnlocked = hasHighRollerAccess(me);
   const splitTensEvent = splitTensEventState();
+  const level = Math.max(1, Math.floor(Number(me.level) || 1));
+  const xpToNext = Math.max(0, Math.floor(Number(me.xpToNextLevel) || 0));
+  const xpProgress = state.xpUi.level === level
+    ? Math.max(0, Math.min(1, Number(state.xpUi.progress) || 0))
+    : Math.max(0, Math.min(1, Number(me.levelProgress) || 0));
+  const levelPercent = Math.round(xpProgress * 100);
+  const streakBonusPct = streakBonusPercent(me);
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -4365,8 +4524,9 @@ function renderHome() {
                 ? `<div class="home-accordion-body">
                     <section class="practice-panel" aria-label="Practice vs bot">
                       <div class="practice-head">
-                        <h3>Practice vs Bot</h3>
+                        <h3>Practice vs Bot <span class="practice-parenthetical muted">(No real chips won or lost)</span></h3>
                         <p class="muted">Starts a live bot match with full gameplay and zero bankroll impact.</p>
+                        <p class="muted practice-helper">Use this to learn lines, test doubles/splits, and warm up risk-free.</p>
                       </div>
                       <div class="practice-controls">
                         <div class="bot-difficulty-grid" id="botDifficultyGrid" role="radiogroup" aria-label="Bot difficulty">
@@ -4385,8 +4545,8 @@ function renderHome() {
                         </div>
                         <div class="muted practice-note">Practice mode: no chips won/lost, no ranked/streak/challenge impact.</div>
                         <div class="home-inline-actions">
-                          <button class="gold bot-play-btn" id="playPracticeBotBtn">Start Practice Bot</button>
-                          <button class="ghost bot-play-btn" id="playRealBotBtn">Play Real Bot</button>
+                          <button class="gold bot-play-btn" id="playRealBotBtn">Play Real Bot</button>
+                          <button class="ghost bot-play-btn" id="playPracticeBotBtn">Start Practice Bot</button>
                         </div>
                       </div>
                     </section>
@@ -4421,14 +4581,27 @@ function renderHome() {
         </section>
 
         <section class="col card section reveal-panel glow-follow glow-follow--panel home-stats-col">
+          <section class="card home-xp-card">
+            <div class="home-xp-head">
+              <strong data-xp-level>Level ${level}</strong>
+              <span class="muted">${xpToNext.toLocaleString()} XP to next level</span>
+            </div>
+            <div class="xp-track home-xp-track ${Date.now() < state.xpUi.pulseUntil ? 'is-pulsing' : ''}">
+              <span class="xp-fill" data-xp-fill style="width:${levelPercent}%"></span>
+            </div>
+            <div class="home-xp-meta">
+              <span class="muted">Progress ${levelPercent}%</span>
+              ${streakBonusPct > 0 ? `<span class="streak-bonus-pill">Streak Bonus Active +${streakBonusPct}% XP</span>` : '<span class="muted">No streak bonus active</span>'}
+            </div>
+          </section>
           <div class="stats-head">
             <h2>Stats</h2>
             <button id="openStatsMoreBtn" class="ghost stats-more-btn" type="button">View more</button>
           </div>
           <div class="kpis compact-kpis">
             <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">♟</span>Matches Played</div><strong>${me.stats.matchesPlayed || 0}</strong></div>
-            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">▲</span>Hands Won</div><strong>${me.stats.handsWon || 0}</strong></div>
-            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">▼</span>Hands Lost</div><strong>${me.stats.handsLost || 0}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">▲</span>Hands Won</div><strong>${handsWon}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">▼</span>Hands Lost</div><strong>${handsLost}</strong></div>
             <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">⟷</span>Hands Pushed</div><strong>${handsPushed}</strong></div>
             <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">♠</span>Blackjacks Dealt</div><strong>${me.stats.blackjacks || 0}</strong></div>
             <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">7</span>6-7&apos;s Dealt</div><strong>${sixSevenDealt}</strong></div>
@@ -4514,6 +4687,19 @@ function renderHome() {
                 <button id="closeStatsMoreBtn" class="ghost" type="button">Close</button>
               </div>
               <div class="stats-more-scroll">
+                <section class="stats-more-group">
+                  <h4>Hand Outcome Mix</h4>
+                  <div class="stats-winrate-bar" aria-label="Win loss push ratio">
+                    <span class="stats-winrate-seg win" style="width:${handWinPct}%"></span>
+                    <span class="stats-winrate-seg loss" style="width:${handLossPct}%"></span>
+                    <span class="stats-winrate-seg push" style="width:${handPushPct}%"></span>
+                  </div>
+                  <div class="stats-winrate-legend muted">
+                    <span>Win ${handWinPct}% (${handsWon})</span>
+                    <span>Loss ${handLossPct}% (${handsLost})</span>
+                    <span>Push ${handPushPct}% (${handsPushed})</span>
+                  </div>
+                </section>
                 <section class="stats-more-group">
                   <h4>Split + Double</h4>
                   <div class="stats-more-list">
@@ -4823,7 +5009,9 @@ function renderProfile() {
   )}`;
   const titleCatalog = titleCatalogForUserClient(me);
   const level = Math.max(1, Math.floor(Number(me.level) || 1));
-  const levelProgress = Math.max(0, Math.min(1, Number(me.levelProgress) || 0));
+  const levelProgress = state.xpUi.level === level
+    ? Math.max(0, Math.min(1, Number(state.xpUi.progress) || 0))
+    : Math.max(0, Math.min(1, Number(me.levelProgress) || 0));
   const levelPercent = Math.round(levelProgress * 100);
   const rankTier = rankTierLabelFromUser(me);
   const rankElo = Math.max(0, Math.floor(Number(me.rankedElo) || 0));
@@ -4832,6 +5020,8 @@ function renderProfile() {
   const selectedBorderId = normalizeProfileBorderIdClient(me.selectedBorderId);
   const profileBorders = profileBordersForUser(me);
   const selectedBorder = profileBorders.find((border) => border.id === selectedBorderId) || profileBorders[0] || PROFILE_BORDER_DEFS[0];
+  const deckSkins = deckSkinsForUser(me);
+  const selectedDeckSkin = deckSkinForUser(me);
   const titleFilter = normalizeTitleFilter(state.profileTitleFilter);
   state.profileTitleFilter = titleFilter;
   const filteredTitleCatalog = titleCatalog.filter((entry) => {
@@ -4855,6 +5045,7 @@ function renderProfile() {
     : favoriteStats;
   const coreFavoriteStats = filteredFavoriteStats.filter((entry) => CORE_FAVORITE_STAT_KEYS.has(entry.key));
   const otherFavoriteStats = filteredFavoriteStats.filter((entry) => !CORE_FAVORITE_STAT_KEYS.has(entry.key));
+  const titleInfoEntry = titleCatalogEntryByKeyClient(me, state.titleInfoModalKey);
   const defaultProfileSections = {
     identity: true,
     progress: true,
@@ -4905,12 +5096,20 @@ function renderProfile() {
         </select>
         <label>Avatar Seed</label>
         <input name="avatar_seed" value="${me.avatarSeed || me.username}" />
+        <label>Deck Skin</label>
+        <select name="selected_deck_skin">
+          ${deckSkins.map((skin) => `<option value="${skin.id}" ${normalizeDeckSkinId(me.selectedDeckSkin) === skin.id ? 'selected' : ''} ${skin.unlocked ? '' : 'disabled'}>${skin.name}${skin.unlocked ? '' : ` (Unlocks Lv ${skin.minLevelRequired})`}</option>`).join('')}
+        </select>
       </div>
       <div class="profile-preview-card">
         <label>Preview</label>
         <div class="profile-preview-row">
           <img src="${preview}" alt="avatar preview" class="profile-avatar-preview" />
           <span class="muted">Generated automatically</span>
+        </div>
+        <div class="profile-deck-skin-preview deck-skin-${selectedDeckSkin.token}">
+          <strong>${selectedDeckSkin.name}</strong>
+          <span class="muted">${selectedDeckSkin.description}</span>
         </div>
       </div>
     </div>
@@ -4921,7 +5120,7 @@ function renderProfile() {
         <strong>Level ${level}</strong>
         <span class="muted">${Math.max(0, Math.floor(Number(me.xpToNextLevel) || 0)).toLocaleString()} XP to next level</span>
       </div>
-      <div class="xp-track"><span class="xp-fill" style="width:${levelPercent}%"></span></div>
+      <div class="xp-track ${Date.now() < state.xpUi.pulseUntil ? 'is-pulsing' : ''}"><span class="xp-fill" data-xp-fill style="width:${levelPercent}%"></span></div>
     </div>
     <div class="profile-summary-grid">
       <div class="profile-summary-item"><span class="muted">Rank</span><strong>${rankTier}</strong></div>
@@ -5003,10 +5202,10 @@ function renderProfile() {
           filteredTitleCatalog.length
             ? filteredTitleCatalog.map((entry) => {
                 const unlocked = Boolean(entry.unlocked);
-                return `<div class="title-row ${unlocked ? 'unlocked' : 'locked'}" title="${unlocked ? 'Unlocked' : entry.requirementText}">
+                return `<button class="title-row ${unlocked ? 'unlocked' : 'locked'}" type="button" data-title-info="${entry.key}" title="${unlocked ? 'Unlocked' : entry.requirementText}">
                   <span>${unlocked ? '✓' : '🔒'} ${entry.label}</span>
                   <span class="muted">${unlocked ? 'Ready to equip' : entry.requirementText}</span>
-                </div>`;
+                </button>`;
               }).join('')
             : '<div class="title-row locked"><span>No titles in this filter.</span><span class="muted">Try a different filter.</span></div>'
         }
@@ -5082,6 +5281,24 @@ function renderProfile() {
           </div>`
         : ''
     }
+    ${
+      titleInfoEntry
+        ? `<div class="modal" id="titleInfoModal">
+            <div class="modal-panel card title-info-modal" role="dialog" aria-modal="true" aria-label="Title details">
+              <div class="stats-more-head">
+                <h3>${titleInfoEntry.label}</h3>
+                <button id="closeTitleInfoModalBtn" class="ghost" type="button">Close</button>
+              </div>
+              <div class="muted">Category: ${titleInfoEntry.category || 'skill'}</div>
+              <p class="title-info-description">${titleInfoEntry.description || titleInfoEntry.requirementText}</p>
+              <div class="title-info-rule card">
+                <strong>Unlock requirement</strong>
+                <div class="muted">${titleInfoEntry.requirementText || 'No requirement'}</div>
+              </div>
+            </div>
+          </div>`
+        : ''
+    }
   `;
   bindShellNav();
   app.querySelectorAll('[data-profile-toggle]').forEach((btn) => {
@@ -5104,6 +5321,14 @@ function renderProfile() {
       const borderId = String(btn.dataset.profileBorderEquip || '').trim().toUpperCase();
       if (!borderId) return;
       equipProfileBorder(borderId);
+    };
+  });
+  app.querySelectorAll('[data-title-info]').forEach((btn) => {
+    btn.onclick = () => {
+      const key = String(btn.dataset.titleInfo || '').trim().toUpperCase();
+      if (!key) return;
+      state.titleInfoModalKey = key;
+      render();
     };
   });
   const togglePinBtn = document.getElementById('togglePinBtn');
@@ -5184,6 +5409,24 @@ function renderProfile() {
       render();
     };
   });
+  const titleInfoModal = document.getElementById('titleInfoModal');
+  if (titleInfoModal) {
+    titleInfoModal.onclick = () => {
+      state.titleInfoModalKey = '';
+      render();
+    };
+  }
+  const closeTitleInfoModalBtn = document.getElementById('closeTitleInfoModalBtn');
+  if (closeTitleInfoModalBtn) {
+    closeTitleInfoModalBtn.onclick = () => {
+      state.titleInfoModalKey = '';
+      render();
+    };
+  }
+  const titleInfoPanel = app.querySelector('.title-info-modal');
+  if (titleInfoPanel) {
+    titleInfoPanel.onclick = (event) => event.stopPropagation();
+  }
 }
 
 function renderFriends() {
@@ -6068,6 +6311,7 @@ function renderSuitIcon(suit, className = '') {
 }
 
 function renderPlayingCard(card, cardIndex = 0) {
+  const deckSkinToken = deckSkinForUser(state.me)?.token || 'classic';
   const anim = cardAnimationMeta(card);
   const animationClasses = [];
   if (anim.isEntering) animationClasses.push('card-enter');
@@ -6080,7 +6324,7 @@ function renderPlayingCard(card, cardIndex = 0) {
 
   if (card.hidden) {
     return `
-      <div class="playing-card hidden ${animationClasses.join(' ')}" ${styleAttr} ${idAttr} aria-label="Face-down card">
+      <div class="playing-card hidden deck-skin-${deckSkinToken} ${animationClasses.join(' ')}" ${styleAttr} ${idAttr} aria-label="Face-down card">
         <div class="card-back-inner">
           <span class="card-back-mark">BB</span>
         </div>
@@ -6091,7 +6335,7 @@ function renderPlayingCard(card, cardIndex = 0) {
   const isRed = card.suit === 'H' || card.suit === 'D';
   const colorClass = isRed ? 'red' : 'black';
   return `
-    <article class="playing-card face ${colorClass} ${animationClasses.join(' ')}" ${styleAttr} ${idAttr} aria-label="${card.rank} of ${suitLabel(card.suit)}">
+    <article class="playing-card face ${colorClass} deck-skin-${deckSkinToken} ${animationClasses.join(' ')}" ${styleAttr} ${idAttr} aria-label="${card.rank} of ${suitLabel(card.suit)}">
       <div class="card-face-sheen"></div>
       <div class="corner top">
         <span class="rank">${card.rank}</span>
@@ -6382,7 +6626,7 @@ function renderMatch() {
                   <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
                   <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
                   <div class="strip-item"><span class="muted">Phase</span> <strong class="phase-strong">${phaseLabel}${modePill}${rankedSeriesHudText ? ` <span class="series-pill">${rankedSeriesHudText}</span>` : ''}</strong></div>
-                  <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ' <span class="streak-flame" aria-hidden="true">🔥</span>' : ''}</strong></div>
+                  <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ' <span class="streak-flame" aria-hidden="true"><span class="streak-flame-core"></span><span class="streak-flame-glow"></span></span>' : ''}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
                 <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">
@@ -6449,16 +6693,20 @@ function renderMatch() {
                       ? `<div class="emote-row">
                           <div class="emote-popover card">
                             <div class="emote-grid">
-                              <button data-emote-type="emoji" data-emote-value="😂" ${emoteCoolingDown ? 'disabled' : ''}>😂</button>
-                              <button data-emote-type="emoji" data-emote-value="😭" ${emoteCoolingDown ? 'disabled' : ''}>😭</button>
-                              <button data-emote-type="emoji" data-emote-value="👍" ${emoteCoolingDown ? 'disabled' : ''}>👍</button>
-                              <button data-emote-type="emoji" data-emote-value="😡" ${emoteCoolingDown ? 'disabled' : ''}>😡</button>
+                              <button data-emote-type="emoji" data-emote-value="🔥" ${emoteCoolingDown ? 'disabled' : ''}>🔥</button>
+                              <button data-emote-type="emoji" data-emote-value="😎" ${emoteCoolingDown ? 'disabled' : ''}>😎</button>
+                              <button data-emote-type="emoji" data-emote-value="👏" ${emoteCoolingDown ? 'disabled' : ''}>👏</button>
+                              <button data-emote-type="emoji" data-emote-value="😅" ${emoteCoolingDown ? 'disabled' : ''}>😅</button>
+                              <button data-emote-type="emoji" data-emote-value="🤝" ${emoteCoolingDown ? 'disabled' : ''}>🤝</button>
+                              <button data-emote-type="emoji" data-emote-value="😵‍💫" ${emoteCoolingDown ? 'disabled' : ''}>😵‍💫</button>
                             </div>
                             <div class="emote-quips">
-                              <button data-emote-type="quip" data-emote-value="Bitchmade" ${emoteCoolingDown ? 'disabled' : ''}>Bitchmade</button>
-                              <button data-emote-type="quip" data-emote-value="Fuck you" ${emoteCoolingDown ? 'disabled' : ''}>Fuck you</button>
-                              <button data-emote-type="quip" data-emote-value="Skill issue" ${emoteCoolingDown ? 'disabled' : ''}>Skill issue</button>
-                              <button data-emote-type="quip" data-emote-value="L" ${emoteCoolingDown ? 'disabled' : ''}>L</button>
+                              <button data-emote-type="quip" data-emote-value="Nice hand" ${emoteCoolingDown ? 'disabled' : ''}>Nice hand</button>
+                              <button data-emote-type="quip" data-emote-value="No way" ${emoteCoolingDown ? 'disabled' : ''}>No way</button>
+                              <button data-emote-type="quip" data-emote-value="Run it" ${emoteCoolingDown ? 'disabled' : ''}>Run it</button>
+                              <button data-emote-type="quip" data-emote-value="Clutch" ${emoteCoolingDown ? 'disabled' : ''}>Clutch</button>
+                              <button data-emote-type="quip" data-emote-value="Focus mode" ${emoteCoolingDown ? 'disabled' : ''}>Focus mode</button>
+                              <button data-emote-type="quip" data-emote-value="GG" ${emoteCoolingDown ? 'disabled' : ''}>GG</button>
                             </div>
                           </div>
                         </div>`
@@ -6932,7 +7180,8 @@ function syncQuickPlayBucketModal() {
 }
 
 function render() {
-  const enteringFriends = state.lastRenderedView !== 'friends' && state.view === 'friends';
+  const previousView = state.lastRenderedView;
+  const enteringFriends = previousView !== 'friends' && state.view === 'friends';
   state.lastRenderedView = state.view;
   app.dataset.view = state.view;
   const hasOnlineSession = Boolean(state.token && state.me);
@@ -6972,6 +7221,18 @@ function render() {
   syncQuickPlayOverlay();
   syncRankedOverlay();
   syncTurnCountdownUI();
+  syncXpBars();
+  if (previousView && previousView !== state.view) {
+    if (viewTransitionTimer) {
+      clearTimeout(viewTransitionTimer);
+      viewTransitionTimer = null;
+    }
+    app.classList.add('view-transitioning');
+    viewTransitionTimer = setTimeout(() => {
+      app.classList.remove('view-transitioning');
+      viewTransitionTimer = null;
+    }, 220);
+  }
   if (enteringFriends && state.token) loadFriendsData();
 }
 

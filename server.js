@@ -120,6 +120,16 @@ const PROFILE_BORDER_DEFS = Object.freeze([
 const PROFILE_BORDER_DEFS_BY_ID = Object.freeze(
   Object.fromEntries(PROFILE_BORDER_DEFS.map((border) => [border.id, border]))
 );
+const DECK_SKIN_DEFS = Object.freeze([
+  { id: 'CLASSIC', name: 'Classic Felt', minLevelRequired: 1 },
+  { id: 'GOLD', name: 'Gold Reserve', minLevelRequired: 10 },
+  { id: 'NEON', name: 'Neon Pulse', minLevelRequired: 20 },
+  { id: 'OBSIDIAN', name: 'Obsidian Luxe', minLevelRequired: 35 },
+  { id: 'AURORA', name: 'Aurora Royale', minLevelRequired: 50 }
+]);
+const DECK_SKIN_DEFS_BY_ID = Object.freeze(
+  Object.fromEntries(DECK_SKIN_DEFS.map((skin) => [skin.id, skin]))
+);
 const TITLE_DEFS_LIST = Object.freeze([
   {
     key: 'HIGH_ROLLER',
@@ -304,6 +314,70 @@ const TITLE_DEFS_LIST = Object.freeze([
     unlockCondition: { type: 'bestMatchWinStreak', threshold: 15 },
     requirementText: 'Reach a 15-match win streak.',
     description: 'The streak keeps climbing.'
+  },
+  {
+    key: 'ACE_ENGINEER',
+    label: 'Ace Engineer',
+    category: 'skill',
+    unlockCondition: { type: 'doublesAttempted', threshold: 75 },
+    requirementText: 'Use Double 75 times.',
+    description: 'You weaponize every doubling spot.'
+  },
+  {
+    key: 'TABLE_ARCHITECT',
+    label: 'Table Architect',
+    category: 'skill',
+    unlockCondition: { type: 'splitsAttempted', threshold: 75 },
+    requirementText: 'Use Split 75 times.',
+    description: 'You engineer multi-hand pressure.'
+  },
+  {
+    key: 'IRON_BANKROLL',
+    label: 'Iron Bankroll',
+    category: 'skill',
+    unlockCondition: { type: 'totalChipsWon', threshold: 50000 },
+    requirementText: 'Win 50,000 chips total.',
+    description: 'Your stack keeps climbing.'
+  },
+  {
+    key: 'SERIES_GENERAL',
+    label: 'Series General',
+    category: 'skill',
+    unlockCondition: { type: 'rankedWins', threshold: 60 },
+    requirementText: 'Win 60 ranked series.',
+    description: 'Series strategy mastery.'
+  },
+  {
+    key: 'HEADHUNTER',
+    label: 'Headhunter',
+    category: 'skill',
+    unlockCondition: { type: 'pvpWins', threshold: 80 },
+    requirementText: 'Win 80 PvP matches.',
+    description: 'You hunt and finish real opponents.'
+  },
+  {
+    key: 'WINDFALL',
+    label: 'Windfall',
+    category: 'skill',
+    unlockCondition: { type: 'handsWon', threshold: 300 },
+    requirementText: 'Win 300 hands.',
+    description: 'Relentless hand-by-hand execution.'
+  },
+  {
+    key: 'TABLE_ANCHOR',
+    label: 'Table Anchor',
+    category: 'skill',
+    unlockCondition: { type: 'matchesPlayed', threshold: 250 },
+    requirementText: 'Complete 250 matches.',
+    description: 'A permanent fixture at the tables.'
+  },
+  {
+    key: 'IMMORTAL_STREAK',
+    label: 'Immortal Streak',
+    category: 'skill',
+    unlockCondition: { type: 'bestMatchWinStreak', threshold: 20 },
+    requirementText: 'Reach a 20-match win streak.',
+    description: 'Pressure does not break you.'
   }
 ]);
 const TITLE_DEFS = Object.freeze(
@@ -403,7 +477,18 @@ const EMPTY_DB = {
   friendRequests: [],
   friendChallenges: [],
   rankedHistory: [],
-  rankedSeries: []
+  rankedSeries: [],
+  botLearning: {
+    sampleSize: 0,
+    actionCounts: {
+      hit: 0,
+      stand: 0,
+      double: 0,
+      split: 0,
+      surrender: 0
+    },
+    aggression: 0.5
+  }
 };
 const storage = await createStorage({
   emptyDb: EMPTY_DB,
@@ -592,6 +677,10 @@ for (const user of db.data.users) {
     user.selectedBorderId = 'NONE';
     dbTouched = true;
   }
+  if (typeof user.selectedDeckSkin !== 'string') {
+    user.selectedDeckSkin = 'CLASSIC';
+    dbTouched = true;
+  }
   if (typeof user.customStatText !== 'string') {
     user.customStatText = '';
     dbTouched = true;
@@ -705,6 +794,15 @@ for (const user of db.data.users) {
     user.favoriteStatKey = cleanFavoriteStat;
     dbTouched = true;
   }
+  const cleanDeckSkin = normalizeDeckSkinId(user.selectedDeckSkin);
+  if (cleanDeckSkin !== user.selectedDeckSkin) {
+    user.selectedDeckSkin = cleanDeckSkin;
+    dbTouched = true;
+  }
+  if (!deckSkinUnlockedForUser(user, user.selectedDeckSkin)) {
+    user.selectedDeckSkin = 'CLASSIC';
+    dbTouched = true;
+  }
 }
 if (!Array.isArray(db.data.friendRequests)) {
   db.data.friendRequests = [];
@@ -739,6 +837,33 @@ if (!Array.isArray(db.data.rankedSeries)) {
       series.game_index = 1;
       dbTouched = true;
     }
+  }
+}
+if (!db.data.botLearning || typeof db.data.botLearning !== 'object' || Array.isArray(db.data.botLearning)) {
+  db.data.botLearning = {
+    sampleSize: 0,
+    actionCounts: { hit: 0, stand: 0, double: 0, split: 0, surrender: 0 },
+    aggression: 0.5
+  };
+  dbTouched = true;
+} else {
+  if (!db.data.botLearning.actionCounts || typeof db.data.botLearning.actionCounts !== 'object') {
+    db.data.botLearning.actionCounts = { hit: 0, stand: 0, double: 0, split: 0, surrender: 0 };
+    dbTouched = true;
+  }
+  for (const actionKey of ['hit', 'stand', 'double', 'split', 'surrender']) {
+    if (!Number.isFinite(Number(db.data.botLearning.actionCounts[actionKey]))) {
+      db.data.botLearning.actionCounts[actionKey] = 0;
+      dbTouched = true;
+    }
+  }
+  if (!Number.isFinite(Number(db.data.botLearning.sampleSize))) {
+    db.data.botLearning.sampleSize = 0;
+    dbTouched = true;
+  }
+  if (!Number.isFinite(Number(db.data.botLearning.aggression))) {
+    db.data.botLearning.aggression = 0.5;
+    dbTouched = true;
   }
 }
 if (dbTouched) await db.write();
@@ -1479,6 +1604,18 @@ function nextProfileBorderUnlockLevel(level) {
   return next ? Math.floor(Number(next.minLevelRequired) || 1) : null;
 }
 
+function normalizeDeckSkinId(value) {
+  const key = String(value || '').trim().toUpperCase();
+  return DECK_SKIN_DEFS_BY_ID[key] ? key : 'CLASSIC';
+}
+
+function deckSkinUnlockedForUser(user, deckSkinId) {
+  const normalized = normalizeDeckSkinId(deckSkinId);
+  const def = DECK_SKIN_DEFS_BY_ID[normalized] || DECK_SKIN_DEFS[0];
+  const level = levelFromXp(user?.xp || 0);
+  return level >= Math.max(1, Math.floor(Number(def?.minLevelRequired) || 1));
+}
+
 function ensureProfileBorderState(user) {
   if (!user) return false;
   let changed = false;
@@ -1758,6 +1895,14 @@ function matchWinStreakAfterOutcome(currentStreak = 0, outcome = 'push') {
   return safeCurrent;
 }
 
+function xpStreakBonusMultiplier(user) {
+  const streak = Math.max(0, Math.floor(Number(user?.currentMatchWinStreak) || 0));
+  if (streak >= 10) return 1.15;
+  if (streak >= 6) return 1.1;
+  if (streak >= 3) return 1.05;
+  return 1;
+}
+
 function levelRewardForLevel(level) {
   const safeLevel = Math.max(1, Math.floor(Number(level) || 1));
   if (safeLevel % 5 !== 0) return 0;
@@ -1837,6 +1982,8 @@ function sanitizeUser(user) {
   const unlockedBorderIds = profileBorderUnlockIdsForLevel(levelMeta.level);
   const selectedBorderCandidate = normalizeProfileBorderId(user?.selectedBorderId);
   const selectedBorderId = unlockedBorderIds.includes(selectedBorderCandidate) ? selectedBorderCandidate : 'NONE';
+  const selectedDeckSkinCandidate = normalizeDeckSkinId(user?.selectedDeckSkin);
+  const selectedDeckSkin = deckSkinUnlockedForUser(user, selectedDeckSkinCandidate) ? selectedDeckSkinCandidate : 'CLASSIC';
   const customStatText = sanitizeCustomStatText(user?.customStatText || '');
   const favoriteStatKey = sanitizeFavoriteStatKey(user?.favoriteStatKey);
   return {
@@ -1886,6 +2033,7 @@ function sanitizeUser(user) {
     selectedTitleKey: selectedTitleKeySafe,
     selectedTitle,
     selectedBorderId,
+    selectedDeckSkin,
     customStatText,
     favoriteStatKey
   };
@@ -1903,12 +2051,19 @@ function sanitizeSelfUser(user) {
     previewToken: border.previewToken,
     unlocked: unlockedBorderIds.includes(border.id)
   }));
+  const deckSkins = DECK_SKIN_DEFS.map((skin) => ({
+    id: skin.id,
+    name: skin.name,
+    minLevelRequired: Math.max(1, Math.floor(Number(skin.minLevelRequired) || 1)),
+    unlocked: deckSkinUnlockedForUser(user, skin.id)
+  }));
   return {
     ...sanitizeUser(user),
     titleCatalog: titleCatalogForUser(user),
     unlockedBorderIds,
     nextBorderUnlockLevel,
     profileBorders,
+    deckSkins,
     pinMasked: '****',
     pin: user.pin || null
   };
@@ -4509,10 +4664,10 @@ function resolveRound(match) {
     const xpWin = pvpMatch ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
     const xpLoss = pvpMatch ? XP_REWARDS.pvpLoss : XP_REWARDS.botLoss;
     if (netA > 0) {
-      if (userA) awardXp(userA, xpWin);
+      if (userA) awardXp(userA, Math.round(xpWin * xpStreakBonusMultiplier(userA)));
       if (userB) awardXp(userB, xpLoss);
     } else if (netA < 0) {
-      if (userB) awardXp(userB, xpWin);
+      if (userB) awardXp(userB, Math.round(xpWin * xpStreakBonusMultiplier(userB)));
       if (userA) awardXp(userA, xpLoss);
     } else {
       // Push still grants small progression to reduce churn.
@@ -4938,6 +5093,43 @@ function getBotDifficulty(match, botId) {
   return match.bot?.difficultyById?.[botId] || 'normal';
 }
 
+function botLearningModel() {
+  if (!db.data.botLearning || typeof db.data.botLearning !== 'object') {
+    db.data.botLearning = {
+      sampleSize: 0,
+      actionCounts: { hit: 0, stand: 0, double: 0, split: 0, surrender: 0 },
+      aggression: 0.5
+    };
+  }
+  return db.data.botLearning;
+}
+
+function botAggressionBias() {
+  const model = botLearningModel();
+  const aggression = Number(model.aggression);
+  if (!Number.isFinite(aggression)) return 0.5;
+  return Math.max(0.2, Math.min(0.8, aggression));
+}
+
+function recordHumanActionForBotLearning(match, playerId, action) {
+  if (!match || isBotPlayer(playerId)) return;
+  if (!isBotMatch(match)) return;
+  const normalized = String(action || '').trim().toLowerCase();
+  if (!['hit', 'stand', 'double', 'split', 'surrender'].includes(normalized)) return;
+  const model = botLearningModel();
+  if (!model.actionCounts || typeof model.actionCounts !== 'object') {
+    model.actionCounts = { hit: 0, stand: 0, double: 0, split: 0, surrender: 0 };
+  }
+  model.actionCounts[normalized] = Math.max(0, Math.floor(Number(model.actionCounts[normalized]) || 0) + 1);
+  model.sampleSize = Math.max(0, Math.floor(Number(model.sampleSize) || 0) + 1);
+  const aggressiveCount = Math.max(0, Math.floor(Number(model.actionCounts.double) || 0))
+    + Math.max(0, Math.floor(Number(model.actionCounts.split) || 0));
+  const passiveCount = Math.max(0, Math.floor(Number(model.actionCounts.hit) || 0))
+    + Math.max(0, Math.floor(Number(model.actionCounts.stand) || 0));
+  const denominator = Math.max(1, aggressiveCount + passiveCount);
+  model.aggression = Math.max(0.2, Math.min(0.8, aggressiveCount / denominator));
+}
+
 function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   if (!observation || observation.phase !== PHASES.ACTION_TURN) return 'stand';
   if (process.env.NODE_ENV !== 'production') assertSafeBotObservation(observation);
@@ -4960,8 +5152,26 @@ function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   const opponentUpCardTotal = opponentUpCard ? cardValue(opponentUpCard) : 10;
   let ideal = basicStrategyActionFromObservation(hand, opponentUpCardTotal);
   if (!legal.includes(ideal)) ideal = legal[0];
-
-  const accuracy = difficultyKey === 'easy' ? 0.45 : difficultyKey === 'medium' ? 0.75 : 0.94;
+  const aggression = botAggressionBias();
+  if (difficultyKey !== 'easy') {
+    if (legal.includes('double') && hand.total >= 9 && hand.total <= 11 && hand.actionCount <= 1) {
+      const pressureDoubleChance = difficultyKey === 'medium'
+        ? (0.22 + (aggression * 0.2))
+        : (0.34 + (aggression * 0.22));
+      if (secureRandomFloat() < pressureDoubleChance) return 'double';
+    }
+    if (legal.includes('split') && hand.splitEligible && hand.pairRank && hand.pairRank !== '10') {
+      const pressureSplitChance = difficultyKey === 'medium'
+        ? (0.14 + (aggression * 0.16))
+        : (0.22 + (aggression * 0.18));
+      if (secureRandomFloat() < pressureSplitChance && ['A', '8', '9', '7', '6'].includes(hand.pairRank)) return 'split';
+    }
+  }
+  const accuracyBase = difficultyKey === 'easy' ? 0.45 : difficultyKey === 'medium' ? 0.75 : 0.94;
+  const adaptiveAccuracy = difficultyKey === 'easy'
+    ? accuracyBase
+    : Math.max(0.55, Math.min(0.98, accuracyBase + ((aggression - 0.5) * (difficultyKey === 'normal' ? 0.12 : 0.08))));
+  const accuracy = adaptiveAccuracy;
   if (secureRandomFloat() <= accuracy) return ideal;
 
   const alternatives = legal.filter((a) => a !== ideal);
@@ -5164,6 +5374,7 @@ function applyAction(match, playerId, action) {
 
   if (normalizedAction === 'hit') {
     if ((hand.doubleCount || 0) >= 1) return { error: 'Hit unavailable after doubling; stand or double again' };
+    recordHumanActionForBotLearning(match, playerId, normalizedAction);
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     hand.cards.push(drawCard(match.round));
@@ -5191,6 +5402,7 @@ function applyAction(match, playerId, action) {
   }
 
   if (normalizedAction === 'stand') {
+    recordHumanActionForBotLearning(match, playerId, normalizedAction);
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     const total = handTotal(hand.cards);
@@ -5206,6 +5418,7 @@ function applyAction(match, playerId, action) {
 
   if (normalizedAction === 'surrender') {
     if ((hand.actionCount || 0) > 0) return { error: 'Surrender is only available before you act on this hand' };
+    recordHumanActionForBotLearning(match, playerId, normalizedAction);
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     hand.surrendered = true;
@@ -5216,6 +5429,7 @@ function applyAction(match, playerId, action) {
 
   if (normalizedAction === 'double') {
     if (hand.locked || (hand.doubleCount || 0) >= RULES.MAX_DOUBLES_PER_HAND) return { error: 'Hand cannot double down' };
+    recordHumanActionForBotLearning(match, playerId, normalizedAction);
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
     const delta = hand.bet;
@@ -5264,6 +5478,7 @@ function applyAction(match, playerId, action) {
     if (isTenTenPair(hand) && !isSplitTensEventActive(match)) return { error: 'Split tens event inactive' };
     if (!canSplit(hand, state, match)) return { error: 'Split unavailable' };
     if (!canAffordIncrement(match, playerId, hand.bet)) return { error: 'Insufficient chips to split' };
+    recordHumanActionForBotLearning(match, playerId, normalizedAction);
     const targetHandIndex = Math.min(opponentState.activeHandIndex, opponentState.hands.length - 1);
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
@@ -5935,6 +6150,7 @@ function buildNewUser(username) {
     unlockedTitles: [],
     selectedTitle: '',
     selectedBorderId: 'NONE',
+    selectedDeckSkin: 'CLASSIC',
     customStatText: '',
     favoriteStatKey: FAVORITE_STAT_DEFAULT,
     headToHead: {}
@@ -6197,6 +6413,21 @@ app.patch('/api/profile/border', authMiddleware, async (req, res) => {
   ensureProfileBorderState(req.user);
   await db.write();
   return res.json({ ok: true, selectedBorderId: req.user.selectedBorderId, user: sanitizeSelfUser(req.user) });
+});
+
+app.patch('/api/profile/deck-skin', authMiddleware, async (req, res) => {
+  const requestedRaw = String(req.body?.selectedDeckSkin || req.body?.deckSkin || '').trim().toUpperCase();
+  if (requestedRaw && !DECK_SKIN_DEFS_BY_ID[requestedRaw]) {
+    return res.status(400).json({ error: 'Unknown deck skin' });
+  }
+  const requested = normalizeDeckSkinId(requestedRaw || 'CLASSIC');
+  if (!deckSkinUnlockedForUser(req.user, requested)) {
+    const required = Math.max(1, Math.floor(Number(DECK_SKIN_DEFS_BY_ID[requested]?.minLevelRequired) || 1));
+    return res.status(403).json({ error: `Deck skin unlocks at level ${required}` });
+  }
+  req.user.selectedDeckSkin = requested;
+  await db.write();
+  return res.json({ ok: true, selectedDeckSkin: req.user.selectedDeckSkin, user: sanitizeSelfUser(req.user) });
 });
 
 app.get('/api/friends', authMiddleware, (req, res) => {
