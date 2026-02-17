@@ -19,6 +19,7 @@ let hoverGlowInitialized = false;
 let inviteCountdownTicker = null;
 let matchTurnTicker = null;
 let challengeCountdownTicker = null;
+let leaderboardLivePollTimer = null;
 let quickPlayConnectTimer = null;
 let quickPlayStatusPollTimer = null;
 let botMatchLaunchTimer = null;
@@ -626,6 +627,10 @@ const state = {
   favoriteStatDraftKey: '',
   favoriteStatFilter: '',
   titleInfoModalKey: '',
+  leaderboardPlayerStatsModal: null,
+  leaderboardPlayerStatsLoading: false,
+  leaderboardPlayerStatsError: '',
+  leaderboardLivePulseUntilByUserId: {},
   profileSections: {
     identity: true,
     progress: true,
@@ -1864,6 +1869,51 @@ function renderRankTimelineModal(user = state.me) {
   `;
 }
 
+function renderLeaderboardPlayerStatsModal() {
+  if (!state.leaderboardPlayerStatsLoading && !state.leaderboardPlayerStatsModal && !state.leaderboardPlayerStatsError) return '';
+  const player = state.leaderboardPlayerStatsModal;
+  const overallWins = Math.max(0, Math.floor(Number(player?.overallWl?.wins) || 0));
+  const overallLosses = Math.max(0, Math.floor(Number(player?.overallWl?.losses) || 0));
+  const rankedWins = Math.max(0, Math.floor(Number(player?.rankedWl?.wins) || 0));
+  const rankedLosses = Math.max(0, Math.floor(Number(player?.rankedWl?.losses) || 0));
+  const stats = player?.stats || {};
+  return `
+    <div class="modal" id="leaderboardPlayerStatsModal">
+      <div class="modal-panel card leaderboard-player-stats-modal" role="dialog" aria-modal="true" aria-label="Player stats">
+        <div class="stats-more-head">
+          <h3>Player Stats</h3>
+          <button id="closeLeaderboardPlayerStatsBtn" class="ghost" type="button">Close</button>
+        </div>
+        ${
+          state.leaderboardPlayerStatsLoading
+            ? '<div class="muted">Loading player stats...</div>'
+            : state.leaderboardPlayerStatsError
+              ? `<div class="muted" style="color:#f0aaaa">${state.leaderboardPlayerStatsError}</div>`
+              : player
+                ? `<div class="leaderboard-player-head">
+                    <div class="leaderboard-player-id">
+                      <strong>${player.username || 'Player'}</strong>
+                      <span class="muted">Level ${Math.max(1, Math.floor(Number(player.level) || 1))} • ${renderRankTierBadge(player)} • Elo ${Math.max(0, Math.floor(Number(player.rankedElo) || 0)).toLocaleString()}</span>
+                    </div>
+                    <div class="leaderboard-player-chips">${Math.max(0, Math.floor(Number(player.chips) || 0)).toLocaleString()} chips</div>
+                  </div>
+                  <div class="leaderboard-player-grid">
+                    <div><span class="muted">Overall W-L</span><strong>${overallWins}-${overallLosses}</strong></div>
+                    <div><span class="muted">Ranked W-L</span><strong>${rankedWins}-${rankedLosses}</strong></div>
+                    <div><span class="muted">Matches Played</span><strong>${Math.max(0, Math.floor(Number(stats.matchesPlayed) || 0)).toLocaleString()}</strong></div>
+                    <div><span class="muted">Hands Won / Lost / Pushed</span><strong>${Math.max(0, Math.floor(Number(stats.handsWon) || 0))} / ${Math.max(0, Math.floor(Number(stats.handsLost) || 0))} / ${Math.max(0, Math.floor(Number(stats.handsPushed) || 0))}</strong></div>
+                    <div><span class="muted">Blackjacks</span><strong>${Math.max(0, Math.floor(Number(stats.blackjacks) || 0)).toLocaleString()}</strong></div>
+                    <div><span class="muted">Split Hands Won</span><strong>${Math.max(0, Math.floor(Number(stats.splitsWon) || 0)).toLocaleString()}</strong></div>
+                    <div><span class="muted">Doubles Attempted</span><strong>${Math.max(0, Math.floor(Number(stats.doublesAttempted) || 0)).toLocaleString()}</strong></div>
+                    <div><span class="muted">Surrenders</span><strong>${Math.max(0, Math.floor(Number(stats.surrenders) || 0)).toLocaleString()}</strong></div>
+                  </div>`
+                : ''
+        }
+      </div>
+    </div>
+  `;
+}
+
 function updateChallengeResetCountdowns() {
   const prev = { ...state.challengeResetRemainingMs };
   const next = { hourly: 0, daily: 0, weekly: 0 };
@@ -2116,23 +2166,105 @@ async function loadVersion() {
   }
 }
 
-async function loadLeaderboard({ silent = true } = {}) {
-  if (!state.token) return;
-  state.leaderboard.loading = true;
+function markLeaderboardLiveChanges(previousRows = [], nextRows = []) {
+  const previousByUserId = new Map((Array.isArray(previousRows) ? previousRows : []).map((row) => [row.userId, row]));
+  const nextByUserId = new Map((Array.isArray(nextRows) ? nextRows : []).map((row) => [row.userId, row]));
+  let changed = false;
+  const pulseUntilByUserId = { ...(state.leaderboardLivePulseUntilByUserId || {}) };
+  const now = Date.now();
+
+  for (const [userId, row] of nextByUserId.entries()) {
+    const previous = previousByUserId.get(userId);
+    if (!previous) continue;
+    const chipsChanged = Math.floor(Number(previous.chips) || 0) !== Math.floor(Number(row.chips) || 0);
+    const rankChanged = Math.floor(Number(previous.rank) || 0) !== Math.floor(Number(row.rank) || 0);
+    if (chipsChanged || rankChanged) {
+      pulseUntilByUserId[userId] = now + 1400;
+      changed = true;
+    }
+  }
+
+  for (const [userId, until] of Object.entries(pulseUntilByUserId)) {
+    if (!nextByUserId.has(userId) || Number(until) <= now) {
+      delete pulseUntilByUserId[userId];
+    }
+  }
+
+  state.leaderboardLivePulseUntilByUserId = pulseUntilByUserId;
+  return changed;
+}
+
+function shouldRunLeaderboardLivePolling() {
+  return Boolean(state.token && state.me && state.view === 'home');
+}
+
+function syncLeaderboardLivePolling() {
+  if (!shouldRunLeaderboardLivePolling()) {
+    if (leaderboardLivePollTimer) {
+      clearInterval(leaderboardLivePollTimer);
+      leaderboardLivePollTimer = null;
+    }
+    return;
+  }
+  if (leaderboardLivePollTimer) return;
+  leaderboardLivePollTimer = setInterval(async () => {
+    if (!shouldRunLeaderboardLivePolling()) return;
+    const changed = await loadLeaderboard({ silent: true, background: true });
+    if (changed && state.view === 'home') render();
+  }, 12_000);
+}
+
+async function loadLeaderboard({ silent = true, background = false } = {}) {
+  if (!state.token) return false;
+  const previousRows = Array.isArray(state.leaderboard?.rows) ? state.leaderboard.rows : [];
+  if (!background) {
+    state.leaderboard.loading = true;
+  }
   try {
     const data = await api(`/api/leaderboard/chips?limit=${LEADERBOARD_LIMIT}&offset=0`, { method: 'GET' });
-    state.leaderboard.rows = Array.isArray(data?.rows) ? data.rows : [];
+    const nextRows = Array.isArray(data?.rows) ? data.rows : [];
+    const changed = markLeaderboardLiveChanges(previousRows, nextRows);
+    state.leaderboard.rows = nextRows;
     state.leaderboard.currentUserRank = Number.isFinite(Number(data?.currentUserRank))
       ? Math.max(1, Math.floor(Number(data.currentUserRank)))
       : null;
     state.leaderboard.totalUsers = Number.isFinite(Number(data?.totalUsers))
       ? Math.max(0, Math.floor(Number(data.totalUsers)))
       : state.leaderboard.rows.length;
+    return changed;
   } catch (error) {
     if (!silent) setError(error.message);
+    return false;
   } finally {
-    state.leaderboard.loading = false;
+    if (!background) {
+      state.leaderboard.loading = false;
+    }
   }
+}
+
+async function openLeaderboardPlayerStats(userRef) {
+  const ref = String(userRef || '').trim();
+  if (!ref || !state.token) return;
+  state.leaderboardPlayerStatsLoading = true;
+  state.leaderboardPlayerStatsError = '';
+  state.leaderboardPlayerStatsModal = null;
+  render();
+  try {
+    const data = await api(`/api/users/${encodeURIComponent(ref)}/public-stats`, { method: 'GET' });
+    if (!data?.player) throw new Error('Player stats unavailable');
+    state.leaderboardPlayerStatsModal = data.player;
+  } catch (error) {
+    state.leaderboardPlayerStatsError = String(error?.message || 'Could not load player stats.');
+  } finally {
+    state.leaderboardPlayerStatsLoading = false;
+    render();
+  }
+}
+
+function closeLeaderboardPlayerStatsModal() {
+  state.leaderboardPlayerStatsModal = null;
+  state.leaderboardPlayerStatsLoading = false;
+  state.leaderboardPlayerStatsError = '';
 }
 
 function normalizeAppError(message) {
@@ -2676,7 +2808,13 @@ async function loadMe() {
     state.appVersion = 'dev';
     state.homeSections = { highRoller: false, practice: false };
     state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
+    state.leaderboardLivePulseUntilByUserId = {};
     state.leaderboardExpanded = false;
+    closeLeaderboardPlayerStatsModal();
+    if (leaderboardLivePollTimer) {
+      clearInterval(leaderboardLivePollTimer);
+      leaderboardLivePollTimer = null;
+    }
     state.rankedOverview = null;
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
@@ -2723,6 +2861,9 @@ function goToView(view) {
       state.profileTitleSearch = '';
       state.profileTitleOwnershipFilter = 'ALL';
       state.profileTitleCategoryFilter = 'ALL';
+    }
+    if (view !== 'home') {
+      closeLeaderboardPlayerStatsModal();
     }
   }
   state.view = view;
@@ -2870,6 +3011,7 @@ function canTriggerAction(action) {
   const hand = myState?.hands?.[myState.activeHandIndex || 0];
   if (!hand || hand.locked || hand.bust || hand.surrendered || hand.stood) return false;
   if (action === 'hit' && (hand.doubleCount || 0) >= 1) return false;
+  if (action === 'split' && (hand.doubleCount || 0) >= 1) return false;
   if (action === 'split' && !handCanSplit(hand, myState?.hands?.length || 0, match.maxHandsPerPlayer || 4)) return false;
   if (action === 'double' && !handCanDouble(hand, match.maxDoublesPerHand || 1)) return false;
   if (action === 'surrender' && (hand.actionCount || 0) > 0) return false;
@@ -2899,6 +3041,7 @@ function isTenTenPair(hand) {
 
 function handCanSplit(hand, handCount = 0, maxHands = 4, splitTensEventActive = isSplitTensEventActiveClient()) {
   if (!hand) return false;
+  if ((hand.doubleCount || 0) > 0) return false;
   if (hand.cards.length !== 2) return false;
   if ((hand.splitDepth || 0) >= 3) return false;
   if (handCount >= maxHands) return false;
@@ -4106,7 +4249,13 @@ function logout() {
   state.challengeResetRefreshInFlight = false;
   state.homeSections = { highRoller: false, practice: false };
   state.leaderboard = { rows: [], currentUserRank: null, totalUsers: 0, loading: false };
+  state.leaderboardLivePulseUntilByUserId = {};
   state.leaderboardExpanded = false;
+  closeLeaderboardPlayerStatsModal();
+  if (leaderboardLivePollTimer) {
+    clearInterval(leaderboardLivePollTimer);
+    leaderboardLivePollTimer = null;
+  }
   state.rankedOverview = null;
   state.betHistoryModalOpen = false;
   state.favoriteStatModalOpen = false;
@@ -4732,6 +4881,7 @@ function renderHome() {
   const leaderboardRows = Array.isArray(state.leaderboard?.rows) ? state.leaderboard.rows : [];
   const leaderboardExpanded = Boolean(state.leaderboardExpanded);
   const leaderboardVisibleRows = leaderboardExpanded ? leaderboardRows : leaderboardRows.slice(0, 5);
+  const leaderboardLivePulseUntilByUserId = state.leaderboardLivePulseUntilByUserId || {};
   const dailyWinStreak = Math.max(0, Math.floor(Number(me.dailyWinStreakCount) || 0));
   const pvpWins = Math.max(0, Math.floor(Number(me.pvpWins) || 0));
   const pvpLosses = Math.max(0, Math.floor(Number(me.pvpLosses) || 0));
@@ -4908,15 +5058,16 @@ function renderHome() {
               ${
                 leaderboardVisibleRows.length
                   ? leaderboardVisibleRows.map((row) => `
-                    <div class="leaderboard-row ${row.userId === me.id ? 'is-me' : ''}">
+                    <div class="leaderboard-row ${row.userId === me.id ? 'is-me' : ''} ${Number(leaderboardLivePulseUntilByUserId[row.userId] || 0) > Date.now() ? 'is-live-updated' : ''}">
                       <span class="leaderboard-rank">#${row.rank}</span>
                       <span class="leaderboard-name">${row.username}</span>
                       ${renderRankTierBadge(row)}
                       <span class="leaderboard-chips">${Number(row.chips || 0).toLocaleString()}</span>
+                      <button class="ghost leaderboard-stats-btn" type="button" data-leaderboard-stats="${row.userId}" title="View player stats">Stats</button>
                     </div>
                   `).join('')
                   : state.leaderboard.loading
-                    ? new Array(5).fill('<div class="leaderboard-row leaderboard-row-skeleton"><span></span><span></span><span></span><span></span></div>').join('')
+                    ? new Array(5).fill('<div class="leaderboard-row leaderboard-row-skeleton"><span></span><span></span><span></span><span></span><span></span></div>').join('')
                     : '<div class="muted">No leaderboard data yet.</div>'
               }
             </div>
@@ -5158,6 +5309,7 @@ function renderHome() {
         : ''
     }
     ${renderRankTimelineModal(me)}
+    ${renderLeaderboardPlayerStatsModal()}
   `;
 
   bindShellNav();
@@ -5201,6 +5353,13 @@ function renderHome() {
       render();
     };
   }
+  app.querySelectorAll('[data-leaderboard-stats]').forEach((btn) => {
+    btn.onclick = () => {
+      const ref = String(btn.dataset.leaderboardStats || '').trim();
+      if (!ref) return;
+      openLeaderboardPlayerStats(ref);
+    };
+  });
   app.querySelectorAll('[data-home-toggle]').forEach((btn) => {
     btn.onclick = () => {
       const key = btn.dataset.homeToggle;
@@ -5373,6 +5532,24 @@ function renderHome() {
   const rankTimelinePanel = app.querySelector('.rank-timeline-modal');
   if (rankTimelinePanel) {
     rankTimelinePanel.onclick = (event) => event.stopPropagation();
+  }
+  const leaderboardPlayerStatsModal = document.getElementById('leaderboardPlayerStatsModal');
+  if (leaderboardPlayerStatsModal) {
+    leaderboardPlayerStatsModal.onclick = () => {
+      closeLeaderboardPlayerStatsModal();
+      render();
+    };
+  }
+  const closeLeaderboardPlayerStatsBtn = document.getElementById('closeLeaderboardPlayerStatsBtn');
+  if (closeLeaderboardPlayerStatsBtn) {
+    closeLeaderboardPlayerStatsBtn.onclick = () => {
+      closeLeaderboardPlayerStatsModal();
+      render();
+    };
+  }
+  const leaderboardPlayerStatsPanel = app.querySelector('.leaderboard-player-stats-modal');
+  if (leaderboardPlayerStatsPanel) {
+    leaderboardPlayerStatsPanel.onclick = (event) => event.stopPropagation();
   }
   syncFreeClaimUI();
   syncEventCountdownUI();
@@ -7082,6 +7259,7 @@ function renderMatch() {
   const splitLegalForHand = handCanSplit(activeHand, myHands.length, match.maxHandsPerPlayer || 4, splitTensEventActive);
   const splitTensBlocked = Boolean(canAct && isTenTenPair(activeHand) && !splitTensEventActive);
   const hitBlockedAfterDouble = Boolean(canAct && (activeHand?.doubleCount || 0) >= 1);
+  const doubleModeActive = hitBlockedAfterDouble;
   const doubleLegalForHand = Boolean(canAct && handCanDouble(activeHand, match.maxDoublesPerHand || 1));
   const splitTensActiveHint = Boolean(canAct && isTenTenPair(activeHand) && splitTensEventActive);
   const actionHint = canAct
@@ -7288,12 +7466,12 @@ function renderMatch() {
 
                 <div class="actions-panel" ${roundResolved ? 'style="display:none"' : ''}>
                   <div class="actions-row">
-                    <div class="actions actions-main">
+                    <div class="actions actions-main ${doubleModeActive ? 'action-double-mode' : ''}">
                       <button data-action="hit" title="${hitButtonTitle}" class="primary" ${!canAct || hitBlockedAfterDouble ? 'disabled' : ''}>Hit</button>
-                      <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost" ${!canAct ? 'disabled' : ''}>Stand</button>
-                      <button data-action="double" title="${canAct ? (doubleLegalForHand ? 'Double your bet and draw one card (re-double allowed while eligible)' : 'Double is only available as your first move on this hand (or as a re-double chain).') : actionHint}" ${!doubleLegalForHand ? 'disabled' : ''}>Double</button>
-                      <button data-action="split" title="${splitButtonTitle}" ${!canAct || !splitLegalForHand ? 'disabled' : ''}>Split</button>
-                      <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender ? 'disabled' : ''}>Surrender</button>
+                      <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost ${doubleModeActive ? 'double-mode-cta' : ''}" ${!canAct ? 'disabled' : ''}>Stand</button>
+                      <button data-action="double" class="${doubleModeActive ? 'double-mode-cta' : ''}" title="${canAct ? (doubleLegalForHand ? 'Double your bet and draw one card (re-double allowed while eligible)' : 'Double is only available as your first move on this hand (or as a re-double chain).') : actionHint}" ${!doubleLegalForHand ? 'disabled' : ''}>Double</button>
+                      <button data-action="split" title="${splitButtonTitle}" ${!canAct || !splitLegalForHand || doubleModeActive ? 'disabled' : ''}>Split</button>
+                      <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender || doubleModeActive ? 'disabled' : ''}>Surrender</button>
                     </div>
                     <div class="actions-timer-slot">
                       ${renderTurnTimer(me.id, turnTimerState, 'action')}
@@ -7802,6 +7980,7 @@ function render() {
   const enteringFriends = previousView !== 'friends' && state.view === 'friends';
   state.lastRenderedView = state.view;
   app.dataset.view = state.view;
+  syncLeaderboardLivePolling();
   const hasOnlineSession = Boolean(state.token && state.me);
   const hasOfflineSession = Boolean(!state.token && state.me && (offlineModeEnabled() || String(state.me.id || '').startsWith('offline:')));
   if (!hasOnlineSession && !hasOfflineSession) {

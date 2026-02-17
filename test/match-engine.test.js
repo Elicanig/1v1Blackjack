@@ -1042,7 +1042,7 @@ test('41m re-double works up to cap and settlement uses final bet', () => {
   const m = makeMatch({
     p1Hand: newHand([card('5'), card('4')], [false, true], 5, 0),
     p2Hand: newHand([card('10'), card('2')], [false, true], 5, 0),
-    deck: [card('2', 'H'), card('2', 'D')]
+    deck: [card('2', 'H'), card('2', 'D'), card('2', 'C')]
   });
 
   const d1 = applyAction(m, 'p1', 'double');
@@ -1060,13 +1060,95 @@ test('41m re-double works up to cap and settlement uses final bet', () => {
   assert.equal(m.round.turnPlayerId, 'p1');
 
   const d3 = applyAction(m, 'p1', 'double');
-  assert.equal(d3.error, 'Hand cannot double down');
+  assert.equal(d3.ok, true);
+  assert.equal(m.round.players.p1.hands[0].bet, 40);
+  assert.equal(m.round.players.p1.hands[0].doubleCount, 3);
+  assert.equal(applyPressureDecision(m, 'p2', 'match').ok, true);
+
+  const d4 = applyAction(m, 'p1', 'double');
+  assert.equal(d4.error, 'Hand cannot double down');
 
   assert.equal(applyAction(m, 'p1', 'stand').ok, true);
   assert.equal(m.round.turnPlayerId, 'p2');
   assert.equal(applyAction(m, 'p2', 'stand').ok, true);
   assert.equal(m.phase, PHASES.REVEAL);
-  assert.equal(m.round.resultByPlayer.p1.deltaChips, 20);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, 40);
+});
+
+test('41ma opponent double pressure match does not block your own legal double', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('6'), card('5')], [false, true], 5, 0),
+    p2Hand: newHand([card('5'), card('4')], [false, true], 5, 0),
+    deck: [card('2', 'H'), card('2', 'D')]
+  });
+  m.round.turnPlayerId = 'p2';
+
+  const oppDouble = applyAction(m, 'p2', 'double');
+  assert.equal(oppDouble.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+
+  const myPressureMatch = applyPressureDecision(m, 'p1', 'match');
+  assert.equal(myPressureMatch.ok, true);
+  assert.equal(m.round.turnPlayerId, 'p2');
+
+  const oppStand = applyAction(m, 'p2', 'stand');
+  assert.equal(oppStand.ok, true);
+  assert.equal(m.round.turnPlayerId, 'p1');
+
+  const myDouble = applyAction(m, 'p1', 'double');
+  assert.equal(myDouble.ok, true);
+});
+
+test('41mb opponent split pressure match does not block your own legal split', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('7'), card('7', 'D')], [false, true], 5, 0),
+    p2Hand: newHand([card('8'), card('8', 'C')], [false, true], 5, 0),
+    deck: [card('2', 'H'), card('3', 'D'), card('4', 'S'), card('5', 'C')]
+  });
+  m.round.turnPlayerId = 'p2';
+
+  const oppSplit = applyAction(m, 'p2', 'split');
+  assert.equal(oppSplit.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+
+  const myPressureMatch = applyPressureDecision(m, 'p1', 'match');
+  assert.equal(myPressureMatch.ok, true);
+  assert.equal(m.round.turnPlayerId, 'p2');
+
+  const oppStandOne = applyAction(m, 'p2', 'stand');
+  assert.equal(oppStandOne.ok, true);
+  assert.equal(m.round.turnPlayerId, 'p2');
+  const oppStandTwo = applyAction(m, 'p2', 'stand');
+  assert.equal(oppStandTwo.ok, true);
+  assert.equal(m.round.turnPlayerId, 'p1');
+
+  const mySplit = applyAction(m, 'p1', 'split');
+  assert.equal(mySplit.ok, true);
+});
+
+test('41mc surrender versus opponent split charges only 75% of original base bet once', () => {
+  const m = makeMatch({
+    p1Hand: newHand([card('10'), card('6')], [false, true], 20, 0),
+    p2Hand: newHand([card('8'), card('8', 'D')], [false, true], 20, 0),
+    deck: [card('2', 'H'), card('3', 'C')]
+  });
+  m.round.baseBet = 20;
+  m.round.postedBetByPlayer = { p1: 20, p2: 20 };
+  m.round.turnPlayerId = 'p2';
+
+  const oppSplit = applyAction(m, 'p2', 'split');
+  assert.equal(oppSplit.ok, true);
+  assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+
+  const surrender = applyPressureDecision(m, 'p1', 'surrender');
+  assert.equal(surrender.ok, true);
+  assert.equal(m.round.turnPlayerId, 'p2');
+
+  assert.equal(applyAction(m, 'p2', 'stand').ok, true);
+  assert.equal(applyAction(m, 'p2', 'stand').ok, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, -15);
+  assert.equal(m.round.resultByPlayer.p2.deltaChips, 15);
 });
 
 test('41n easy bots never choose split/double while normal and medium can', () => {

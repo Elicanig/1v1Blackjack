@@ -1133,7 +1133,7 @@ const RULES = {
   SURRENDER_LOSS_FRACTION: 0.75,
   MAX_SPLITS: 3,
   MAX_HANDS_PER_PLAYER: 4,
-  MAX_DOUBLES_PER_HAND: 2,
+  MAX_DOUBLES_PER_HAND: 3,
   ALL_IN_ON_INSUFFICIENT_BASE_BET: true
 };
 
@@ -1947,6 +1947,40 @@ function leaderboardPayload(currentUserId, limit = LEADERBOARD_DEFAULT_LIMIT, of
     rows,
     currentUserRank: currentUserId ? snapshot.rankByUserId.get(currentUserId) || null : null,
     totalUsers: snapshot.rows.length
+  };
+}
+
+function publicStatsPayloadForUser(user) {
+  if (!user) return null;
+  const safe = sanitizeUser(user);
+  const stats = safe?.stats || {};
+  return {
+    userId: safe.id,
+    username: safe.username,
+    avatar: safe.avatar,
+    chips: Math.max(0, Math.floor(Number(safe.chips) || 0)),
+    level: Math.max(1, Math.floor(Number(safe.level) || 1)),
+    rankTier: safe.rankTier,
+    rankTierKey: safe.rankTierKey,
+    rankedElo: Math.max(0, Math.floor(Number(safe.rankedElo) || 0)),
+    overallWl: {
+      wins: Math.max(0, Math.floor(Number(safe.pvpWins) || 0)),
+      losses: Math.max(0, Math.floor(Number(safe.pvpLosses) || 0))
+    },
+    rankedWl: {
+      wins: Math.max(0, Math.floor(Number(safe.rankedWins) || 0)),
+      losses: Math.max(0, Math.floor(Number(safe.rankedLosses) || 0))
+    },
+    stats: {
+      matchesPlayed: Math.max(0, Math.floor(Number(stats.matchesPlayed) || 0)),
+      handsWon: Math.max(0, Math.floor(Number(stats.handsWon) || 0)),
+      handsLost: Math.max(0, Math.floor(Number(stats.handsLost) || 0)),
+      handsPushed: Math.max(0, Math.floor(Number(stats.pushes ?? stats.handsPush) || 0)),
+      blackjacks: Math.max(0, Math.floor(Number(stats.blackjacks) || 0)),
+      splitsWon: Math.max(0, Math.floor(Number(stats.splitHandsWon) || 0)),
+      doublesAttempted: Math.max(0, Math.floor(Number(stats.doublesAttempted) || 0)),
+      surrenders: Math.max(0, Math.floor(Number(stats.surrenders) || 0))
+    }
   };
 }
 
@@ -4674,6 +4708,32 @@ function resolveRound(match) {
 
   const aBase = a.hands[0] || null;
   const bBase = b.hands[0] || null;
+  const surrenderBaseByPlayer = {
+    [aId]: Math.max(
+      1,
+      Math.floor(
+        Number(match?.round?.postedBetByPlayer?.[aId]) ||
+        Number(match?.round?.stakesCommittedByPlayer?.[aId]) ||
+        Number(aBase?.bet) ||
+        Number(match?.round?.baseBet) ||
+        BASE_BET
+      )
+    ),
+    [bId]: Math.max(
+      1,
+      Math.floor(
+        Number(match?.round?.postedBetByPlayer?.[bId]) ||
+        Number(match?.round?.stakesCommittedByPlayer?.[bId]) ||
+        Number(bBase?.bet) ||
+        Number(match?.round?.baseBet) ||
+        BASE_BET
+      )
+    )
+  };
+  const surrenderSettledByPlayer = {
+    [aId]: false,
+    [bId]: false
+  };
   const handSlots = Math.max(a.hands.length || 0, b.hands.length || 0, 1);
   // Aggregate settlement per hand so split outcomes (win/push/loss mix) pay correctly.
   for (let idx = 0; idx < handSlots; idx += 1) {
@@ -4681,20 +4741,35 @@ function resolveRound(match) {
     const handB = b.hands[idx] || bBase;
     if (!handA || !handB) continue;
 
+    if (handA.surrendered && handB.surrendered) {
+      if (!surrenderSettledByPlayer[aId] && !surrenderSettledByPlayer[bId]) {
+        handA.outcome = mergeHandOutcome(handA.outcome, 'push');
+        handB.outcome = mergeHandOutcome(handB.outcome, 'push');
+        outcomes.push({ winner: null, loser: null, amount: 0, handIndex: idx, winnerHandWasSplit: false });
+      }
+      surrenderSettledByPlayer[aId] = true;
+      surrenderSettledByPlayer[bId] = true;
+      continue;
+    }
+
     if (handA.surrendered) {
-      const amount = Math.floor(handA.bet * RULES.SURRENDER_LOSS_FRACTION);
+      if (surrenderSettledByPlayer[aId]) continue;
+      const amount = Math.floor(surrenderBaseByPlayer[aId] * RULES.SURRENDER_LOSS_FRACTION);
       chipsDelta[aId] -= amount;
       chipsDelta[bId] += amount;
       handA.outcome = mergeHandOutcome(handA.outcome, 'loss');
       handB.outcome = mergeHandOutcome(handB.outcome, 'win');
       outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handB?.wasSplitHand) });
+      surrenderSettledByPlayer[aId] = true;
     } else if (handB.surrendered) {
-      const amount = Math.floor(handB.bet * RULES.SURRENDER_LOSS_FRACTION);
+      if (surrenderSettledByPlayer[bId]) continue;
+      const amount = Math.floor(surrenderBaseByPlayer[bId] * RULES.SURRENDER_LOSS_FRACTION);
       chipsDelta[aId] += amount;
       chipsDelta[bId] -= amount;
       handA.outcome = mergeHandOutcome(handA.outcome, 'win');
       handB.outcome = mergeHandOutcome(handB.outcome, 'loss');
       outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
+      surrenderSettledByPlayer[bId] = true;
     } else {
       const result = compareHands(handA, handB);
       const pot = Math.min(handA.bet, handB.bet);
@@ -5318,6 +5393,7 @@ function progressTurn(match, actingPlayerId) {
 
 function canSplit(hand, playerRoundState = null, context = null) {
   if (!hand) return false;
+  if ((hand.doubleCount || 0) > 0) return false;
   if (playerRoundState?.hands?.length >= RULES.MAX_HANDS_PER_PLAYER) return false;
   if (hand.cards.length !== 2) return false;
   if (hand.splitDepth >= RULES.MAX_SPLITS) return false;
@@ -5985,7 +6061,8 @@ function applyPressureDecision(match, playerId, decision) {
         return { error: `Bet cannot exceed ${betLimits.max} for this table` };
       }
       hand.bet += pressure.delta;
-      hand.actionCount = (hand.actionCount || 0) + 1;
+      // Matching pressure should not consume the responder's hand action.
+      // This keeps split/double eligibility independent from opponent actions.
     }
   } else if (decision === 'surrender') {
     for (const idx of targetIndices) {
@@ -6798,6 +6875,16 @@ app.get('/api/leaderboard/chips', authMiddleware, async (req, res) => {
 
   const payload = leaderboardPayload(req.user.id, limit, offset);
   return res.json(payload);
+});
+
+app.get('/api/users/:userRef/public-stats', authMiddleware, async (req, res) => {
+  const ref = String(req.params?.userRef || '').trim();
+  if (!ref) return res.status(400).json({ error: 'User reference required' });
+  const user = getUserById(ref) || getUserByUsername(ref);
+  if (!user) return res.status(404).json({ error: 'Player not found' });
+  const payload = publicStatsPayloadForUser(user);
+  if (!payload) return res.status(404).json({ error: 'Player not found' });
+  return res.json({ player: payload });
 });
 
 app.put('/api/profile', authMiddleware, async (req, res) => {
