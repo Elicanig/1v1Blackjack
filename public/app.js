@@ -394,6 +394,7 @@ const state = {
   notificationFriendRequestStatus: {},
   toasts: [],
   challenges: { hourly: [], daily: [], weekly: [], skill: [] },
+  challengeClaimPendingById: {},
   challengeResets: { hourly: null, daily: null, weekly: null },
   challengeResetRemainingMs: { hourly: 0, daily: 0, weekly: 0 },
   challengeResetRefreshInFlight: false,
@@ -2028,6 +2029,7 @@ async function loadMe() {
     state.challengeResets = { hourly: null, daily: null, weekly: null };
     state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
     state.challengeResetRefreshInFlight = false;
+    state.challengeClaimPendingById = {};
     state.freeClaimed = false;
     state.freeClaimedAt = null;
     state.freeClaimNextAt = null;
@@ -3202,18 +3204,84 @@ async function loadChallenges() {
   }
 }
 
+function getChallengeEntryById(challengeId) {
+  const groups = state.challenges || {};
+  for (const tier of Object.keys(groups)) {
+    const list = Array.isArray(groups[tier]) ? groups[tier] : [];
+    const index = list.findIndex((item) => String(item?.id || '') === String(challengeId || ''));
+    if (index >= 0) {
+      return { tier, index, challenge: list[index] };
+    }
+  }
+  return null;
+}
+
+function setChallengeEntryById(challengeId, nextChallenge) {
+  const entry = getChallengeEntryById(challengeId);
+  if (!entry) return false;
+  state.challenges[entry.tier][entry.index] = nextChallenge;
+  return true;
+}
+
 async function claimChallenge(id) {
+  const challengeId = String(id || '').trim();
+  if (!challengeId) return;
+  if (state.challengeClaimPendingById[challengeId]) return;
+  const entry = getChallengeEntryById(challengeId);
+  const original = entry?.challenge ? { ...entry.challenge } : null;
+  state.challengeClaimPendingById[challengeId] = true;
+  if (entry?.challenge) {
+    setChallengeEntryById(challengeId, {
+      ...entry.challenge,
+      claimed: true,
+      claimedAt: entry.challenge.claimedAt || new Date().toISOString(),
+      completedAt: entry.challenge.completedAt || new Date().toISOString()
+    });
+  }
+  render();
   try {
     const data = await api('/api/challenges/claim', {
       method: 'POST',
-      body: JSON.stringify({ id })
+      body: JSON.stringify({ id: challengeId })
     });
-    setStatus(`Challenge claimed: +${data.reward} chips`);
-    state.me.chips = data.chips;
-    state.bankrollDisplay = data.bankroll ?? data.chips;
-    await loadChallenges();
+    if (entry?.challenge) {
+      setChallengeEntryById(challengeId, {
+        ...state.challenges[entry.tier][entry.index],
+        claimed: true,
+        claimedAt: data?.claimedAt || state.challenges[entry.tier][entry.index]?.claimedAt || new Date().toISOString(),
+        completedAt: state.challenges[entry.tier][entry.index]?.completedAt || new Date().toISOString()
+      });
+    }
+    state.me.chips = Math.max(0, Math.floor(Number(data?.chips) || Number(state.me?.chips) || 0));
+    state.bankrollDisplay = Math.max(0, Math.floor(Number(data?.bankroll ?? data?.chips ?? state.bankrollDisplay ?? state.me.chips) || 0));
+    if (Number.isFinite(Number(data?.xp))) state.me.xp = Math.max(0, Math.floor(Number(data.xp)));
+    if (Number.isFinite(Number(data?.level))) state.me.level = Math.max(1, Math.floor(Number(data.level)));
+    setStatus(`Challenge claimed: +${Math.max(0, Math.floor(Number(data?.reward) || 0))} chips`);
+    delete state.challengeClaimPendingById[challengeId];
+    render();
+    loadChallenges();
   } catch (e) {
-    setError(e.message);
+    delete state.challengeClaimPendingById[challengeId];
+    const message = String(e.message || '');
+    if (/already claimed/i.test(message)) {
+      if (entry?.challenge) {
+        setChallengeEntryById(challengeId, {
+          ...(state.challenges[entry.tier][entry.index] || entry.challenge),
+          claimed: true,
+          claimedAt: (state.challenges[entry.tier][entry.index] || entry.challenge).claimedAt || new Date().toISOString()
+        });
+      }
+      pushToast('Already claimed.');
+      loadChallenges();
+      render();
+      return;
+    }
+    if (original && entry) {
+      setChallengeEntryById(challengeId, original);
+    }
+    pushToast(`Challenge claim failed: ${message || 'Please try again.'}`);
+    setError(message);
+    render();
   }
 }
 
@@ -3253,6 +3321,7 @@ function logout() {
   state.currentMatch = null;
   state.currentLobby = null;
   state.challenges = { hourly: [], daily: [], weekly: [], skill: [] };
+  state.challengeClaimPendingById = {};
   state.challengeResets = { hourly: null, daily: null, weekly: null };
   state.challengeResetRemainingMs = { hourly: 0, daily: 0, weekly: 0 };
   state.challengeResetRefreshInFlight = false;
@@ -4908,15 +4977,19 @@ function renderLobby() {
         <section class="col card section">
       <h3>Create Lobby</h3>
       <p class="muted">Create only when you want to host a private 1v1 room.</p>
-      <div class="row">
-        <button class="primary" id="createLobbyBtn">Create Lobby</button>
-        <button
-          class="gold ${highRollerUnlocked ? '' : 'is-locked'}"
-          id="createHighRollerLobbyBtn"
-          ${highRollerUnlocked ? '' : `aria-disabled="true" title="Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips"`}
-        >High Roller</button>
+      <div class="row lobby-create-actions">
+        <div class="lobby-create-action">
+          <button class="primary" id="createLobbyBtn">Create Lobby</button>
+        </div>
+        <div class="lobby-create-action high-roller-action">
+          <button
+            class="gold ${highRollerUnlocked ? '' : 'is-locked'}"
+            id="createHighRollerLobbyBtn"
+            ${highRollerUnlocked ? '' : `aria-disabled="true" title="Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips"`}
+          >High Roller</button>
+          <div class="muted high-roller-lock-note">Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips</div>
+        </div>
       </div>
-      ${highRollerUnlocked ? '' : `<div class="muted high-roller-lock-note">Requires ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips</div>`}
         </section>
         <section class="col card section">
           <h3>Join Existing Lobby</h3>
@@ -5188,6 +5261,7 @@ function renderRanked() {
 
 function renderChallenges() {
   const groups = state.challenges || { hourly: [], daily: [], weekly: [], skill: [] };
+  const claimPending = state.challengeClaimPendingById || {};
   const resetTiers = new Set(['hourly', 'daily', 'weekly']);
   const renderTier = (label, key) => `
     <div class="card section" style="margin-top:1rem">
@@ -5207,7 +5281,15 @@ function renderChallenges() {
               <div class="muted">${c.description}</div>
               <div class="muted">${c.progress}/${c.goal} • Reward ${c.rewardChips} chips</div>
             </div>
-            <button class="${c.progress >= c.goal && !c.claimed && !c.claimedAt ? 'claim-wiggle' : ''}" data-claim="${c.id}" ${c.claimed || c.claimedAt || c.progress < c.goal ? 'disabled' : ''}>${c.claimed || c.claimedAt ? 'Claimed' : 'Claim'}</button>
+            <button
+              class="${c.progress >= c.goal && !c.claimed && !c.claimedAt && !claimPending[c.id] ? 'claim-wiggle' : ''}"
+              data-claim="${c.id}"
+              ${c.claimed || c.claimedAt || c.progress < c.goal || claimPending[c.id] ? 'disabled' : ''}
+            >${
+              claimPending[c.id]
+                ? '<span class="btn-spinner" aria-hidden="true"></span>Claiming...'
+                : (c.claimed || c.claimedAt ? 'Claimed' : 'Claim')
+            }</button>
           </div>
         `
           )

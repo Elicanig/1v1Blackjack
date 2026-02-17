@@ -637,6 +637,21 @@ button.is-locked:active {
   color: #e3c792;
 }
 
+.lobby-create-actions {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.lobby-create-action {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.high-roller-action .high-roller-lock-note {
+  margin-top: 2px;
+}
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
@@ -1714,6 +1729,23 @@ select:focus-visible {
 
 .claim-wiggle {
   animation: claimWiggle 3.6s ease-in-out infinite;
+}
+
+.btn-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(245, 245, 238, 0.35);
+  border-top-color: rgba(245, 245, 238, 0.95);
+  border-radius: 50%;
+  vertical-align: -2px;
+  margin-right: 6px;
+  animation: btnSpin 0.8s linear infinite;
+}
+
+@keyframes btnSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 @keyframes claimWiggle {

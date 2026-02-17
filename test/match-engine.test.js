@@ -24,6 +24,8 @@ import {
   rankedKFactorForElo,
   rankedEloDeltaForGame,
   rankedSeriesDeltaForOutcome,
+  streakCountsAfterOutcome,
+  matchWinStreakAfterOutcome,
   getBotObservation,
   chooseBotActionFromObservation
 } from '../server.js';
@@ -548,8 +550,8 @@ test('39be series Elo win vs similar Elo lands in target range', () => {
     won: true,
     rankTierKey: 'GOLD'
   });
-  assert.equal(seriesWin.finalDelta >= 17, true);
-  assert.equal(seriesWin.finalDelta <= 25, true);
+  assert.equal(seriesWin.finalDelta >= 22, true);
+  assert.equal(seriesWin.finalDelta <= 32, true);
 });
 
 test('39bf Bronze loss is softened versus Gold at same Elo', () => {
@@ -568,6 +570,17 @@ test('39bf Bronze loss is softened versus Gold at same Elo', () => {
   assert.equal(Math.abs(bronzeLoss.finalDelta) < Math.abs(goldLoss.finalDelta), true);
 });
 
+test('39bfa series loss vs similar Elo is moderate', () => {
+  const goldLoss = rankedSeriesDeltaForOutcome({
+    playerElo: 1500,
+    opponentElo: 1500,
+    won: false,
+    rankTierKey: 'GOLD'
+  });
+  assert.equal(goldLoss.finalDelta <= -10, true);
+  assert.equal(goldLoss.finalDelta >= -18, true);
+});
+
 test('39bg high Elo expected series win stays bounded', () => {
   const favoredWin = rankedSeriesDeltaForOutcome({
     playerElo: 1900,
@@ -575,8 +588,8 @@ test('39bg high Elo expected series win stays bounded', () => {
     won: true,
     rankTierKey: 'LEGENDARY'
   });
-  assert.equal(favoredWin.finalDelta >= 12, true);
-  assert.equal(favoredWin.finalDelta <= 20, true);
+  assert.equal(favoredWin.finalDelta >= 1, true);
+  assert.equal(favoredWin.finalDelta <= 12, true);
 });
 
 test('39c double is blocked when pressure would exceed table max for opponent', () => {
@@ -688,6 +701,17 @@ function makeSplitResolutionMatch({ firstHand, secondHand, opponentHand }) {
   return m;
 }
 
+function makeOpponentSplitResolutionMatch({ playerHand, opponentFirstHand, opponentSecondHand }) {
+  const m = makeMatch({ p1Hand: playerHand, p2Hand: opponentFirstHand, deck: [] });
+  m.round.turnPlayerId = 'p1';
+  m.round.players.p1.hands = [playerHand];
+  m.round.players.p1.activeHandIndex = 0;
+  m.round.players.p2.hands = [opponentFirstHand, opponentSecondHand];
+  m.round.players.p2.activeHandIndex = 1;
+  m.round.firstActionTaken = true;
+  return m;
+}
+
 test('41b split payout sums both winning split hands', () => {
   const hand1 = newHand([card('10'), card('Q')], [false, false], 5, 1);
   hand1.wasSplitHand = true;
@@ -743,6 +767,52 @@ test('41d split payout handles push scenarios per hand', () => {
   assert.equal(m.phase, PHASES.REVEAL);
   assert.equal(m.round.resultByPlayer.p1.deltaChips, 5);
   assert.equal(m.round.resultByPlayer.p2.deltaChips, -5);
+});
+
+test('41da opponent split: player beating both split hands wins both payouts', () => {
+  const playerHand = newHand([card('10'), card('Q')], [false, false], 10, 0);
+  const opp1 = newHand([card('10'), card('8')], [false, false], 10, 1);
+  opp1.wasSplitHand = true;
+  opp1.stood = true;
+  opp1.locked = true;
+  const opp2 = newHand([card('10'), card('7')], [false, false], 10, 1);
+  opp2.wasSplitHand = true;
+  opp2.stood = true;
+  opp2.locked = true;
+  const m = makeOpponentSplitResolutionMatch({
+    playerHand,
+    opponentFirstHand: opp1,
+    opponentSecondHand: opp2
+  });
+
+  const res = applyAction(m, 'p1', 'stand');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, 20);
+  assert.equal(m.round.resultByPlayer.p2.deltaChips, -20);
+});
+
+test('41db opponent split: one win and one loss nets zero', () => {
+  const playerHand = newHand([card('10'), card('9')], [false, false], 10, 0);
+  const opp1 = newHand([card('10'), card('8')], [false, false], 10, 1);
+  opp1.wasSplitHand = true;
+  opp1.stood = true;
+  opp1.locked = true;
+  const opp2 = newHand([card('10'), card('Q')], [false, false], 10, 1);
+  opp2.wasSplitHand = true;
+  opp2.stood = true;
+  opp2.locked = true;
+  const m = makeOpponentSplitResolutionMatch({
+    playerHand,
+    opponentFirstHand: opp1,
+    opponentSecondHand: opp2
+  });
+
+  const res = applyAction(m, 'p1', 'stand');
+  assert.equal(res.ok, true);
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, 0);
+  assert.equal(m.round.resultByPlayer.p2.deltaChips, 0);
 });
 
 test('41e PvP double executes and syncs through pressure resolution', () => {
@@ -954,4 +1024,24 @@ test('49 forfeit loss amount uses exposure when available', () => {
 
 test('50 forfeit loss amount falls back to base bet and caps by bankroll', () => {
   assert.equal(calculateForfeitLossAmount(40, 0, 50), 40);
+});
+
+test('51 hand streak: win increments, push keeps, loss resets win and increments loss', () => {
+  const afterWin = streakCountsAfterOutcome({ winStreak: 3, lossStreak: 0, outcome: 'win' });
+  assert.equal(afterWin.winStreak, 4);
+  assert.equal(afterWin.lossStreak, 0);
+
+  const afterPush = streakCountsAfterOutcome({ winStreak: 4, lossStreak: 0, outcome: 'push' });
+  assert.equal(afterPush.winStreak, 4);
+  assert.equal(afterPush.lossStreak, 0);
+
+  const afterLoss = streakCountsAfterOutcome({ winStreak: 4, lossStreak: 0, outcome: 'loss' });
+  assert.equal(afterLoss.winStreak, 0);
+  assert.equal(afterLoss.lossStreak, 1);
+});
+
+test('52 match win streak: push is neutral and loss resets', () => {
+  assert.equal(matchWinStreakAfterOutcome(5, 'win'), 6);
+  assert.equal(matchWinStreakAfterOutcome(6, 'push'), 6);
+  assert.equal(matchWinStreakAfterOutcome(6, 'loss'), 0);
 });

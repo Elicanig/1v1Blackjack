@@ -46,10 +46,10 @@ const RANKED_BASE_ELO = 1000;
 const RANKED_ELO_DELTA_CLAMP = 35;
 const RANKED_PUSH_DELTA_SCALE = 0.25;
 const RANKED_PUSH_DELTA_CAP = 3;
-const RANKED_SERIES_WIN_DELTA_MIN = 12;
-const RANKED_SERIES_WIN_DELTA_MAX = 28;
-const RANKED_SERIES_LOSS_DELTA_MIN = -28;
-const RANKED_SERIES_LOSS_DELTA_MAX = -12;
+const RANKED_SERIES_WIN_DELTA_MIN = 1;
+const RANKED_SERIES_WIN_DELTA_MAX = 34;
+const RANKED_SERIES_LOSS_DELTA_MIN = -18;
+const RANKED_SERIES_LOSS_DELTA_MAX = -8;
 const RANKED_MATCH_MAX_ELO_GAP = 220;
 const RANKED_QUEUE_TIMEOUT_MS = 60_000;
 const RANKED_SERIES_TARGET_GAMES = 9;
@@ -1291,6 +1291,27 @@ function updateDailyWinStreak(user, eventIso = nowIso()) {
   user.lastDailyWinDate = today;
 }
 
+function streakCountsAfterOutcome({ winStreak = 0, lossStreak = 0, outcome = 'push' } = {}) {
+  const safeWin = Math.max(0, Math.floor(Number(winStreak) || 0));
+  const safeLoss = Math.max(0, Math.floor(Number(lossStreak) || 0));
+  const normalized = String(outcome || '').trim().toLowerCase();
+  if (normalized === 'win') {
+    return { winStreak: safeWin + 1, lossStreak: 0 };
+  }
+  if (normalized === 'loss') {
+    return { winStreak: 0, lossStreak: safeLoss + 1 };
+  }
+  return { winStreak: safeWin, lossStreak: safeLoss };
+}
+
+function matchWinStreakAfterOutcome(currentStreak = 0, outcome = 'push') {
+  const safeCurrent = Math.max(0, Math.floor(Number(currentStreak) || 0));
+  const normalized = String(outcome || '').trim().toLowerCase();
+  if (normalized === 'win') return safeCurrent + 1;
+  if (normalized === 'loss') return 0;
+  return safeCurrent;
+}
+
 function levelRewardForLevel(level) {
   const safeLevel = Math.max(1, Math.floor(Number(level) || 1));
   if (safeLevel % 5 !== 0) return 0;
@@ -2307,10 +2328,10 @@ function rankedEloDeltaForGame({
 
 function rankedSeriesKFactorForElo(elo) {
   const rating = normalizeRankedElo(elo);
-  if (rating < 1200) return 46;
-  if (rating < 1600) return 44;
-  if (rating < 1850) return 40;
-  return 36;
+  if (rating < 1200) return 58;
+  if (rating < 1600) return 56;
+  if (rating < 1850) return 52;
+  return 48;
 }
 
 function rankedLossSoftenerForTier(rankTierKey) {
@@ -3673,6 +3694,14 @@ function resolveRound(match) {
 
   const outcomes = [];
 
+  function mergeHandOutcome(previous, next) {
+    if (!previous) return next;
+    if (!next || previous === next) return previous;
+    if (previous === 'push') return next;
+    if (next === 'push') return previous;
+    return 'mixed';
+  }
+
   function compareHands(handA, handB) {
     if (handA.surrendered && handB.surrendered) return 0;
     if (handA.surrendered) return -1;
@@ -3694,25 +3723,28 @@ function resolveRound(match) {
     return RULES.PUSH_ON_EQUAL_TOTAL ? 0 : 1;
   }
 
-  const bBase = b.hands[0];
+  const aBase = a.hands[0] || null;
+  const bBase = b.hands[0] || null;
+  const handSlots = Math.max(a.hands.length || 0, b.hands.length || 0, 1);
   // Aggregate settlement per hand so split outcomes (win/push/loss mix) pay correctly.
-  for (let idx = 0; idx < a.hands.length; idx += 1) {
-    const handA = a.hands[idx];
-    const handB = bBase;
+  for (let idx = 0; idx < handSlots; idx += 1) {
+    const handA = a.hands[idx] || aBase;
+    const handB = b.hands[idx] || bBase;
+    if (!handA || !handB) continue;
 
     if (handA.surrendered) {
       const amount = Math.floor(handA.bet * RULES.SURRENDER_LOSS_FRACTION);
       chipsDelta[aId] -= amount;
       chipsDelta[bId] += amount;
-      handA.outcome = 'loss';
-      handB.outcome = handB.outcome || 'win';
+      handA.outcome = mergeHandOutcome(handA.outcome, 'loss');
+      handB.outcome = mergeHandOutcome(handB.outcome, 'win');
       outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handB?.wasSplitHand) });
     } else if (handB.surrendered) {
       const amount = Math.floor(handB.bet * RULES.SURRENDER_LOSS_FRACTION);
       chipsDelta[aId] += amount;
       chipsDelta[bId] -= amount;
-      handA.outcome = 'win';
-      handB.outcome = 'loss';
+      handA.outcome = mergeHandOutcome(handA.outcome, 'win');
+      handB.outcome = mergeHandOutcome(handB.outcome, 'loss');
       outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
     } else {
       const result = compareHands(handA, handB);
@@ -3723,19 +3755,19 @@ function resolveRound(match) {
         const amount = handANatural && !handBNatural ? Math.floor(pot * 1.5) : pot;
         chipsDelta[aId] += amount;
         chipsDelta[bId] -= amount;
-        handA.outcome = 'win';
-        handB.outcome = handB.outcome || 'loss';
+        handA.outcome = mergeHandOutcome(handA.outcome, 'win');
+        handB.outcome = mergeHandOutcome(handB.outcome, 'loss');
         outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
       } else if (result < 0) {
         const amount = handBNatural && !handANatural ? Math.floor(pot * 1.5) : pot;
         chipsDelta[aId] -= amount;
         chipsDelta[bId] += amount;
-        handA.outcome = 'loss';
-        handB.outcome = handB.outcome || 'win';
+        handA.outcome = mergeHandOutcome(handA.outcome, 'loss');
+        handB.outcome = mergeHandOutcome(handB.outcome, 'win');
         outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handB?.wasSplitHand) });
       } else {
-        handA.outcome = 'push';
-        if (!handB.outcome) handB.outcome = 'push';
+        handA.outcome = mergeHandOutcome(handA.outcome, 'push');
+        handB.outcome = mergeHandOutcome(handB.outcome, 'push');
         outcomes.push({ winner: null, loser: null, amount: 0, handIndex: idx, winnerHandWasSplit: false });
       }
     }
@@ -3794,8 +3826,13 @@ function resolveRound(match) {
 
     if (ownWon) {
       stats.handsWon = (stats.handsWon || 0) + 1;
-      stats.currentWinStreak = (stats.currentWinStreak || 0) + 1;
-      stats.currentLossStreak = 0;
+      const nextStreak = streakCountsAfterOutcome({
+        winStreak: stats.currentWinStreak,
+        lossStreak: stats.currentLossStreak,
+        outcome: 'win'
+      });
+      stats.currentWinStreak = nextStreak.winStreak;
+      stats.currentLossStreak = nextStreak.lossStreak;
       stats.longestWinStreak = Math.max(stats.longestWinStreak || 0, stats.currentWinStreak || 0);
       stats.totalChipsWon = (stats.totalChipsWon || 0) + (out.amount || 0);
       stats.biggestHandWin = Math.max(stats.biggestHandWin || 0, out.amount || 0);
@@ -3803,8 +3840,13 @@ function resolveRound(match) {
       recordChallengeEvent(user, 'hand_won', 1);
     } else if (ownLost) {
       stats.handsLost = (stats.handsLost || 0) + 1;
-      stats.currentLossStreak = (stats.currentLossStreak || 0) + 1;
-      stats.currentWinStreak = 0;
+      const nextStreak = streakCountsAfterOutcome({
+        winStreak: stats.currentWinStreak,
+        lossStreak: stats.currentLossStreak,
+        outcome: 'loss'
+      });
+      stats.currentWinStreak = nextStreak.winStreak;
+      stats.currentLossStreak = nextStreak.lossStreak;
       stats.longestLossStreak = Math.max(stats.longestLossStreak || 0, stats.currentLossStreak || 0);
       stats.totalChipsLost = (stats.totalChipsLost || 0) + (out.amount || 0);
       stats.biggestHandLoss = Math.max(stats.biggestHandLoss || 0, out.amount || 0);
@@ -3812,8 +3854,13 @@ function resolveRound(match) {
     } else if (ownPush) {
       stats.pushes = (stats.pushes || 0) + 1;
       stats.handsPush = stats.pushes;
-      stats.currentWinStreak = 0;
-      stats.currentLossStreak = 0;
+      const nextStreak = streakCountsAfterOutcome({
+        winStreak: stats.currentWinStreak,
+        lossStreak: stats.currentLossStreak,
+        outcome: 'push'
+      });
+      stats.currentWinStreak = nextStreak.winStreak;
+      stats.currentLossStreak = nextStreak.lossStreak;
       recordChallengeEvent(user, 'push', 1);
     }
 
@@ -3895,20 +3942,25 @@ function resolveRound(match) {
   const winnerUser = winnerId ? getUserById(winnerId) : null;
   const loserUser = loserId ? getUserById(loserId) : null;
   const rankedRound = String(match.matchType || '').toUpperCase() === 'RANKED' && realMatch;
-
-  if (winnerUser) {
-    winnerUser.currentMatchWinStreak = Math.max(0, Math.floor(Number(winnerUser.currentMatchWinStreak) || 0) + 1);
-    winnerUser.bestMatchWinStreak = Math.max(
-      Math.floor(Number(winnerUser.bestMatchWinStreak) || 0),
-      Math.floor(Number(winnerUser.currentMatchWinStreak) || 0)
-    );
+  const outcomeForA = netA > 0 ? 'win' : netA < 0 ? 'loss' : 'push';
+  const outcomeForB = netA < 0 ? 'win' : netA > 0 ? 'loss' : 'push';
+  if (userA) {
+    userA.currentMatchWinStreak = matchWinStreakAfterOutcome(userA.currentMatchWinStreak, outcomeForA);
+    if (outcomeForA === 'win') {
+      userA.bestMatchWinStreak = Math.max(
+        Math.floor(Number(userA.bestMatchWinStreak) || 0),
+        Math.floor(Number(userA.currentMatchWinStreak) || 0)
+      );
+    }
   }
-  if (loserUser) {
-    loserUser.currentMatchWinStreak = 0;
-  }
-  if (!winnerUser && !loserUser) {
-    if (userA) userA.currentMatchWinStreak = 0;
-    if (userB) userB.currentMatchWinStreak = 0;
+  if (userB) {
+    userB.currentMatchWinStreak = matchWinStreakAfterOutcome(userB.currentMatchWinStreak, outcomeForB);
+    if (outcomeForB === 'win') {
+      userB.bestMatchWinStreak = Math.max(
+        Math.floor(Number(userB.bestMatchWinStreak) || 0),
+        Math.floor(Number(userB.currentMatchWinStreak) || 0)
+      );
+    }
   }
 
   if (pvpMatch && winnerUser && loserUser) {
@@ -3962,8 +4014,6 @@ function resolveRound(match) {
       // Push still grants small progression to reduce churn.
       if (userA) awardXp(userA, Math.floor(xpLoss / 2));
       if (userB) awardXp(userB, Math.floor(xpLoss / 2));
-      if (userA) userA.currentMatchWinStreak = 0;
-      if (userB) userB.currentMatchWinStreak = 0;
     }
   }
 
@@ -6759,6 +6809,8 @@ export {
   rankedEloDeltaForGame,
   rankedSeriesDeltaForOutcome,
   finalizeRankedSeriesElo,
+  streakCountsAfterOutcome,
+  matchWinStreakAfterOutcome,
   cleanupExpiredNotificationsForUser,
   markNotificationsSeenForUser,
   notificationsForUser,
