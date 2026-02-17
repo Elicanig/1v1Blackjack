@@ -643,53 +643,60 @@ test('39bd low Elo upset win is bigger but still clamped', () => {
   assert.equal(Math.abs(upset.finalDelta) <= 35, true);
 });
 
-test('39be series Elo win vs similar Elo lands in target range', () => {
-  const seriesWin = rankedSeriesDeltaForOutcome({
-    playerElo: 1400,
-    opponentElo: 1400,
+test('39be series Elo win uses randomized 32-39 range', () => {
+  for (let i = 0; i < 40; i += 1) {
+    const seriesWin = rankedSeriesDeltaForOutcome({
+      playerElo: 1400,
+      opponentElo: 1400,
+      won: true,
+      rankTierKey: 'GOLD'
+    });
+    assert.equal(seriesWin.finalDelta >= 32, true);
+    assert.equal(seriesWin.finalDelta <= 39, true);
+  }
+});
+
+test('39bf series Elo loss uses randomized -39 to -32 range', () => {
+  for (let i = 0; i < 40; i += 1) {
+    const seriesLoss = rankedSeriesDeltaForOutcome({
+      playerElo: 1500,
+      opponentElo: 1500,
+      won: false,
+      rankTierKey: 'GOLD'
+    });
+    assert.equal(seriesLoss.finalDelta <= -32, true);
+    assert.equal(seriesLoss.finalDelta >= -39, true);
+  }
+});
+
+test('39bfa fixed series Elo magnitude applies exact opposite signs', () => {
+  const win = rankedSeriesDeltaForOutcome({
+    playerElo: 1700,
+    opponentElo: 1600,
     won: true,
-    rankTierKey: 'GOLD'
+    rankTierKey: 'DIAMOND',
+    fixedMagnitude: 35
   });
-  assert.equal(seriesWin.finalDelta >= 22, true);
-  assert.equal(seriesWin.finalDelta <= 32, true);
+  const loss = rankedSeriesDeltaForOutcome({
+    playerElo: 1600,
+    opponentElo: 1700,
+    won: false,
+    rankTierKey: 'DIAMOND',
+    fixedMagnitude: 35
+  });
+  assert.equal(win.finalDelta, 35);
+  assert.equal(loss.finalDelta, -35);
 });
 
-test('39bf Bronze loss is softened versus Gold at same Elo', () => {
-  const bronzeLoss = rankedSeriesDeltaForOutcome({
-    playerElo: 1100,
-    opponentElo: 1100,
-    won: false,
-    rankTierKey: 'BRONZE'
-  });
-  const goldLoss = rankedSeriesDeltaForOutcome({
-    playerElo: 1500,
-    opponentElo: 1500,
-    won: false,
-    rankTierKey: 'GOLD'
-  });
-  assert.equal(Math.abs(bronzeLoss.finalDelta) < Math.abs(goldLoss.finalDelta), true);
-});
-
-test('39bfa series loss vs similar Elo is moderate', () => {
-  const goldLoss = rankedSeriesDeltaForOutcome({
-    playerElo: 1500,
-    opponentElo: 1500,
-    won: false,
-    rankTierKey: 'GOLD'
-  });
-  assert.equal(goldLoss.finalDelta <= -10, true);
-  assert.equal(goldLoss.finalDelta >= -18, true);
-});
-
-test('39bg high Elo expected series win stays bounded', () => {
+test('39bg series Elo stays within 32-39 regardless of elo gap', () => {
   const favoredWin = rankedSeriesDeltaForOutcome({
     playerElo: 1900,
     opponentElo: 1200,
     won: true,
     rankTierKey: 'LEGENDARY'
   });
-  assert.equal(favoredWin.finalDelta >= 1, true);
-  assert.equal(favoredWin.finalDelta <= 12, true);
+  assert.equal(favoredWin.finalDelta >= 32, true);
+  assert.equal(favoredWin.finalDelta <= 39, true);
 });
 
 test('39c double is allowed even if opponent may have to surrender pressure', () => {

@@ -7257,7 +7257,7 @@ function renderMatch() {
     )
     : null;
   const rankedLiveEloText = rankedMatch && Number.isFinite(Number(rankedLiveEloDelta))
-    ? `Elo: ${Number(rankedLiveEloDelta) >= 0 ? '+' : ''}${Math.floor(Number(rankedLiveEloDelta)).toLocaleString()}`
+    ? `Chips: ${Number(rankedLiveEloDelta) >= 0 ? '+' : ''}${Math.floor(Number(rankedLiveEloDelta)).toLocaleString()}`
     : '';
   const rankedLiveEloClass = Number(rankedLiveEloDelta) > 0
     ? 'is-pos'
@@ -7440,11 +7440,19 @@ function renderMatch() {
               </section>`
             : `<section class="match-main play-layout">
                 <div class="status-strip">
-                  <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
-                  <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
-                  <div class="strip-item"><span class="muted">Phase</span> <strong class="phase-strong">${phaseLabel}${modePill}${rankedSeriesHudText ? ` <span class="series-pill">${rankedSeriesHudText}</span>` : ''}${rankedLiveEloText ? ` <span class="series-elo-pill ${rankedLiveEloClass}">${rankedLiveEloText}</span>` : ''}</strong></div>
-                  <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ` ${streakFlameMarkup}` : ''}</strong></div>
-                  <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
+                  <div class="status-side status-side-left">
+                    <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
+                    <div class="strip-item"><span class="muted">Phase</span> <strong class="phase-strong">${phaseLabel}${modePill}</strong></div>
+                  </div>
+                  <div class="status-center-cluster">
+                    <span class="round-pill">Round ${match.roundNumber}</span>
+                    ${rankedSeriesHudText ? `<span class="series-pill">${rankedSeriesHudText}</span>` : ''}
+                    ${rankedLiveEloText ? `<span class="series-elo-pill ${rankedLiveEloClass}">${rankedLiveEloText}</span>` : ''}
+                  </div>
+                  <div class="status-side status-side-right">
+                    <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ` ${streakFlameMarkup}` : ''}</strong></div>
+                    <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
+                  </div>
                 </div>
                 <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">
                   ${renderEmoteBubble(oppId)}

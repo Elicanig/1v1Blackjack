@@ -51,6 +51,8 @@ const RANKED_SERIES_WIN_DELTA_MIN = 1;
 const RANKED_SERIES_WIN_DELTA_MAX = 34;
 const RANKED_SERIES_LOSS_DELTA_MIN = -18;
 const RANKED_SERIES_LOSS_DELTA_MAX = -8;
+const RANKED_SERIES_ELO_DELTA_MIN = 32;
+const RANKED_SERIES_ELO_DELTA_MAX = 39;
 const RANKED_MATCH_MAX_ELO_GAP = 220;
 const RANKED_QUEUE_TIMEOUT_MS = 60_000;
 const RANKED_SERIES_TARGET_GAMES = 9;
@@ -3171,7 +3173,8 @@ function rankedSeriesDeltaForOutcome({
   playerElo,
   opponentElo,
   won = false,
-  rankTierKey = ''
+  rankTierKey = '',
+  fixedMagnitude = null
 } = {}) {
   const startElo = normalizeRankedElo(playerElo);
   const oppElo = normalizeRankedElo(opponentElo);
@@ -3179,11 +3182,13 @@ function rankedSeriesDeltaForOutcome({
   const actual = won ? 1 : 0;
   const k = rankedSeriesKFactorForElo(startElo);
   const rawDelta = k * (actual - expected);
-  const clampedDelta = rankedClampSeriesDelta(rawDelta);
+  const parsedMagnitude = Math.floor(Number(fixedMagnitude));
+  const deltaMagnitude = Number.isFinite(parsedMagnitude)
+    ? Math.max(RANKED_SERIES_ELO_DELTA_MIN, Math.min(RANKED_SERIES_ELO_DELTA_MAX, parsedMagnitude))
+    : secureRandomInt(RANKED_SERIES_ELO_DELTA_MIN, RANKED_SERIES_ELO_DELTA_MAX + 1);
+  const clampedDelta = won ? deltaMagnitude : -deltaMagnitude;
   const lossSoftener = clampedDelta < 0 ? rankedLossSoftenerForTier(rankTierKey || rankedTierFromElo(startElo).key) : 1;
-  let finalDelta = Math.round(clampedDelta * lossSoftener);
-  if (won && finalDelta <= 0) finalDelta = 1;
-  if (!won && finalDelta >= 0) finalDelta = -1;
+  const finalDelta = clampedDelta;
   return {
     startElo,
     oppElo,
@@ -3192,6 +3197,7 @@ function rankedSeriesDeltaForOutcome({
     k,
     rawDelta,
     clampedDelta,
+    deltaMagnitude,
     lossSoftener,
     finalDelta
   };
@@ -3707,17 +3713,20 @@ function finalizeRankedSeriesElo(series, {
 
   const startElo1 = normalizeRankedElo(series.p1EloStart ?? user1.rankedElo);
   const startElo2 = normalizeRankedElo(series.p2EloStart ?? user2.rankedElo);
+  const seriesDeltaMagnitude = secureRandomInt(RANKED_SERIES_ELO_DELTA_MIN, RANKED_SERIES_ELO_DELTA_MAX + 1);
   const calc1 = rankedSeriesDeltaForOutcome({
     playerElo: startElo1,
     opponentElo: startElo2,
     won: winnerId === p1Id,
-    rankTierKey: series.p1RankAtStart || rankedTierFromElo(startElo1).key
+    rankTierKey: series.p1RankAtStart || rankedTierFromElo(startElo1).key,
+    fixedMagnitude: seriesDeltaMagnitude
   });
   const calc2 = rankedSeriesDeltaForOutcome({
     playerElo: startElo2,
     opponentElo: startElo1,
     won: winnerId === p2Id,
-    rankTierKey: series.p2RankAtStart || rankedTierFromElo(startElo2).key
+    rankTierKey: series.p2RankAtStart || rankedTierFromElo(startElo2).key,
+    fixedMagnitude: seriesDeltaMagnitude
   });
   const delta1 = calc1.finalDelta;
   const delta2 = calc2.finalDelta;
@@ -3746,6 +3755,7 @@ function finalizeRankedSeriesElo(series, {
     finalizedAt: now,
     p1Id,
     p2Id,
+    magnitude: seriesDeltaMagnitude,
     deltaP1: delta1,
     deltaP2: delta2,
     p1: {
