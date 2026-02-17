@@ -419,6 +419,11 @@ const storageInfo = storage.getInfo();
 const STORAGE_BACKEND = storageInfo.backend;
 const ACTIVE_DATA_DIR = storageInfo.dataDir;
 const DB_PATH = storageInfo.dbPath;
+let leaderboardCache = {
+  at: 0,
+  rows: [],
+  rankByUserId: new Map()
+};
 
 if (process.env.NODE_ENV !== 'test') {
   if (STORAGE_BACKEND === 'postgres') {
@@ -760,11 +765,6 @@ const rankedQueue = [];
 const rankedQueueByUser = new Map();
 const presenceByUser = new Map();
 let patchNotesCache = { at: 0, payload: null };
-let leaderboardCache = {
-  at: 0,
-  rows: [],
-  rankByUserId: new Map()
-};
 
 if (process.env.NODE_ENV !== 'test') {
   const notificationCleanupTimer = setInterval(() => {
