@@ -4156,6 +4156,7 @@ function recordChallengeEvent(user, event, amount = 1) {
 }
 
 function recordChallengeEventForMatch(match, user, event, amount = 1) {
+  // Real-chip bot and PvP matches both count; practice/no-delta matches do not.
   if (!isRealMatch(match)) return false;
   recordChallengeEvent(user, event, amount);
   return true;

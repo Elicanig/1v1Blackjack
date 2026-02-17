@@ -3909,6 +3909,10 @@ async function startBotMatch(options = {}) {
     state.currentLobby = null;
     state.currentMatch = data.match;
     goToView('match');
+    const realChipBot = !forcePractice && stakeType === 'REAL';
+    if (realChipBot) {
+      pushToast('Real-chip bot match — winnings/losses affect your bankroll.');
+    }
     setStatus(`${forcePractice || stakeType !== 'REAL' ? 'Practice' : 'Real-chip'} bot match started (${state.selectedBotDifficulty})${highRoller ? ' • High Roller' : ''}.`);
     render();
   } catch (e) {
@@ -4880,9 +4884,13 @@ function renderHome() {
                         <div class="muted practice-note">Practice mode: no chips won/lost, no ranked/streak/challenge impact.</div>
                         ${botLaunchShowBusy ? '<div class="muted practice-queue-note"><span class="btn-spinner" aria-hidden="true"></span>Finding bot table...</div>' : ''}
                         <div class="home-inline-actions">
-                          <button class="gold bot-play-btn" id="playRealBotBtn" ${botLaunchPending ? 'disabled' : ''}>${realBotLaunching && botLaunchShowBusy ? '<span class="btn-spinner" aria-hidden="true"></span>Finding bot table...' : 'Play Real Bot'}</button>
+                          <div class="real-bot-cta-wrap">
+                            <button class="gold bot-play-btn" id="playRealBotBtn" ${botLaunchPending ? 'disabled' : ''}>${realBotLaunching && botLaunchShowBusy ? '<span class="btn-spinner" aria-hidden="true"></span>Finding bot table...' : 'Play Real Bot'}</button>
+                            <div class="muted real-bot-chip-note">Real chips (win/lose)</div>
+                          </div>
                           <button class="ghost bot-play-btn" id="playPracticeBotBtn" ${botLaunchPending ? 'disabled' : ''}>${practiceBotLaunching && botLaunchShowBusy ? '<span class="btn-spinner" aria-hidden="true"></span>Finding bot table...' : 'Start Practice Bot'}</button>
                         </div>
+                        <div class="muted real-bot-helper">Real bot affects bankroll. Practice does not.</div>
                       </div>
                     </section>
                   </div>`
@@ -7105,7 +7113,8 @@ function renderMatch() {
   const turnTimerState = getTurnTimerState(match);
   const modePill = practiceMode
     ? '<span class="mode-pill mode-pill-practice">Practice</span>'
-    : (isBotOpponent ? '<span class="mode-pill mode-pill-real">Bot Match</span>' : '');
+    : (isBotOpponent ? '<span class="mode-pill mode-pill-real">Real Chips</span>' : '');
+  const streakFlameMarkup = '<span class="streak-flame" aria-hidden="true"><svg viewBox="0 0 24 24" class="streak-flame-svg" focusable="false"><path class="streak-flame-glow-path" d="M12 2.2c3.5 2.6 5.6 5.7 5.6 9 0 4-2.4 8.2-5.6 10.5C8.8 19.4 6.4 15.2 6.4 11.2c0-2.8 1.4-5.7 3.9-8.1.3 2.3 1.6 3.8 2.7 4.7.5-1.8 1.2-3.5-.9-5.6Z"/><path class="streak-flame-main-path" d="M12 3.6c2.4 2 3.9 4.3 3.9 6.9 0 3.2-1.9 6.6-3.9 8.4-2-1.8-3.9-5.2-3.9-8.4 0-2.2 1.1-4.4 3-6.4.4 1.7 1.4 2.8 2.2 3.5.3-1.2.6-2.4-1.3-4Z"/></svg></span>';
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -7239,7 +7248,7 @@ function renderMatch() {
                   <div class="strip-item"><span class="muted">Round</span> <strong>${match.roundNumber}</strong></div>
                   <div class="strip-item"><span class="muted">Turn</span> <strong class="${myTurn ? 'your-turn' : ''}">${myTurn ? 'You' : playerName(match.currentTurn)}</strong></div>
                   <div class="strip-item"><span class="muted">Phase</span> <strong class="phase-strong">${phaseLabel}${modePill}${rankedSeriesHudText ? ` <span class="series-pill">${rankedSeriesHudText}</span>` : ''}</strong></div>
-                  <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ' <span class="streak-flame" aria-hidden="true"><span class="streak-flame-core"></span><span class="streak-flame-glow"></span><span class="streak-flame-trail"></span><span class="streak-flame-spark"></span></span>' : ''}</strong></div>
+                  <div class="strip-item"><span class="muted">Streak</span> <strong>${myStreak}${showFlame ? ` ${streakFlameMarkup}` : ''}</strong></div>
                   <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                 </div>
                 <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">

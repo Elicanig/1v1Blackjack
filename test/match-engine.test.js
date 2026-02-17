@@ -1094,19 +1094,23 @@ test('41n easy bots never choose split/double while normal and medium can', () =
   }
 });
 
-test('42 practice matches do not advance challenge progress, real matches do', () => {
+test('42 practice matches do not advance challenge progress, real matches (including bot) do', () => {
   const user = { challengeSets: {}, skillChallenges: [] };
   refreshChallengesForUser(user, true);
   const item = user.challengeSets.hourly.items[0];
   const before = item.progress;
 
-  const blocked = recordChallengeEventForMatch({ mode: 'practice' }, user, item.event, 1);
+  const blocked = recordChallengeEventForMatch({ mode: 'practice', playerIds: ['u1', 'bot:normal:test'] }, user, item.event, 1);
   assert.equal(blocked, false);
   assert.equal(item.progress, before);
 
-  const recorded = recordChallengeEventForMatch({ mode: 'real' }, user, item.event, 1);
+  const recorded = recordChallengeEventForMatch({ mode: 'real', playerIds: ['u1', 'u2'] }, user, item.event, 1);
   assert.equal(recorded, true);
   assert.equal(item.progress, Math.min(item.goal, before + 1));
+
+  const botRecorded = recordChallengeEventForMatch({ mode: 'real', playerIds: ['u1', 'bot:normal:test'] }, user, item.event, 1);
+  assert.equal(botRecorded, true);
+  assert.equal(item.progress, Math.min(item.goal, before + 2));
 });
 
 test('43 challenge payload includes reset timestamps for countdown UI', () => {
