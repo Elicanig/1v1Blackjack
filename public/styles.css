@@ -68,6 +68,11 @@
   box-sizing: border-box;
 }
 
+/* Keep page width stable when overlays/modals appear so the UI never "jumps" horizontally. */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   margin: 0;
   color: var(--text);
@@ -243,31 +248,7 @@ body::after {
 .view-stack {
   display: grid;
   gap: var(--s-3);
-}
-
-#app:not([data-view='match']) .view-stack {
-  animation: viewFadeIn 260ms ease both;
-}
-
-@keyframes viewFadeIn {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 10px, 0);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
-  }
-}
-
-#app:not([data-view='match']) .view-stack > .card.section {
-  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
-}
-
-#app:not([data-view='match']) .view-stack > .card.section:hover {
-  transform: translateY(-1px);
-  border-color: rgba(205, 167, 100, 0.3);
-  box-shadow: var(--shadow-lg);
+  /* Avoid mount-like animation here: app re-renders this container on most interactions. */
 }
 
 .view-subtitle {
@@ -594,13 +575,13 @@ button {
 }
 
 button:hover {
-  transform: translateY(-1px) scale(1.01);
+  transform: none;
   border-color: rgba(255, 255, 255, 0.18);
   box-shadow: var(--shadow-sm);
 }
 
 button:active {
-  transform: translateY(1px) scale(0.99);
+  transform: translateY(1px);
   box-shadow: 0 4px 10px rgba(2, 11, 8, 0.2);
 }
 
@@ -787,18 +768,7 @@ select:focus-visible {
 
 .section {
   padding: clamp(18px, 2vw, 26px);
-  animation: panelRise 320ms ease both;
-}
-
-@keyframes panelRise {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 8px, 0) scale(0.992);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
+  /* Keep section metrics static to prevent click-triggered flash/shift during full view re-renders. */
 }
 
 .kpis {
@@ -831,7 +801,7 @@ select:focus-visible {
 
 .kpi:hover,
 .kpi:focus-within {
-  transform: translateY(-2px);
+  transform: none;
   border-color: rgba(205, 167, 100, 0.36);
   box-shadow: var(--shadow-sm);
 }
@@ -1123,7 +1093,7 @@ select:focus-visible {
 
 .pvp-cta-primary:hover,
 .pvp-cta-primary:focus-visible {
-  transform: translateY(-2px);
+  transform: none;
   box-shadow: 0 16px 30px rgba(2, 7, 5, 0.34), 0 0 0 1px rgba(255, 235, 181, 0.36) inset, 0 0 22px rgba(224, 189, 123, 0.24);
 }
 
@@ -1455,7 +1425,6 @@ select:focus-visible {
   padding: 6px 8px;
   border: 1px solid rgba(236, 241, 233, 0.08);
   background: rgba(13, 25, 21, 0.68);
-  animation: listItemFade 220ms ease both;
 }
 
 .leaderboard-row-skeleton {
@@ -1476,11 +1445,6 @@ select:focus-visible {
 @keyframes skeletonShimmer {
   from { background-position: 0 0; }
   to { background-position: -200% 0; }
-}
-
-@keyframes listItemFade {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 
 .leaderboard-row.is-me {
@@ -1821,11 +1785,10 @@ select:focus-visible {
   border-radius: 12px;
   background: rgba(12, 24, 20, 0.6);
   padding: 10px 12px;
-  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .rules-grid article:hover {
-  transform: translateY(-1px);
   border-color: rgba(205, 167, 100, 0.3);
   box-shadow: 0 10px 18px rgba(1, 8, 6, 0.22);
 }
@@ -1860,13 +1823,12 @@ select:focus-visible {
     linear-gradient(180deg, rgba(14, 28, 23, 0.72), rgba(10, 21, 18, 0.7));
   border: 1px solid rgba(241, 246, 237, 0.12);
   box-shadow: 0 8px 16px rgba(1, 8, 6, 0.18);
-  transition: transform 170ms ease, border-color 170ms ease, box-shadow 170ms ease;
+  transition: border-color 170ms ease, box-shadow 170ms ease;
 }
 
 .friend:hover,
 .challenge:hover,
 .lobby:hover {
-  transform: translateY(-1px);
   border-color: rgba(205, 167, 100, 0.36);
   box-shadow: 0 12px 24px rgba(1, 8, 6, 0.26);
 }
