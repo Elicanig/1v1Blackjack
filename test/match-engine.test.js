@@ -565,9 +565,17 @@ test('39 bot difficulty bet ranges are clamped server-side', () => {
 
 test('39b ranked tiers map elo to expected ranges', () => {
   assert.equal(rankedTierFromElo(1000).label, 'Bronze');
+  assert.equal(rankedTierFromElo(1149).label, 'Bronze');
+  assert.equal(rankedTierFromElo(1150).label, 'Silver');
   assert.equal(rankedTierFromElo(1250).label, 'Silver');
+  assert.equal(rankedTierFromElo(1349).label, 'Silver');
+  assert.equal(rankedTierFromElo(1350).label, 'Gold');
+  assert.equal(rankedTierFromElo(1549).label, 'Gold');
+  assert.equal(rankedTierFromElo(1550).label, 'Diamond');
   assert.equal(rankedTierFromElo(1700).label, 'Diamond');
-  assert.deepEqual(rankedBetRangeForElo(1850), { min: 1000, max: 1000 });
+  assert.equal(rankedTierFromElo(1799).label, 'Diamond');
+  assert.equal(rankedTierFromElo(1800).label, 'Legendary');
+  assert.deepEqual(rankedBetRangeForElo(1800), { min: 1000, max: 1000 });
 });
 
 test('39ba ranked K-factor decreases at higher Elo', () => {

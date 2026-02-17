@@ -60,11 +60,11 @@ const RANKED_SERIES_STATUS = Object.freeze({
   FORFEITED: 'FORFEITED'
 });
 const RANKED_TIERS = Object.freeze([
-  { key: 'BRONZE', label: 'Bronze', min: 0, max: 1199, bets: { min: 50, max: 50 } },
-  { key: 'SILVER', label: 'Silver', min: 1200, max: 1399, bets: { min: 100, max: 100 } },
-  { key: 'GOLD', label: 'Gold', min: 1400, max: 1599, bets: { min: 250, max: 250 } },
-  { key: 'DIAMOND', label: 'Diamond', min: 1600, max: 1849, bets: { min: 500, max: 500 } },
-  { key: 'LEGENDARY', label: 'Legendary', min: 1850, max: Number.POSITIVE_INFINITY, bets: { min: 1000, max: 1000 } }
+  { key: 'BRONZE', label: 'Bronze', min: 0, max: 1149, bets: { min: 50, max: 50 } },
+  { key: 'SILVER', label: 'Silver', min: 1150, max: 1349, bets: { min: 100, max: 100 } },
+  { key: 'GOLD', label: 'Gold', min: 1350, max: 1549, bets: { min: 250, max: 250 } },
+  { key: 'DIAMOND', label: 'Diamond', min: 1550, max: 1799, bets: { min: 500, max: 500 } },
+  { key: 'LEGENDARY', label: 'Legendary', min: 1800, max: Number.POSITIVE_INFINITY, bets: { min: 1000, max: 1000 } }
 ]);
 const DAILY_REWARD = 100;
 const FREE_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -96,6 +96,10 @@ const HIGH_ROLLER_MIN_BET = 2500;
 const MAX_BET_HARD_CAP = 10_000_000;
 const SPLIT_TENS_EVENT_ID = 'split_tens_24h';
 const SPLIT_TENS_EVENT_DURATION_MS = 24 * 60 * 60 * 1000;
+const SPLIT_TENS_EVENT_ENABLED = parseEnvBoolean(
+  process.env.SPLIT_TENS_EVENT_ENABLED || (process.env.SPLIT_TENS_EVENT_STARTS_AT ? '1' : '')
+);
+const SPLIT_TENS_EVENT_FALLBACK_STARTS_AT_MS = Date.now();
 const SPLIT_TENS_EVENT_STARTS_AT_MS = parseIsoTimestampMs(process.env.SPLIT_TENS_EVENT_STARTS_AT || '');
 const XP_REWARDS = Object.freeze({
   pvpWin: 40,
@@ -1322,9 +1326,21 @@ function parseIsoTimestampMs(rawValue) {
   return parsed;
 }
 
+function parseEnvBoolean(rawValue) {
+  const value = String(rawValue || '').trim().toLowerCase();
+  if (!value) return false;
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+}
+
 function splitTensEventWindow() {
-  if (!Number.isFinite(SPLIT_TENS_EVENT_STARTS_AT_MS)) return null;
-  const startsMs = SPLIT_TENS_EVENT_STARTS_AT_MS;
+  if (!SPLIT_TENS_EVENT_ENABLED && !Number.isFinite(SPLIT_TENS_EVENT_STARTS_AT_MS)) return null;
+  const nowMs = Date.now();
+  const configuredStartMs = Number.isFinite(SPLIT_TENS_EVENT_STARTS_AT_MS)
+    ? SPLIT_TENS_EVENT_STARTS_AT_MS
+    : SPLIT_TENS_EVENT_FALLBACK_STARTS_AT_MS;
+  const startsMs = SPLIT_TENS_EVENT_ENABLED
+    ? Math.min(configuredStartMs, nowMs)
+    : configuredStartMs;
   const endsMs = startsMs + SPLIT_TENS_EVENT_DURATION_MS;
   return {
     startsMs,

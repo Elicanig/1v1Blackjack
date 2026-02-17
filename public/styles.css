@@ -440,6 +440,20 @@ body::after {
     0 0 0 1px rgba(122, 86, 35, 0.42);
 }
 
+.nav-live-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(94, 212, 165, 0.34);
+  background: rgba(32, 88, 70, 0.42);
+  color: #a7f1d2;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  line-height: 1;
+}
+
 .notif-wrap {
   position: relative;
 }
@@ -888,6 +902,12 @@ select:focus-visible {
   opacity: 0.94;
 }
 
+.kpi-icon-67 {
+  min-width: 24px;
+  font-size: 0.74rem;
+  letter-spacing: 0.02em;
+}
+
 .free-claim-card {
   margin-top: var(--s-3);
   border-radius: var(--r-sm);
@@ -944,6 +964,56 @@ select:focus-visible {
   font-weight: 700;
   line-height: 1;
   padding: 5px 10px;
+}
+
+.home-active-events-card {
+  border-radius: 14px;
+  border: 1px solid rgba(205, 167, 100, 0.38);
+  background:
+    radial-gradient(220px 130px at 92% 0%, rgba(240, 204, 130, 0.2), transparent 64%),
+    linear-gradient(180deg, rgba(31, 25, 13, 0.68), rgba(11, 24, 20, 0.8));
+  display: grid;
+  gap: 10px;
+}
+
+.home-active-events-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.home-active-events-live {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(94, 212, 165, 0.4);
+  background: rgba(32, 88, 70, 0.45);
+  color: #b0f6d9;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 4px 8px;
+  line-height: 1;
+}
+
+.home-active-events-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.home-active-events-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.home-active-events-meta {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+  min-width: 180px;
 }
 
 .home-play-col,
@@ -2847,13 +2917,25 @@ select:focus-visible {
 .playing-card {
   width: var(--card-w, clamp(52px, 5.2vw, 74px));
   aspect-ratio: 5 / 7;
-  border-radius: 14px;
-  border: 1px solid rgba(8, 17, 13, 0.55);
-  box-shadow: 0 14px 26px rgba(2, 7, 5, 0.42), 0 2px 0 rgba(255, 255, 255, 0.08) inset;
+  border-radius: 13px;
+  border: 1px solid rgba(10, 16, 14, 0.56);
+  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.4), 0 2px 0 rgba(255, 255, 255, 0.08) inset;
   position: relative;
   flex: 0 0 auto;
   overflow: hidden;
   transform-origin: center bottom;
+  contain: layout paint style;
+}
+
+.playing-card::before {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+  opacity: 0.72;
+  z-index: 0;
 }
 
 .cards .playing-card + .playing-card {
@@ -2880,11 +2962,11 @@ select:focus-visible {
 }
 
 .playing-card.face {
-  background: linear-gradient(180deg, #fafaf7 0%, #f1f1ec 100%);
+  background: linear-gradient(180deg, #fcfcfa 0%, #f3f2ed 100%);
 }
 
 .playing-card.face.deck-skin-classic {
-  background: linear-gradient(180deg, #fbfbf9 0%, #f1f1ec 100%);
+  background: linear-gradient(180deg, #fdfdfb 0%, #f2f1eb 100%);
 }
 
 .playing-card.hidden.deck-skin-classic {
@@ -2894,8 +2976,8 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-gold {
-  background: linear-gradient(180deg, #fff7e9 0%, #f7ecd7 100%);
-  box-shadow: 0 14px 26px rgba(2, 7, 5, 0.42), 0 2px 0 rgba(255, 238, 201, 0.42) inset;
+  background: linear-gradient(180deg, #fff9ee 0%, #f7ebd1 100%);
+  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.4), 0 2px 0 rgba(255, 241, 206, 0.46) inset;
 }
 
 .playing-card.hidden.deck-skin-gold {
@@ -2906,8 +2988,8 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-neon {
-  background: linear-gradient(180deg, #ebfff9 0%, #ddf8ff 100%);
-  box-shadow: 0 14px 26px rgba(2, 7, 5, 0.42), 0 0 0 1px rgba(112, 226, 210, 0.34) inset;
+  background: linear-gradient(180deg, #f2fffb 0%, #e1faff 100%);
+  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.4), 0 0 0 1px rgba(112, 226, 210, 0.34) inset;
 }
 
 .playing-card.hidden.deck-skin-neon {
@@ -2918,8 +3000,8 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-obsidian {
-  background: linear-gradient(180deg, #27313a 0%, #1a222a 100%);
-  border-color: rgba(168, 183, 199, 0.38);
+  background: linear-gradient(180deg, #2a343f 0%, #171f27 100%);
+  border-color: rgba(168, 183, 199, 0.42);
   color: #f2f5f8;
 }
 
@@ -2939,8 +3021,8 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-aurora {
-  background: linear-gradient(180deg, #f7f3ff 0%, #e8f6ff 100%);
-  box-shadow: 0 14px 26px rgba(2, 7, 5, 0.42), 0 0 0 1px rgba(188, 162, 249, 0.32) inset;
+  background: linear-gradient(180deg, #f8f4ff 0%, #e8f5ff 100%);
+  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.4), 0 0 0 1px rgba(188, 162, 249, 0.34) inset;
 }
 
 .playing-card.hidden.deck-skin-aurora {
@@ -2951,10 +3033,10 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-obsidian-luxe-ii {
-  background: linear-gradient(180deg, #262326 0%, #141216 100%);
+  background: linear-gradient(180deg, #2b2628 0%, #131115 100%);
   border-color: rgba(210, 170, 108, 0.46);
   color: #f6edd8;
-  box-shadow: 0 14px 26px rgba(2, 7, 5, 0.45), 0 0 0 1px rgba(210, 170, 108, 0.22) inset;
+  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.42), 0 0 0 1px rgba(210, 170, 108, 0.24) inset;
 }
 
 .playing-card.face.deck-skin-obsidian-luxe-ii.red {
@@ -2969,8 +3051,8 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-aurora-royale-ii {
-  background: linear-gradient(180deg, #f6f3ff 0%, #e6fcff 100%);
-  box-shadow: 0 14px 26px rgba(2, 7, 5, 0.42), 0 0 0 1px rgba(147, 201, 255, 0.38) inset;
+  background: linear-gradient(180deg, #f7f4ff 0%, #e6fbff 100%);
+  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.4), 0 0 0 1px rgba(147, 201, 255, 0.38) inset;
 }
 
 .playing-card.hidden.deck-skin-aurora-royale-ii {
@@ -2981,10 +3063,10 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-void-prism {
-  background: linear-gradient(180deg, #263548 0%, #191f35 100%);
+  background: linear-gradient(180deg, #27384d 0%, #171f34 100%);
   border-color: rgba(153, 190, 250, 0.45);
   color: #edf3ff;
-  box-shadow: 0 14px 26px rgba(2, 7, 5, 0.45), 0 0 0 1px rgba(153, 190, 250, 0.22) inset;
+  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.42), 0 0 0 1px rgba(153, 190, 250, 0.24) inset;
 }
 
 .playing-card.face.deck-skin-void-prism.red {
@@ -2999,9 +3081,9 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-celestial-ivory {
-  background: linear-gradient(180deg, #fffbf1 0%, #f0e9dc 100%);
+  background: linear-gradient(180deg, #fffbf2 0%, #f1e9db 100%);
   border-color: rgba(226, 190, 121, 0.52);
-  box-shadow: 0 14px 26px rgba(2, 7, 5, 0.42), 0 0 0 1px rgba(226, 190, 121, 0.24) inset;
+  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.4), 0 0 0 1px rgba(226, 190, 121, 0.26) inset;
 }
 
 .playing-card.hidden.deck-skin-celestial-ivory {
@@ -3012,11 +3094,11 @@ select:focus-visible {
 }
 
 .playing-card.red {
-  color: #be3348;
+  color: #b92a41;
 }
 
 .playing-card.black {
-  color: #17211d;
+  color: #121a18;
 }
 
 .playing-card .corner {
@@ -3025,26 +3107,27 @@ select:focus-visible {
   flex-direction: column;
   align-items: center;
   line-height: 1;
-  gap: 2px;
+  gap: 1px;
   font-family: var(--font-card);
   font-weight: 700;
-  font-size: clamp(0.7rem, 1.7vw, 0.9rem);
+  font-size: clamp(0.66rem, 1.6vw, 0.86rem);
+  z-index: 2;
 }
 
 .playing-card .corner.top {
-  top: 7px;
-  left: 8px;
+  top: 6px;
+  left: 7px;
 }
 
 .playing-card .corner.bottom {
-  right: 8px;
-  bottom: 7px;
+  right: 7px;
+  bottom: 6px;
   transform: rotate(180deg);
 }
 
 .playing-card .rank {
   font-family: var(--font-card);
-  font-size: clamp(0.75rem, 1.8vw, 1rem);
+  font-size: clamp(0.72rem, 1.72vw, 0.96rem);
   letter-spacing: 0.01em;
 }
 
@@ -3060,12 +3143,12 @@ select:focus-visible {
 }
 
 .suit-icon.corner-suit {
-  --suit-size: 13px;
+  --suit-size: 12px;
 }
 
 .suit-icon.center-suit-icon {
-  --suit-size: clamp(28px, 4.4vw, 42px);
-  opacity: 0.82;
+  --suit-size: clamp(28px, 4.2vw, 40px);
+  opacity: 0.8;
 }
 
 .playing-card .center-suit {
@@ -3079,8 +3162,9 @@ select:focus-visible {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(136deg, rgba(255, 255, 255, 0.56), transparent 42%, rgba(255, 255, 255, 0.12));
+  background: linear-gradient(132deg, rgba(255, 255, 255, 0.45), transparent 43%, rgba(255, 255, 255, 0.08));
   mix-blend-mode: screen;
+  z-index: 1;
 }
 
 .playing-card.hidden {
@@ -3094,10 +3178,10 @@ select:focus-visible {
   position: absolute;
   inset: 6px;
   border-radius: 10px;
-  border: 1px solid rgba(224, 189, 123, 0.35);
+  border: 1px solid rgba(224, 189, 123, 0.4);
   background:
-    repeating-linear-gradient(135deg, rgba(224, 189, 123, 0.12) 0 4px, rgba(255, 255, 255, 0.02) 4px 8px),
-    radial-gradient(circle at 50% 50%, rgba(24, 56, 47, 0.8), rgba(14, 36, 29, 0.85));
+    repeating-linear-gradient(135deg, rgba(224, 189, 123, 0.12) 0 3px, rgba(255, 255, 255, 0.02) 3px 7px),
+    radial-gradient(circle at 50% 50%, rgba(24, 56, 47, 0.82), rgba(14, 36, 29, 0.88));
   display: grid;
   place-items: center;
 }
@@ -4210,46 +4294,30 @@ select:focus-visible {
 }
 
 .profile-deck-skin-cards {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: flex-start;
-  gap: 12px;
-  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: center;
+  justify-items: center;
+  gap: 14px;
+  padding: 14px;
   border-radius: 10px;
   border: 1px solid rgba(205, 167, 100, 0.18);
   background:
-    radial-gradient(180px 90px at 20% 18%, rgba(255, 255, 255, 0.08), transparent 70%),
-    radial-gradient(220px 140px at 86% 0%, rgba(205, 167, 100, 0.14), transparent 72%),
-    linear-gradient(180deg, rgba(7, 26, 21, 0.76), rgba(6, 18, 15, 0.74));
+    radial-gradient(220px 110px at 18% 15%, rgba(255, 255, 255, 0.09), transparent 72%),
+    radial-gradient(260px 160px at 88% 0%, rgba(205, 167, 100, 0.16), transparent 74%),
+    linear-gradient(180deg, rgba(7, 24, 20, 0.8), rgba(6, 18, 15, 0.78));
+  overflow: hidden;
 }
 
-.profile-sample-card {
-  border-radius: 10px;
-  width: clamp(84px, 25%, 110px);
-  aspect-ratio: 5 / 7;
-  border: 1px solid rgba(8, 17, 13, 0.48);
-  box-shadow: 0 10px 18px rgba(2, 7, 5, 0.32), 0 1px 0 rgba(255, 255, 255, 0.12) inset;
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  font-family: var(--font-card);
-  font-size: 1.22rem;
+.profile-deck-skin-cards .playing-card {
+  --card-w: clamp(84px, 14vw, 122px);
+  width: min(122px, 100%);
+  max-width: 122px;
+  margin: 0;
 }
 
-.profile-sample-card-corner {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  font-size: 0.8rem;
-  font-weight: 700;
-}
-
-.profile-sample-card-center {
-  font-size: 1.3rem;
-  font-weight: 700;
+.profile-deck-skin-cards .profile-preview-card-sample {
+  box-shadow: 0 16px 30px rgba(2, 7, 5, 0.42), 0 1px 0 rgba(255, 255, 255, 0.12) inset;
 }
 
 .profile-deck-skin-library {
@@ -4326,52 +4394,6 @@ select:focus-visible {
 
 .profile-deck-skin-preview.deck-skin-celestial-ivory {
   background: linear-gradient(130deg, rgba(63, 58, 47, 0.84), rgba(38, 45, 53, 0.82), rgba(53, 40, 27, 0.84));
-}
-
-.profile-deck-skin-preview .profile-sample-card {
-  background: linear-gradient(180deg, #fbfbf9 0%, #f1f1ec 100%);
-  color: #17211d;
-}
-
-.profile-deck-skin-preview .profile-sample-card.red {
-  color: #be3348;
-}
-
-.profile-deck-skin-preview .profile-sample-card.black {
-  color: #17211d;
-}
-
-.profile-deck-skin-preview.deck-skin-gold .profile-sample-card {
-  background: linear-gradient(180deg, #fff7e9 0%, #f7ecd7 100%);
-}
-
-.profile-deck-skin-preview.deck-skin-neon .profile-sample-card {
-  background: linear-gradient(180deg, #ebfff9 0%, #ddf8ff 100%);
-  box-shadow: 0 10px 18px rgba(2, 7, 5, 0.32), 0 0 0 1px rgba(112, 226, 210, 0.34) inset;
-}
-
-.profile-deck-skin-preview.deck-skin-obsidian .profile-sample-card,
-.profile-deck-skin-preview.deck-skin-obsidian-luxe-ii .profile-sample-card,
-.profile-deck-skin-preview.deck-skin-void-prism .profile-sample-card {
-  background: linear-gradient(180deg, #27313a 0%, #1a222a 100%);
-  color: #f2f5f8;
-  border-color: rgba(176, 195, 221, 0.4);
-}
-
-.profile-deck-skin-preview.deck-skin-obsidian .profile-sample-card.red,
-.profile-deck-skin-preview.deck-skin-obsidian-luxe-ii .profile-sample-card.red,
-.profile-deck-skin-preview.deck-skin-void-prism .profile-sample-card.red {
-  color: #ff9ea8;
-}
-
-.profile-deck-skin-preview.deck-skin-aurora .profile-sample-card,
-.profile-deck-skin-preview.deck-skin-aurora-royale-ii .profile-sample-card {
-  background: linear-gradient(180deg, #f7f3ff 0%, #e8f6ff 100%);
-}
-
-.profile-deck-skin-preview.deck-skin-celestial-ivory .profile-sample-card {
-  background: linear-gradient(180deg, #fffaf0 0%, #f3eee2 100%);
-  border-color: rgba(228, 199, 144, 0.45);
 }
 
 .profile-preview-row {
@@ -5281,13 +5303,15 @@ select:focus-visible {
   }
 
   .split-tens-event-banner,
-  .active-events-row {
+  .active-events-row,
+  .home-active-events-row {
     flex-direction: column;
     align-items: flex-start;
   }
 
   .split-tens-event-meta,
-  .active-events-actions {
+  .active-events-actions,
+  .home-active-events-meta {
     display: flex;
     align-items: center;
     width: 100%;
@@ -5489,11 +5513,15 @@ select:focus-visible {
   }
 
   .profile-deck-skin-cards {
-    justify-content: center;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    justify-items: center;
+    padding: 12px;
+    gap: 10px;
   }
 
-  .profile-sample-card {
-    width: clamp(82px, 29vw, 102px);
+  .profile-deck-skin-cards .playing-card {
+    --card-w: clamp(76px, 26vw, 104px);
+    max-width: 104px;
   }
 
   .title-current-card {

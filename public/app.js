@@ -40,10 +40,10 @@ const SPLIT_TENS_EVENT_ID = 'split_tens_24h';
 const LEADERBOARD_LIMIT = 25;
 const RANKED_TIER_META = Object.freeze({
   BRONZE: { label: 'Bronze', icon: '◈', minElo: 0, fixedBet: 50 },
-  SILVER: { label: 'Silver', icon: '✦', minElo: 1200, fixedBet: 100 },
-  GOLD: { label: 'Gold', icon: '⬢', minElo: 1400, fixedBet: 250 },
-  DIAMOND: { label: 'Diamond', icon: '◆', minElo: 1600, fixedBet: 500 },
-  LEGENDARY: { label: 'Legendary', icon: '♛', minElo: 1850, fixedBet: 1000 }
+  SILVER: { label: 'Silver', icon: '✦', minElo: 1150, fixedBet: 100 },
+  GOLD: { label: 'Gold', icon: '⬢', minElo: 1350, fixedBet: 250 },
+  DIAMOND: { label: 'Diamond', icon: '◆', minElo: 1550, fixedBet: 500 },
+  LEGENDARY: { label: 'Legendary', icon: '♛', minElo: 1800, fixedBet: 1000 }
 });
 const RANKED_TIER_ORDER = ['LEGENDARY', 'DIAMOND', 'GOLD', 'SILVER', 'BRONZE'];
 const TITLE_DEFS = Object.freeze([
@@ -1006,7 +1006,6 @@ function syncEventCountdownUI() {
   const splitTens = splitTensEventState();
   const labels = [
     document.getElementById('splitTensCountdownHome'),
-    document.getElementById('splitTensCountdownRules'),
     document.getElementById('splitTensCountdownModal')
   ].filter(Boolean);
   if (!labels.length) return;
@@ -1156,7 +1155,7 @@ function rankKeyMeta(rankKeyOrLabel = '') {
 
 function eloTrackPercent(eloRaw) {
   const elo = Math.max(0, Math.floor(Number(eloRaw) || 0));
-  const topMin = Math.floor(Number(RANKED_TIER_META.LEGENDARY?.minElo) || 1850);
+  const topMin = Math.floor(Number(RANKED_TIER_META.LEGENDARY?.minElo) || 1800);
   const scaleMax = topMin + 300;
   const progress = scaleMax > 0 ? elo / scaleMax : 0;
   return Math.max(0, Math.min(1, progress));
@@ -4460,6 +4459,8 @@ function renderTopbar(title = 'Blackjack Battle') {
   const challengeBadge = claimableCount > 0
     ? `<span class="nav-pill-badge" aria-label="${claimableCount} claimable challenges">${claimableCount > 9 ? '9+' : claimableCount}</span>`
     : '';
+  const splitTensLive = splitTensEventState().active;
+  const eventLiveBadge = splitTensLive ? '<span class="nav-live-badge">Event Live</span>' : '';
   return `
     <div class="card topbar">
       <div class="topbar-left">
@@ -4475,7 +4476,7 @@ function renderTopbar(title = 'Blackjack Battle') {
         <button data-go="challenges" class="nav-pill nav-pill-challenges ${state.view === 'challenges' ? 'nav-active' : ''}">
           <span>Challenges</span>${challengeBadge}
         </button>
-        <button data-go="rules" class="nav-pill ${state.view === 'rules' ? 'nav-active' : ''}">Rules</button>
+        <button data-go="rules" class="nav-pill ${state.view === 'rules' ? 'nav-active' : ''}"><span>Rules</span>${eventLiveBadge}</button>
       </div>
       <div class="topbar-right nav">
         ${renderNotificationBell()}
@@ -4622,20 +4623,6 @@ function renderHome() {
     ${renderTopbar('Blackjack Battle')}
     <main class="view-stack dashboard">
       <p class="muted view-subtitle">${me.username}</p>
-      ${
-        splitTensEvent.active
-          ? `<section class="card section split-tens-event-banner">
-              <div class="split-tens-event-copy">
-                <strong>LIMITED EVENT: Split Tens</strong>
-                <div class="muted">10/10 can be split for 24 hours.</div>
-              </div>
-              <div class="split-tens-event-meta">
-                <div class="split-tens-event-countdown" id="splitTensCountdownHome">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</div>
-                <button class="ghost" id="openSplitTensDetailsBtn" type="button">Details</button>
-              </div>
-            </section>`
-          : ''
-      }
       <div class="dashboard-grid home-grid">
         <section class="col card section reveal-panel glow-follow glow-follow--panel play-panel home-play-col">
           <h2>Play</h2>
@@ -4801,7 +4788,7 @@ function renderHome() {
             <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">▼</span>Hands Lost</div><strong>${handsLost}</strong></div>
             <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">⟷</span>Hands Pushed</div><strong>${handsPushed}</strong></div>
             <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">♠</span>Blackjacks Dealt</div><strong>${me.stats.blackjacks || 0}</strong></div>
-            <div class="kpi"><div class="muted"><span class="kpi-icon" aria-hidden="true">7</span>6-7&apos;s Dealt</div><strong>${sixSevenDealt}</strong></div>
+            <div class="kpi"><div class="muted"><span class="kpi-icon kpi-icon-67" aria-hidden="true">6-7</span>6-7&apos;s Dealt</div><strong>${sixSevenDealt}</strong></div>
           </div>
           <div class="free-claim-card">
             <div>
@@ -4874,6 +4861,27 @@ function renderHome() {
           <button id="openRulesBtn" class="ghost">Rules</button>
         </section>
       </div>
+      ${
+        splitTensEvent.active
+          ? `<section class="card section home-active-events-card">
+              <div class="home-active-events-head">
+                <h3>Active Events</h3>
+                <span class="home-active-events-live">Live</span>
+              </div>
+              <div class="home-active-events-row">
+                <div class="home-active-events-copy">
+                  <strong>${splitTensEvent.event?.title || 'Split Tens Event'}</strong>
+                  <div class="muted">${splitTensEvent.event?.description || 'For the next 24 hours, splitting 10s is allowed.'}</div>
+                  <div class="muted">Rule change: Splitting 10s enabled (10/10 pair).</div>
+                </div>
+                <div class="home-active-events-meta">
+                  <div class="split-tens-event-countdown" id="splitTensCountdownHome">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</div>
+                  <button class="ghost" id="openSplitTensDetailsBtn" type="button">Details</button>
+                </div>
+              </div>
+            </section>`
+          : ''
+      }
     </main>
     ${
       state.statsMoreOpen
@@ -5354,10 +5362,8 @@ function renderProfile() {
             <span class="muted" id="profileDeckSkinPreviewStatus">${selectedDeckSkin.unlocked ? 'Owned' : (selectedDeckSkin.unlockHint || `Unlocks Lv ${selectedDeckSkin.minLevelRequired}`)}</span>
           </div>
           <span class="muted" id="profileDeckSkinPreviewDesc">${selectedDeckSkin.description}</span>
-          <div class="profile-deck-skin-cards" aria-hidden="true">
-            <article class="profile-sample-card black"><span class="profile-sample-card-corner">A♠</span><span class="profile-sample-card-center">♠</span></article>
-            <article class="profile-sample-card red"><span class="profile-sample-card-corner">10♦</span><span class="profile-sample-card-center">♦</span></article>
-            <article class="profile-sample-card red"><span class="profile-sample-card-corner">K♥</span><span class="profile-sample-card-center">♥</span></article>
+          <div class="profile-deck-skin-cards" id="profileDeckSkinPreviewCards" aria-hidden="true">
+            ${renderDeckSkinPreviewCards(selectedDeckSkin.token)}
           </div>
         </div>
       </div>
@@ -5617,6 +5623,7 @@ function renderProfile() {
   const deckSkinPreviewName = document.getElementById('profileDeckSkinPreviewName');
   const deckSkinPreviewDesc = document.getElementById('profileDeckSkinPreviewDesc');
   const deckSkinPreviewStatus = document.getElementById('profileDeckSkinPreviewStatus');
+  const deckSkinPreviewCards = document.getElementById('profileDeckSkinPreviewCards');
   const paintDeckSkinPreview = (skinId) => {
     if (!deckSkinPreviewPanel) return;
     const normalized = normalizeDeckSkinId(skinId);
@@ -5627,6 +5634,7 @@ function renderProfile() {
     if (deckSkinPreviewName) deckSkinPreviewName.textContent = source.dataset.deckSkinName || 'Deck Skin';
     if (deckSkinPreviewDesc) deckSkinPreviewDesc.textContent = source.dataset.deckSkinDescription || '';
     if (deckSkinPreviewStatus) deckSkinPreviewStatus.textContent = source.dataset.deckSkinStatus || '';
+    if (deckSkinPreviewCards) deckSkinPreviewCards.innerHTML = renderDeckSkinPreviewCards(token);
   };
   const syncDeckSkinSelectionState = () => {
     const selectedId = normalizeDeckSkinId(deckSkinSelect?.value || selectedDeckSkin.id || 'CLASSIC');
@@ -6576,7 +6584,6 @@ function renderNotifications() {
 }
 
 function renderRules() {
-  const splitTensEvent = splitTensEventState();
   app.innerHTML = `
     ${renderTopbar('Rules')}
     <main class="view-stack">
@@ -6584,24 +6591,6 @@ function renderRules() {
         <h2>Rules & Fairness</h2>
         <p class="muted">Complete gameplay, ranked, and reward rules in one place.</p>
         <div class="muted">Version: ${state.appVersion || 'dev'}</div>
-      </section>
-
-      <section class="card section rules-section-card">
-        <h3>Active Events</h3>
-        ${
-          splitTensEvent.active
-            ? `<div class="active-events-row">
-                <div>
-                  <strong>Split Tens Event: ON</strong>
-                  <div class="muted">Rule change: 10/10 can be split.</div>
-                </div>
-                <div class="active-events-actions">
-                  <span class="active-events-countdown" id="splitTensCountdownRules">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</span>
-                  <button class="ghost" id="openSplitTensDetailsRulesBtn" type="button">View Details</button>
-                </div>
-              </div>`
-            : '<div class="muted">No active limited-time events.</div>'
-        }
       </section>
 
       <section class="card section rules-section-card">
@@ -6629,7 +6618,7 @@ function renderRules() {
               <li>Hit, stand, double, split, and surrender are available when legal.</li>
               <li>Surrender forfeits 75% of that hand bet.</li>
               <li>Split and double outcomes are tracked as separate hand results.</li>
-              <li>Splitting 10/10 is enabled only during active limited-time events.</li>
+              <li>Splitting 10/10 is enabled only during active limited-time events (shown on Home).</li>
             </ul>
           </article>
           <article>
@@ -6682,52 +6671,8 @@ function renderRules() {
         </div>
       </section>
     </main>
-    ${
-      state.eventDetailsModalId === SPLIT_TENS_EVENT_ID && splitTensEvent.active
-        ? `<div class="modal" id="splitTensEventModal">
-            <div class="modal-panel card split-tens-event-modal" role="dialog" aria-modal="true" aria-label="Split tens event details">
-              <div class="split-tens-event-modal-head">
-                <h3>Split Tens Event</h3>
-                <button id="closeSplitTensDetailsBtn" class="ghost" type="button">Close</button>
-              </div>
-              <p class="muted">For the next 24 hours, splitting 10s is allowed.</p>
-              <ul class="rules-list split-tens-event-list">
-                <li><strong>Rule change:</strong> 10/10 can be split.</li>
-                <li><strong>Ends at:</strong> ${formatEventEndsAtLocal(splitTensEvent.event?.endsAt)}</li>
-                <li><strong id="splitTensCountdownModal">Ends in ${formatCooldown(splitTensEvent.remainingMs)}</strong></li>
-              </ul>
-            </div>
-          </div>`
-        : ''
-    }
   `;
   bindShellNav();
-  const openSplitTensDetailsRulesBtn = document.getElementById('openSplitTensDetailsRulesBtn');
-  if (openSplitTensDetailsRulesBtn) {
-    openSplitTensDetailsRulesBtn.onclick = () => {
-      state.eventDetailsModalId = SPLIT_TENS_EVENT_ID;
-      render();
-    };
-  }
-  const splitTensEventModal = document.getElementById('splitTensEventModal');
-  if (splitTensEventModal) {
-    splitTensEventModal.onclick = () => {
-      state.eventDetailsModalId = null;
-      render();
-    };
-  }
-  const closeSplitTensDetailsBtn = document.getElementById('closeSplitTensDetailsBtn');
-  if (closeSplitTensDetailsBtn) {
-    closeSplitTensDetailsBtn.onclick = () => {
-      state.eventDetailsModalId = null;
-      render();
-    };
-  }
-  const splitTensEventModalPanel = app.querySelector('.split-tens-event-modal');
-  if (splitTensEventModalPanel) {
-    splitTensEventModalPanel.onclick = (event) => event.stopPropagation();
-  }
-  syncEventCountdownUI();
 }
 
 function renderHand(hand, index, active, pressureTagged = false) {
@@ -6803,21 +6748,28 @@ function renderSuitIcon(suit, className = '') {
   return renderSuitIconSvg(suit, className);
 }
 
-function renderPlayingCard(card, cardIndex = 0) {
-  const deckSkinToken = deckSkinForUser(state.me)?.token || 'classic';
+function renderPlayingCard(card, cardIndex = 0, options = {}) {
+  const deckSkinToken = String(options.deckSkinToken || deckSkinForUser(state.me)?.token || 'classic').trim() || 'classic';
   const anim = cardAnimationMeta(card);
+  const skipAnimation = Boolean(options.skipAnimation);
+  const extraClass = String(options.extraClass || '').trim();
+  const ariaHidden = options.ariaHidden ? ' aria-hidden="true"' : '';
   const animationClasses = [];
-  if (anim.isEntering) animationClasses.push('card-enter');
-  if (anim.isRevealing) animationClasses.push('card-reveal');
-  if (anim.isShifting) animationClasses.push('card-shift');
-  const styleTokens = [`--card-enter-delay:${cardIndex * 35}ms`];
-  if (anim.cardId) styleTokens.push(`--card-enter-rot:${anim.tiltDeg.toFixed(2)}deg`);
-  const styleAttr = `style="${styleTokens.join(';')}"`;
-  const idAttr = anim.cardId ? `data-card-id="${anim.cardId}"` : '';
+  if (!skipAnimation && anim.isEntering) animationClasses.push('card-enter');
+  if (!skipAnimation && anim.isRevealing) animationClasses.push('card-reveal');
+  if (!skipAnimation && anim.isShifting) animationClasses.push('card-shift');
+  const styleTokens = [];
+  if (!skipAnimation) {
+    styleTokens.push(`--card-enter-delay:${cardIndex * 35}ms`);
+    if (anim.cardId) styleTokens.push(`--card-enter-rot:${anim.tiltDeg.toFixed(2)}deg`);
+  }
+  const styleAttr = styleTokens.length ? ` style="${styleTokens.join(';')}"` : '';
+  const idAttr = !skipAnimation && anim.cardId ? ` data-card-id="${anim.cardId}"` : '';
+  const cardClasses = `${animationClasses.join(' ')}${extraClass ? ` ${extraClass}` : ''}`.trim();
 
   if (card.hidden) {
     return `
-      <div class="playing-card hidden deck-skin-${deckSkinToken} ${animationClasses.join(' ')}" ${styleAttr} ${idAttr} aria-label="Face-down card">
+      <div class="playing-card hidden deck-skin-${deckSkinToken}${cardClasses ? ` ${cardClasses}` : ''}"${styleAttr}${idAttr} aria-label="Face-down card"${ariaHidden}>
         <div class="card-back-inner">
           <span class="card-back-mark">BB</span>
         </div>
@@ -6828,7 +6780,7 @@ function renderPlayingCard(card, cardIndex = 0) {
   const isRed = card.suit === 'H' || card.suit === 'D';
   const colorClass = isRed ? 'red' : 'black';
   return `
-    <article class="playing-card face ${colorClass} deck-skin-${deckSkinToken} ${animationClasses.join(' ')}" ${styleAttr} ${idAttr} aria-label="${card.rank} of ${suitLabel(card.suit)}">
+    <article class="playing-card face ${colorClass} deck-skin-${deckSkinToken}${cardClasses ? ` ${cardClasses}` : ''}"${styleAttr}${idAttr} aria-label="${card.rank} of ${suitLabel(card.suit)}"${ariaHidden}>
       <div class="card-face-sheen"></div>
       <div class="corner top">
         <span class="rank">${card.rank}</span>
@@ -6841,6 +6793,22 @@ function renderPlayingCard(card, cardIndex = 0) {
       </div>
     </article>
   `;
+}
+
+function renderDeckSkinPreviewCards(deckSkinToken = 'classic') {
+  const previewCards = [
+    { rank: 'A', suit: 'S' },
+    { rank: '10', suit: 'D' },
+    { rank: 'K', suit: 'H' }
+  ];
+  return previewCards
+    .map((card, index) => renderPlayingCard(card, index, {
+      deckSkinToken,
+      skipAnimation: true,
+      extraClass: 'profile-preview-card-sample',
+      ariaHidden: true
+    }))
+    .join('');
 }
 
 function renderMatch() {
