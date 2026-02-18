@@ -89,7 +89,7 @@ const BOT_ACTION_DELAY_MAX_MS = 1200;
 const BOT_FIRST_ACTION_DELAY_MIN_MS = 2000;
 const BOT_FIRST_ACTION_DELAY_MAX_MS = 3000;
 const ROUND_REVEAL_MS = 2200;
-const SIDE_BET_PHASE_MS = 7000;
+const SIDE_BET_PHASE_MS = 60000;
 const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
 const PATCH_REPO = 'Elicanig/1v1Blackjack';
 const FRIEND_INVITE_TTL_MS = 30 * 60 * 1000;
@@ -5259,6 +5259,7 @@ function applySideBetToggle(match, playerId, key, enabled) {
   const sideBets = match.round.sideBets;
   if (!sideBets?.enabled) return { error: 'Side bets are disabled in this mode' };
   if (sideBets.locked) return { error: 'Side bets are locked for this round' };
+  if (sideBets.readyByPlayer?.[playerId]) return { error: 'You are marked ready for this round' };
   const normalizedKey = String(key || '').toUpperCase();
   if (!PER_ROUND_SIDE_BET_KEYS.includes(normalizedKey)) return { error: 'Invalid side bet' };
   const tile = sideBets.tilesByPlayer?.[playerId]?.[normalizedKey];
@@ -5302,7 +5303,12 @@ function applySideBetReady(match, playerId, ready = true) {
   const sideBets = match.round.sideBets;
   if (!sideBets?.enabled) return { error: 'Side bets are disabled in this mode' };
   if (sideBets.locked) return { error: 'Side bets are already locked' };
-  sideBets.readyByPlayer[playerId] = Boolean(ready);
+  const wantsReady = Boolean(ready);
+  const alreadyReady = Boolean(sideBets.readyByPlayer[playerId]);
+  // Ready is one-way during a phase to avoid griefing via toggle spam.
+  if (alreadyReady) return { ok: true, unchanged: true };
+  if (!wantsReady) return { ok: true, unchanged: true };
+  sideBets.readyByPlayer[playerId] = true;
   const bothReady = allPlayersSideBetReady(match);
   if (bothReady) {
     finalizeSideBetPhase(match, { source: 'ready' });
@@ -5318,6 +5324,7 @@ function applyBlackjackRaceAction(match, playerId, action) {
   const sideBets = match.round.sideBets;
   if (!sideBets?.enabled) return { error: 'Blackjack Race is disabled in this mode' };
   if (sideBets.locked) return { error: 'Side bets are locked for this round' };
+  if (sideBets.readyByPlayer?.[playerId]) return { error: 'You are marked ready for this round' };
   const race = ensureSideBetRace(match);
   const opponentId = nextPlayerId(match, playerId);
   const normalized = String(action || '').trim().toLowerCase();

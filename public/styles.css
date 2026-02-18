@@ -3224,8 +3224,8 @@ select:focus-visible {
   width: var(--card-w, clamp(52px, 5.2vw, 74px));
   aspect-ratio: 5 / 7;
   border-radius: 13px;
-  border: 1px solid rgba(10, 16, 14, 0.56);
-  box-shadow: 0 18px 30px rgba(2, 7, 5, 0.4), 0 2px 0 rgba(255, 255, 255, 0.08) inset;
+  border: 1px solid rgba(10, 16, 14, 0.44);
+  box-shadow: 0 12px 20px rgba(2, 7, 5, 0.34), 0 1px 0 rgba(255, 255, 255, 0.07) inset;
   position: relative;
   flex: 0 0 auto;
   overflow: hidden;
@@ -3238,9 +3238,9 @@ select:focus-visible {
   position: absolute;
   inset: 2px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.09);
   pointer-events: none;
-  opacity: 0.72;
+  opacity: 0.82;
   z-index: 0;
 }
 
@@ -3268,7 +3268,7 @@ select:focus-visible {
 }
 
 .playing-card.face {
-  background: linear-gradient(180deg, #fcfcfa 0%, #f3f2ed 100%);
+  background: linear-gradient(180deg, #faf9f5 0%, #f1eee6 100%);
 }
 
 .playing-card.face::after {
@@ -3279,9 +3279,9 @@ select:focus-visible {
   pointer-events: none;
   z-index: 1;
   background:
-    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.26), transparent 30%),
-    radial-gradient(circle at 88% 92%, rgba(11, 25, 21, 0.07), transparent 42%);
-  opacity: 0.6;
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(17, 26, 21, 0.035)),
+    repeating-linear-gradient(135deg, rgba(22, 31, 27, 0.016) 0 1px, transparent 1px 3px);
+  opacity: 0.34;
 }
 
 .playing-card.face.deck-skin-classic {
@@ -3340,9 +3340,9 @@ select:focus-visible {
 .playing-card.face.deck-skin-obsidian-luxe-ii::after,
 .playing-card.face.deck-skin-void-prism::after {
   background:
-    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.14), transparent 24%),
-    radial-gradient(circle at 86% 90%, rgba(12, 26, 22, 0.14), transparent 40%);
-  opacity: 0.52;
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(8, 12, 16, 0.2)),
+    repeating-linear-gradient(135deg, rgba(210, 220, 235, 0.03) 0 1px, transparent 1px 3px);
+  opacity: 0.3;
 }
 
 .playing-card.face.deck-skin-obsidian.red {
@@ -3471,32 +3471,32 @@ select:focus-visible {
   flex-direction: column;
   align-items: center;
   line-height: 1;
-  gap: 1px;
-  padding: 2px 3px;
+  gap: 0;
+  padding: 3px 4px;
   border-radius: 8px;
   font-family: var(--font-card);
-  font-weight: 700;
+  font-weight: 760;
   font-size: clamp(0.66rem, 1.6vw, 0.86rem);
   z-index: 2;
 }
 
 .playing-card .corner.top {
   top: 6px;
-  left: 7px;
+  left: 6px;
 }
 
 .playing-card .corner.bottom {
-  right: 7px;
+  right: 6px;
   bottom: 6px;
   transform: rotate(180deg);
 }
 
 .playing-card .rank {
   font-family: var(--font-card);
-  font-weight: 800;
-  font-size: clamp(0.72rem, 1.72vw, 0.96rem);
-  letter-spacing: 0.015em;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.44), 0 0.5px 0 rgba(255, 255, 255, 0.45);
+  font-weight: 820;
+  font-size: clamp(0.74rem, 1.74vw, 0.97rem);
+  letter-spacing: 0.01em;
+  text-shadow: 0 0 0 rgba(0, 0, 0, 0);
 }
 
 .playing-card.face.deck-skin-obsidian .corner,
@@ -3508,7 +3508,12 @@ select:focus-visible {
 }
 
 .playing-card.face.deck-skin-obsidian-luxe-ii .rank {
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.72), 0 0 7px rgba(255, 211, 140, 0.18);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.72), 0 0 5px rgba(255, 211, 140, 0.14);
+}
+
+.playing-card.face.deck-skin-obsidian .rank,
+.playing-card.face.deck-skin-void-prism .rank {
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.62);
 }
 
 .suit-icon {
@@ -3522,13 +3527,22 @@ select:focus-visible {
   flex: 0 0 auto;
 }
 
+.suit-icon path,
+.suit-icon circle,
+.suit-icon rect {
+  vector-effect: non-scaling-stroke;
+  stroke: currentColor;
+  stroke-width: 0.9;
+  stroke-opacity: 0.18;
+}
+
 .suit-icon.corner-suit {
-  --suit-size: 12px;
+  --suit-size: 11px;
 }
 
 .suit-icon.center-suit-icon {
   --suit-size: clamp(28px, 4.2vw, 40px);
-  opacity: 0.8;
+  opacity: 0.83;
 }
 
 .playing-card .center-suit {
@@ -3536,50 +3550,6 @@ select:focus-visible {
   inset: 0;
   display: grid;
   place-items: center;
-}
-
-.card-face-sheen {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(132deg, rgba(255, 255, 255, 0.18), transparent 43%, rgba(255, 255, 255, 0.03));
-  mix-blend-mode: screen;
-  z-index: 1;
-  opacity: 0.35;
-}
-
-.card-face-sheen::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  clip-path: polygon(16% 0, 100% 0, 100% 84%, 84% 100%, 0 100%, 0 16%);
-  background: linear-gradient(112deg, transparent 34%, rgba(255, 255, 255, 0.16) 48%, transparent 63%);
-  transform: translateX(-145%);
-  opacity: 0;
-  animation: cardFaceSheenSweep var(--sheen-cycle, 14s) ease-in-out var(--sheen-delay, 0s) infinite;
-}
-
-.playing-card.face.deck-skin-obsidian .card-face-sheen::after,
-.playing-card.face.deck-skin-obsidian-luxe-ii .card-face-sheen::after,
-.playing-card.face.deck-skin-void-prism .card-face-sheen::after {
-  background: linear-gradient(112deg, transparent 34%, rgba(242, 221, 185, 0.13) 48%, transparent 63%);
-}
-
-@keyframes cardFaceSheenSweep {
-  0%, 78% {
-    transform: translateX(-145%);
-    opacity: 0;
-  }
-  83% {
-    opacity: 0.14;
-  }
-  90% {
-    opacity: 0.1;
-  }
-  100% {
-    transform: translateX(145%);
-    opacity: 0;
-  }
 }
 
 .playing-card.hidden {
@@ -3593,46 +3563,37 @@ select:focus-visible {
 
 .card-back-inner {
   position: absolute;
-  inset: 6px;
+  inset: 7px;
   border-radius: 10px;
-  border: 1px solid rgba(224, 189, 123, 0.4);
+  border: 1px solid rgba(224, 189, 123, 0.34);
   background:
-    linear-gradient(165deg, rgba(26, 59, 50, 0.9), rgba(13, 32, 27, 0.9) 70%),
-    radial-gradient(circle at 50% 40%, rgba(255, 255, 255, 0.06), transparent 56%);
+    linear-gradient(165deg, rgba(24, 54, 47, 0.9), rgba(12, 30, 26, 0.92) 74%);
   display: grid;
   place-items: center;
   overflow: hidden;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
 }
 
 .card-back-inner::before {
   content: '';
   position: absolute;
-  inset: 4px;
+  inset: 6px;
   pointer-events: none;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  opacity: 0.72;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  opacity: 0.7;
 }
 
 .card-back-inner::after {
-  content: '';
-  position: absolute;
-  inset: 18px;
-  border-radius: 8px;
-  border: 1px solid var(--card-back-foil);
-  background: radial-gradient(circle at 50% 50%, var(--card-back-crest), transparent 74%);
-  pointer-events: none;
-  opacity: 0.76;
-  transform: rotate(45deg);
+  content: none;
 }
 
 .card-back-mark {
   font-family: var(--font-display);
-  font-size: 0.69rem;
-  letter-spacing: 0.15em;
-  color: rgba(244, 231, 196, 0.92);
-  text-shadow: 0 0 12px rgba(241, 190, 111, 0.3);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  color: rgba(244, 231, 196, 0.9);
+  text-shadow: none;
   position: relative;
   z-index: 1;
 }
@@ -6118,7 +6079,6 @@ select:focus-visible {
   .card-enter,
   .card-reveal,
   .card-shift,
-  .card-face-sheen::after,
   .attention-pulse,
   .side-bet-race.is-attention,
   .quickplay-spinner,

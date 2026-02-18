@@ -7152,24 +7152,6 @@ function renderSuitIcon(suit, className = '') {
   return renderSuitIconSvg(suit, className);
 }
 
-function hashToken(value = '') {
-  const source = String(value || '');
-  let hash = 0;
-  for (let i = 0; i < source.length; i += 1) {
-    hash = ((hash << 5) - hash) + source.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
-function sheenTimingForCard(card, cardIndex = 0) {
-  const token = String(card?.id || `${card?.rank || ''}${card?.suit || ''}:${cardIndex}`);
-  const hash = hashToken(token);
-  const cycle = 10 + (hash % 9);
-  const delay = -1 * (hash % cycle);
-  return { cycle, delay };
-}
-
 function renderPlayingCard(card, cardIndex = 0, options = {}) {
   const deckSkinToken = String(options.deckSkinToken || deckSkinForUser(state.me)?.token || 'classic').trim() || 'classic';
   const anim = cardAnimationMeta(card);
@@ -7185,9 +7167,6 @@ function renderPlayingCard(card, cardIndex = 0, options = {}) {
     styleTokens.push(`--card-enter-delay:${cardIndex * 35}ms`);
     if (anim.cardId) styleTokens.push(`--card-enter-rot:${anim.tiltDeg.toFixed(2)}deg`);
   }
-  const sheenTiming = sheenTimingForCard(card, cardIndex);
-  styleTokens.push(`--sheen-cycle:${sheenTiming.cycle}s`);
-  styleTokens.push(`--sheen-delay:${sheenTiming.delay}s`);
   const styleAttr = styleTokens.length ? ` style="${styleTokens.join(';')}"` : '';
   const idAttr = !skipAnimation && anim.cardId ? ` data-card-id="${anim.cardId}"` : '';
   const cardClasses = `${animationClasses.join(' ')}${extraClass ? ` ${extraClass}` : ''}`.trim();
@@ -7206,7 +7185,6 @@ function renderPlayingCard(card, cardIndex = 0, options = {}) {
   const colorClass = isRed ? 'red' : 'black';
   return `
     <article class="playing-card face ${colorClass} deck-skin-${deckSkinToken}${cardClasses ? ` ${cardClasses}` : ''}"${styleAttr}${idAttr} aria-label="${card.rank} of ${suitLabel(card.suit)}"${ariaHidden}>
-      <div class="card-face-sheen"></div>
       <div class="corner top">
         <span class="rank">${card.rank}</span>
         ${renderSuitIcon(card.suit, 'corner-suit')}
@@ -7256,6 +7234,8 @@ function renderBlackjackRaceTile(sideBetState) {
   const def = SIDE_BET_TILE_DEF_MAP.get(SIDE_BET_KEYS.BLACKJACK_RACE);
   const available = Boolean(sideBetState?.available);
   const phaseActive = Boolean(sideBetState?.phaseActive && available);
+  const interactionLocked = Boolean(sideBetState?.yourReady && phaseActive);
+  const interactivePhase = Boolean(phaseActive && !interactionLocked);
   const race = sideBetState?.race || {};
   const resultBadge = sideBetResultBadge(race.result);
   const pendingAttention = phaseActive && race.awaitingYourResponse;
@@ -7265,6 +7245,7 @@ function renderBlackjackRaceTile(sideBetState) {
   else if (race.awaitingYourResponse) status = 'Opponent proposed a race';
   else if (race.awaitingOpponentResponse) status = 'Proposal sent';
   else if (race.declinedBy && phaseActive) status = 'Proposal declined';
+  else if (interactionLocked) status = 'Ready • waiting to deal';
   else if (!phaseActive && available) status = 'Race locked for this round';
 
   return `
@@ -7280,7 +7261,7 @@ function renderBlackjackRaceTile(sideBetState) {
         ${
           !available
             ? `<button class="ghost" disabled>${sideBetState?.disabledReason || 'Disabled'}</button>`
-            : phaseActive
+            : interactivePhase
               ? race.active
                 ? '<button class="ghost" disabled>Race live</button>'
                 : race.canPropose
@@ -7290,6 +7271,8 @@ function renderBlackjackRaceTile(sideBetState) {
                     : race.canCancel
                       ? '<button class="ghost" data-race-action="cancel">Cancel</button>'
                       : '<button class="ghost" disabled>Waiting</button>'
+              : interactionLocked
+                ? '<button class="ghost" disabled>Ready</button>'
               : '<button class="ghost" disabled>Locked</button>'
         }
       </div>
@@ -7301,13 +7284,15 @@ function renderStandardSideBetTile(key, sideBetState) {
   const def = SIDE_BET_TILE_DEF_MAP.get(key);
   const available = Boolean(sideBetState?.available);
   const phaseActive = Boolean(sideBetState?.phaseActive && available);
+  const interactionLocked = Boolean(sideBetState?.yourReady && phaseActive);
+  const interactivePhase = Boolean(phaseActive && !interactionLocked);
   const tile = sideBetState?.tiles?.[key] || { enabled: false, escrowed: 0, result: null };
   const enabled = Boolean(tile.enabled);
   const stake = Math.max(0, Math.floor(Number(sideBetState?.stake) || 0));
   const resultBadge = sideBetResultBadge(tile.result);
   const status = enabled
     ? `Staked ${Number(tile.escrowed || stake || 0).toLocaleString()}`
-    : (phaseActive ? 'Not entered' : 'Locked');
+    : (interactionLocked ? 'Ready' : (phaseActive ? 'Not entered' : 'Locked'));
   return `
     <article class="side-bet-tile ${enabled ? 'is-active' : ''}">
       <header>
@@ -7321,8 +7306,10 @@ function renderStandardSideBetTile(key, sideBetState) {
         ${
           !available
             ? `<button class="ghost" disabled>${sideBetState?.disabledReason || 'Disabled'}</button>`
-            : phaseActive
+            : interactivePhase
               ? `<button class="${enabled ? 'warn' : 'gold'}" data-sidebet-toggle="${key}" data-sidebet-enabled="${enabled ? '0' : '1'}">${enabled ? 'Remove' : `Add ${stake.toLocaleString()}`}</button>`
+              : interactionLocked
+                ? '<button class="ghost" disabled>Ready</button>'
               : '<button class="ghost" disabled>Locked</button>'
         }
       </div>
@@ -7354,7 +7341,9 @@ function renderSideBetRail(keys, sideBetState, options = {}) {
           ? `<div class="side-bet-phase-controls">
                ${
                  available && phaseActive
-                   ? `<button class="${sideBetState?.yourReady ? 'ghost' : 'primary'}" data-sidebet-ready="${sideBetState?.yourReady ? '0' : '1'}">${sideBetState?.yourReady ? 'Edit Bets' : 'Done'}</button>`
+                   ? sideBetState?.yourReady
+                     ? '<button class="ghost" disabled>Ready</button>'
+                     : '<button class="primary" data-sidebet-ready="1">Done</button>'
                    : `<button class="ghost" disabled>${available ? 'Waiting to deal' : 'Disabled'}</button>`
                }
                <div class="muted side-bet-ready-line">You: ${sideBetState?.yourReady ? 'ready' : 'editing'} • Opponent: ${sideBetState?.opponentReady ? 'ready' : 'editing'}</div>
