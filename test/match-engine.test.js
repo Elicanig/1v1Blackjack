@@ -30,6 +30,7 @@ import {
   rankedFloorForTier,
   applyRankedLossFloorClamp,
   rankedSeriesStakeForMatchup,
+  finalizeRankedSeriesElo,
   streakCountsAfterOutcome,
   matchWinStreakAfterOutcome,
   getBotObservation,
@@ -753,6 +754,26 @@ test('39bj ranked mixed-tier matchup uses lower-rank stake', () => {
   assert.equal(goldVsDiamond, 250);
 });
 
+test('39bk ranked series Elo finalization is idempotent once finalized', () => {
+  const existing = {
+    seriesId: 'series-1',
+    winnerId: 'p1',
+    loserId: 'p2',
+    p1: { finalDelta: 35, startElo: 1200, endElo: 1235 },
+    p2: { finalDelta: -11, startElo: 1200, endElo: 1189 }
+  };
+  const series = {
+    id: 'series-1',
+    p1: 'p1',
+    p2: 'p2',
+    eloFinalizedAt: new Date().toISOString(),
+    seriesElo: existing
+  };
+  const result = finalizeRankedSeriesElo(series, { winnerId: 'p1', loserId: 'p2', reason: 'series_complete' });
+  assert.equal(result, existing);
+  assert.equal(series.seriesElo, existing);
+});
+
 test('39c double is allowed even if opponent may have to surrender pressure', () => {
   const p1Hand = newHand([card('9'), card('2')], [false, true], 250, 0);
   const p2Hand = newHand([card('10'), card('7')], [false, true], 500, 0);
@@ -769,6 +790,42 @@ test('39d split is allowed even if opponent may have to surrender pressure', () 
   const res = applyAction(m, 'p1', 'split');
   assert.equal(res.ok, true);
   assert.equal(m.phase, PHASES.PRESSURE_RESPONSE);
+});
+
+test('39e surrender in pressure response resolves round immediately and blocks further actions', () => {
+  const p1Hand = newHand([card('9'), card('2')], [false, true], 200, 0);
+  p1Hand.doubleCount = 2;
+  p1Hand.doubled = true;
+  p1Hand.actionCount = 2;
+  const p2Hand = newHand([card('10'), card('7')], [false, true], 50, 0);
+  const m = makeMatch({ phase: PHASES.PRESSURE_RESPONSE, p1Hand, p2Hand });
+  m.round.baseBet = 50;
+  m.round.postedBetByPlayer = { p1: 50, p2: 50 };
+  m.round.stakesCommittedByPlayer = { p1: 50, p2: 50 };
+  m.round.pendingPressure = {
+    initiatorId: 'p1',
+    initiatorHandIndex: 0,
+    resumeTurnIfPossible: true,
+    opponentId: 'p2',
+    type: 'double',
+    delta: 100,
+    affectedHandIndices: [0]
+  };
+  m.round.turnPlayerId = 'p2';
+
+  const result = applyPressureDecision(m, 'p2', 'surrender');
+  assert.equal(result.ok, true);
+  assert.equal(m.round.resultFinalized, true);
+  assert.equal(m.round.terminalReason, 'surrender');
+  assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(m.round.pendingPressure, null);
+
+  const expectedPenalty = Math.floor(50 * RULES.SURRENDER_LOSS_FRACTION);
+  assert.equal(m.round.resultByPlayer.p2.deltaChips, -expectedPenalty);
+  assert.equal(m.round.resultByPlayer.p1.deltaChips, expectedPenalty);
+
+  const afterResolveAction = applyAction(m, 'p1', 'double');
+  assert.equal(afterResolveAction.error, 'Round already resolved');
 });
 
 test('40 bot bust resolves round immediately without waiting for player action', () => {
@@ -1234,11 +1291,10 @@ test('41mc surrender versus opponent split charges only 75% of original base bet
 
   const surrender = applyPressureDecision(m, 'p1', 'surrender');
   assert.equal(surrender.ok, true);
-  assert.equal(m.round.turnPlayerId, 'p2');
-
-  assert.equal(applyAction(m, 'p2', 'stand').ok, true);
-  assert.equal(applyAction(m, 'p2', 'stand').ok, true);
+  assert.equal(m.round.terminalReason, 'surrender');
+  assert.equal(m.round.turnPlayerId, null);
   assert.equal(m.phase, PHASES.REVEAL);
+  assert.equal(applyAction(m, 'p2', 'stand').error, 'Round already resolved');
   assert.equal(m.round.resultByPlayer.p1.deltaChips, -15);
   assert.equal(m.round.resultByPlayer.p2.deltaChips, 15);
 });

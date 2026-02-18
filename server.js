@@ -1252,6 +1252,16 @@ function isRoundSettledPhase(match) {
   );
 }
 
+function isRoundTerminal(match) {
+  if (!match?.round) return false;
+  if (isRoundSettledPhase(match)) return true;
+  return Boolean(
+    match.round.resultFinalized ||
+    match.round.isResolved ||
+    match.round.terminalReason
+  );
+}
+
 function buildParticipants(playerIds, botDifficultyById = {}) {
   return playerIds.reduce((acc, playerId) => {
     if (isBotPlayer(playerId)) {
@@ -3826,7 +3836,8 @@ function finalizeRankedSeriesElo(series, {
   const rawLoserDelta = enforceSeriesOutcomeDeltaSign(series.id, loserId, 'loss', loserCalc.finalDelta);
   const loserClamp = applyRankedLossFloorClamp(loserStartElo, rawLoserDelta, loserTierKey);
   let loserDelta = Math.floor(Number(loserClamp.finalDelta) || 0);
-  if (loserDelta > 0) {
+  const loserAtFloor = loserStartElo <= loserClamp.rankFloor;
+  if (loserDelta > 0 || (loserDelta === 0 && !loserAtFloor)) {
     const payload = {
       seriesId: series.id,
       loserId,
@@ -3836,13 +3847,25 @@ function finalizeRankedSeriesElo(series, {
       clampedLoserDelta: loserDelta
     };
     if (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development') {
-      throw new Error(`[ranked-series-elo-loss-positive] ${JSON.stringify(payload)}`);
+      throw new Error(`[ranked-series-elo-loss-invalid] ${JSON.stringify(payload)}`);
     }
     // eslint-disable-next-line no-console
-    console.error('[ranked-series-elo-loss-positive]', JSON.stringify(payload));
-    loserDelta = 0;
+    console.error('[ranked-series-elo-loss-invalid]', JSON.stringify(payload));
+    const forcedLoss = -Math.max(1, Math.abs(rawLoserDelta) || RANKED_TEST_LOSS_ELO_DELTA);
+    const forcedClamp = applyRankedLossFloorClamp(loserStartElo, forcedLoss, loserTierKey);
+    loserDelta = Math.floor(Number(forcedClamp.finalDelta) || 0);
+    if (loserDelta === 0 && loserStartElo > forcedClamp.rankFloor) loserDelta = -1;
   }
   winnerDelta = Math.max(1, Math.floor(Number(winnerDelta) || 0));
+  if (winnerDelta <= 0) {
+    const payload = { seriesId: series.id, winnerId, winnerStartElo, winnerDelta };
+    if (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development') {
+      throw new Error(`[ranked-series-elo-win-invalid] ${JSON.stringify(payload)}`);
+    }
+    // eslint-disable-next-line no-console
+    console.error('[ranked-series-elo-win-invalid]', JSON.stringify(payload));
+    winnerDelta = Math.max(1, RANKED_TEST_WIN_ELO_DELTA);
+  }
 
   const deltaByPlayer = {
     [p1Id]: winnerIsP1 ? winnerDelta : loserDelta,
@@ -4280,6 +4303,8 @@ function buildClientState(match, viewerId) {
     allInPlayers: round.allInPlayers,
     firstActionPlayerId: round.firstActionPlayerId,
     roundResult: round.resultByPlayer?.[viewerId] || null,
+    roundResolved: Boolean(round.isResolved || round.resultFinalized),
+    terminalReason: round.terminalReason || null,
     resultChoiceByPlayer: round.resultChoiceByPlayer || {},
     chat: Array.isArray(match.chat) ? match.chat : [],
     players,
@@ -4346,6 +4371,10 @@ function clearAfkTurnTimer(matchId) {
 function syncAfkTurnTimer(match) {
   clearAfkTurnTimer(match.id);
   if (!match || !match.round) return;
+  if (isRoundTerminal(match)) {
+    match.round.turnExpiresAt = null;
+    return;
+  }
   if (match.phase !== PHASES.ACTION_TURN || match.round?.pendingPressure) {
     match.round.turnExpiresAt = null;
     return;
@@ -4807,6 +4836,10 @@ function startRound(match) {
     botPacing: { firstActionDoneById: {} },
     resultChoiceByPlayer: {},
     resultFinalized: false,
+    isResolved: false,
+    terminalReason: null,
+    terminalByPlayerId: null,
+    terminalAt: null,
     firstActionPlayerId: null,
     turnPlayerId: null,
     resultByPlayer: null,
@@ -4946,7 +4979,11 @@ function maybeBeginRoundAfterBetConfirm(match) {
 }
 
 function resolveRound(match) {
+  if (!match?.round) return;
+  if (match.round.resultFinalized || match.round.isResolved) return;
   clearRoundPhaseTimer(match.id);
+  clearAfkTurnTimer(match.id);
+  match.round.isResolved = true;
   match.phase = PHASES.ROUND_RESOLVE;
   const realMatch = isRealMatch(match);
   const [aId, bId] = match.playerIds;
@@ -5034,70 +5071,97 @@ function resolveRound(match) {
     [aId]: false,
     [bId]: false
   };
-  const handSlots = Math.max(a.hands.length || 0, b.hands.length || 0, 1);
-  // Aggregate settlement per hand so split outcomes (win/push/loss mix) pay correctly.
-  for (let idx = 0; idx < handSlots; idx += 1) {
-    const handA = a.hands[idx] || aBase;
-    const handB = b.hands[idx] || bBase;
-    if (!handA || !handB) continue;
-
-    if (handA.surrendered && handB.surrendered) {
-      if (!surrenderSettledByPlayer[aId] && !surrenderSettledByPlayer[bId]) {
-        handA.outcome = mergeHandOutcome(handA.outcome, 'push');
-        handB.outcome = mergeHandOutcome(handB.outcome, 'push');
-        outcomes.push({ winner: null, loser: null, amount: 0, handIndex: idx, winnerHandWasSplit: false });
-      }
-      surrenderSettledByPlayer[aId] = true;
-      surrenderSettledByPlayer[bId] = true;
-      continue;
+  const terminalReason = String(match.round?.terminalReason || '').trim().toLowerCase();
+  const terminalSurrenderPlayerId = terminalReason === 'surrender' ? String(match.round?.terminalByPlayerId || '') : '';
+  if (terminalSurrenderPlayerId === aId || terminalSurrenderPlayerId === bId) {
+    const surrenderId = terminalSurrenderPlayerId;
+    const winnerIdForSurrender = surrenderId === aId ? bId : aId;
+    const surrenderState = match.round.players[surrenderId];
+    const winnerState = match.round.players[winnerIdForSurrender];
+    for (const hand of surrenderState?.hands || []) {
+      hand.surrendered = true;
+      hand.locked = true;
+      hand.outcome = mergeHandOutcome(hand.outcome, 'loss');
     }
+    const winnerHand = winnerState?.hands?.[0] || null;
+    if (winnerHand) winnerHand.outcome = mergeHandOutcome(winnerHand.outcome, 'win');
+    const amount = Math.floor((surrenderBaseByPlayer[surrenderId] || BASE_BET) * RULES.SURRENDER_LOSS_FRACTION);
+    chipsDelta[surrenderId] -= amount;
+    chipsDelta[winnerIdForSurrender] += amount;
+    outcomes.push({
+      winner: winnerIdForSurrender,
+      loser: surrenderId,
+      amount,
+      handIndex: 0,
+      winnerHandWasSplit: Boolean(winnerHand?.wasSplitHand),
+      terminalReason: 'surrender'
+    });
+  } else {
+    const handSlots = Math.max(a.hands.length || 0, b.hands.length || 0, 1);
+    // Aggregate settlement per hand so split outcomes (win/push/loss mix) pay correctly.
+    for (let idx = 0; idx < handSlots; idx += 1) {
+      const handA = a.hands[idx] || aBase;
+      const handB = b.hands[idx] || bBase;
+      if (!handA || !handB) continue;
 
-    if (handA.surrendered) {
-      if (surrenderSettledByPlayer[aId]) continue;
-      const amount = Math.floor(surrenderBaseByPlayer[aId] * RULES.SURRENDER_LOSS_FRACTION);
-      chipsDelta[aId] -= amount;
-      chipsDelta[bId] += amount;
-      handA.outcome = mergeHandOutcome(handA.outcome, 'loss');
-      handB.outcome = mergeHandOutcome(handB.outcome, 'win');
-      outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handB?.wasSplitHand) });
-      surrenderSettledByPlayer[aId] = true;
-    } else if (handB.surrendered) {
-      if (surrenderSettledByPlayer[bId]) continue;
-      const amount = Math.floor(surrenderBaseByPlayer[bId] * RULES.SURRENDER_LOSS_FRACTION);
-      chipsDelta[aId] += amount;
-      chipsDelta[bId] -= amount;
-      handA.outcome = mergeHandOutcome(handA.outcome, 'win');
-      handB.outcome = mergeHandOutcome(handB.outcome, 'loss');
-      outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
-      surrenderSettledByPlayer[bId] = true;
-    } else {
-      const result = compareHands(handA, handB);
-      const pot = Math.min(handA.bet, handB.bet);
-      const singleBust = Boolean(handA?.bust) !== Boolean(handB?.bust);
-      const handANatural = Boolean(handA.naturalBlackjack);
-      const handBNatural = Boolean(handB.naturalBlackjack);
-      if (result > 0) {
-        const amount = singleBust && handB?.bust
-          ? Math.max(0, Math.floor(Number(handB?.bet) || 0))
-          : (handANatural && !handBNatural ? Math.floor(pot * 1.5) : pot);
-        chipsDelta[aId] += amount;
-        chipsDelta[bId] -= amount;
-        handA.outcome = mergeHandOutcome(handA.outcome, 'win');
-        handB.outcome = mergeHandOutcome(handB.outcome, 'loss');
-        outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
-      } else if (result < 0) {
-        const amount = singleBust && handA?.bust
-          ? Math.max(0, Math.floor(Number(handA?.bet) || 0))
-          : (handBNatural && !handANatural ? Math.floor(pot * 1.5) : pot);
+      if (handA.surrendered && handB.surrendered) {
+        if (!surrenderSettledByPlayer[aId] && !surrenderSettledByPlayer[bId]) {
+          handA.outcome = mergeHandOutcome(handA.outcome, 'push');
+          handB.outcome = mergeHandOutcome(handB.outcome, 'push');
+          outcomes.push({ winner: null, loser: null, amount: 0, handIndex: idx, winnerHandWasSplit: false });
+        }
+        surrenderSettledByPlayer[aId] = true;
+        surrenderSettledByPlayer[bId] = true;
+        continue;
+      }
+
+      if (handA.surrendered) {
+        if (surrenderSettledByPlayer[aId]) continue;
+        const amount = Math.floor(surrenderBaseByPlayer[aId] * RULES.SURRENDER_LOSS_FRACTION);
         chipsDelta[aId] -= amount;
         chipsDelta[bId] += amount;
         handA.outcome = mergeHandOutcome(handA.outcome, 'loss');
         handB.outcome = mergeHandOutcome(handB.outcome, 'win');
         outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handB?.wasSplitHand) });
+        surrenderSettledByPlayer[aId] = true;
+      } else if (handB.surrendered) {
+        if (surrenderSettledByPlayer[bId]) continue;
+        const amount = Math.floor(surrenderBaseByPlayer[bId] * RULES.SURRENDER_LOSS_FRACTION);
+        chipsDelta[aId] += amount;
+        chipsDelta[bId] -= amount;
+        handA.outcome = mergeHandOutcome(handA.outcome, 'win');
+        handB.outcome = mergeHandOutcome(handB.outcome, 'loss');
+        outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
+        surrenderSettledByPlayer[bId] = true;
       } else {
-        handA.outcome = mergeHandOutcome(handA.outcome, 'push');
-        handB.outcome = mergeHandOutcome(handB.outcome, 'push');
-        outcomes.push({ winner: null, loser: null, amount: 0, handIndex: idx, winnerHandWasSplit: false });
+        const result = compareHands(handA, handB);
+        const pot = Math.min(handA.bet, handB.bet);
+        const singleBust = Boolean(handA?.bust) !== Boolean(handB?.bust);
+        const handANatural = Boolean(handA.naturalBlackjack);
+        const handBNatural = Boolean(handB.naturalBlackjack);
+        if (result > 0) {
+          const amount = singleBust && handB?.bust
+            ? Math.max(0, Math.floor(Number(handB?.bet) || 0))
+            : (handANatural && !handBNatural ? Math.floor(pot * 1.5) : pot);
+          chipsDelta[aId] += amount;
+          chipsDelta[bId] -= amount;
+          handA.outcome = mergeHandOutcome(handA.outcome, 'win');
+          handB.outcome = mergeHandOutcome(handB.outcome, 'loss');
+          outcomes.push({ winner: aId, loser: bId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handA?.wasSplitHand) });
+        } else if (result < 0) {
+          const amount = singleBust && handA?.bust
+            ? Math.max(0, Math.floor(Number(handA?.bet) || 0))
+            : (handBNatural && !handANatural ? Math.floor(pot * 1.5) : pot);
+          chipsDelta[aId] -= amount;
+          chipsDelta[bId] += amount;
+          handA.outcome = mergeHandOutcome(handA.outcome, 'loss');
+          handB.outcome = mergeHandOutcome(handB.outcome, 'win');
+          outcomes.push({ winner: bId, loser: aId, amount, handIndex: idx, winnerHandWasSplit: Boolean(handB?.wasSplitHand) });
+        } else {
+          handA.outcome = mergeHandOutcome(handA.outcome, 'push');
+          handB.outcome = mergeHandOutcome(handB.outcome, 'push');
+          outcomes.push({ winner: null, loser: null, amount: 0, handIndex: idx, winnerHandWasSplit: false });
+        }
       }
     }
   }
@@ -6079,10 +6143,12 @@ function scheduleBotTurn(match) {
     clearTimeout(existing);
     botTurnTimers.delete(match.id);
   }
+  if (isRoundTerminal(match)) return;
 
   const delay = botTurnDelayMs(match, botId);
   const timer = setTimeout(() => {
     if (!matches.has(match.id)) return;
+    if (isRoundTerminal(match)) return;
 
     if (
       match.phase === PHASES.PRESSURE_RESPONSE &&
@@ -6171,6 +6237,7 @@ function scheduleBotTurn(match) {
 
 function applyAction(match, playerId, action) {
   const normalizedAction = String(action || '').trim().toLowerCase();
+  if (isRoundTerminal(match)) return { error: 'Round already resolved' };
   if (match.phase !== PHASES.ACTION_TURN) return { error: 'Round not in action phase' };
   if (match.round.turnPlayerId !== playerId) return { error: 'Not your turn' };
   if (match.round.pendingPressure) return { error: 'Pending pressure decision' };
@@ -6234,13 +6301,20 @@ function applyAction(match, playerId, action) {
     recordHumanActionForBotLearning(match, playerId, normalizedAction);
     match.round.firstActionTaken = true;
     hand.actionCount = (hand.actionCount || 0) + 1;
-    hand.surrendered = true;
-    hand.locked = true;
+    for (const ownHand of state.hands) {
+      ownHand.surrendered = true;
+      ownHand.locked = true;
+    }
+    match.round.pendingPressure = null;
+    match.round.turnPlayerId = null;
+    match.round.terminalReason = 'surrender';
+    match.round.terminalByPlayerId = playerId;
+    match.round.terminalAt = nowIso();
     if (isRealMatch(match) && !isBotPlayer(playerId)) {
       const user = getUserById(playerId);
       if (user) recordSkillEvent(user, 'surrender_used', 1);
     }
-    progressTurn(match, playerId);
+    resolveRound(match);
     return { ok: true };
   }
 
@@ -6366,6 +6440,7 @@ function applyAction(match, playerId, action) {
 }
 
 function applyPressureDecision(match, playerId, decision) {
+  if (isRoundTerminal(match)) return { error: 'Round already resolved' };
   if (match.phase !== PHASES.PRESSURE_RESPONSE) return { error: 'No pressure decision needed' };
   const pressure = match.round.pendingPressure;
   if (!pressure) return { error: 'No pressure state' };
@@ -6394,6 +6469,17 @@ function applyPressureDecision(match, playerId, decision) {
       hand.surrendered = true;
       hand.locked = true;
     }
+    for (const hand of opponentState.hands) {
+      hand.surrendered = true;
+      hand.locked = true;
+    }
+    match.round.pendingPressure = null;
+    match.round.turnPlayerId = null;
+    match.round.terminalReason = 'surrender';
+    match.round.terminalByPlayerId = playerId;
+    match.round.terminalAt = nowIso();
+    resolveRound(match);
+    return { ok: true, terminal: true };
   } else {
     return { error: 'Invalid decision' };
   }
