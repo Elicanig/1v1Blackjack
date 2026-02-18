@@ -116,14 +116,21 @@ const SPLIT_TENS_EVENT_ENABLED = parseEnvBoolean(
 const SPLIT_TENS_EVENT_FALLBACK_STARTS_AT_MS = Date.now();
 const SPLIT_TENS_EVENT_STARTS_AT_MS = parseIsoTimestampMs(process.env.SPLIT_TENS_EVENT_STARTS_AT || '');
 const XP_REWARDS = Object.freeze({
-  pvpWin: 40,
-  pvpLoss: 15,
-  botWin: 10,
-  botLoss: 5,
+  pvpWin: 24,
+  pvpLoss: 8,
+  botWin: 20,
+  botLoss: 7,
   challenge: 75
 });
-const XP_BET_BASELINE = 100;
-const XP_BET_MULTIPLIER_CAP = 3.2;
+const XP_BET_REFERENCE = 50;
+const XP_BET_FACTOR_CAP = 12;
+const XP_WIN_MIN = 12;
+const XP_WIN_MAX = 520;
+const XP_WIN_MAX_BOT = 420;
+const XP_LOSS_RATIO = 0.35;
+const XP_LOSS_MIN = 4;
+const XP_LOSS_MAX = 180;
+const BOT_DECISION_DEBUG = parseEnvBoolean(process.env.BOT_DECISION_DEBUG || '');
 const PROFILE_BORDER_DEFS = Object.freeze([
   { id: 'NONE', name: 'None', minLevelRequired: 1, tier: 'Default', previewToken: 'none' },
   { id: 'BRONZE_TRIM', name: 'Bronze Trim', minLevelRequired: 10, tier: 'Common', previewToken: 'bronze-trim' },
@@ -1582,7 +1589,8 @@ function isSplitTensEventActive(context = null) {
 }
 
 function isTenValueRank(rank) {
-  return rank === '10' || rank === 'J' || rank === 'Q' || rank === 'K';
+  const normalized = String(rank || '').trim().toUpperCase();
+  return normalized === '10' || normalized === 'J' || normalized === 'Q' || normalized === 'K';
 }
 
 function isTenValuePair(hand) {
@@ -2248,9 +2256,9 @@ function xpStreakBonusMultiplier(user) {
 
 function xpBetMultiplierFromAmount(betAmount) {
   const bet = Math.max(1, Math.floor(Number(betAmount) || 0));
-  const ratio = bet / XP_BET_BASELINE;
-  const scaled = 0.85 + Math.sqrt(Math.max(0, ratio));
-  return Math.max(0.85, Math.min(XP_BET_MULTIPLIER_CAP, scaled));
+  const ratio = bet / XP_BET_REFERENCE;
+  const scaled = Math.sqrt(Math.max(0, ratio));
+  return Math.max(1, Math.min(XP_BET_FACTOR_CAP, scaled));
 }
 
 function exposureBetForXp(playerRoundState, fallbackBet = BASE_BET) {
@@ -2259,6 +2267,22 @@ function exposureBetForXp(playerRoundState, fallbackBet = BASE_BET) {
   if (!hands.length) return safeFallback;
   const exposure = hands.reduce((sum, hand) => sum + Math.max(0, Math.floor(Number(hand?.bet) || 0)), 0);
   return Math.max(safeFallback, exposure);
+}
+
+function xpWinAmountForMainBet({ isPvp = false, betAmount = BASE_BET, streakMultiplier = 1 } = {}) {
+  const base = isPvp ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
+  const factor = xpBetMultiplierFromAmount(betAmount);
+  const streak = Math.max(1, Number(streakMultiplier) || 1);
+  const cap = isPvp ? XP_WIN_MAX : XP_WIN_MAX_BOT;
+  const raw = base * factor * streak;
+  return Math.max(XP_WIN_MIN, Math.min(cap, Math.round(raw)));
+}
+
+function xpLossAmountForMainBet({ isPvp = false, betAmount = BASE_BET } = {}) {
+  const baseWin = isPvp ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
+  const factor = xpBetMultiplierFromAmount(betAmount);
+  const raw = baseWin * factor * XP_LOSS_RATIO;
+  return Math.max(XP_LOSS_MIN, Math.min(XP_LOSS_MAX, Math.round(raw)));
 }
 
 function levelRewardForLevel(level) {
@@ -6261,15 +6285,11 @@ function resolveRound(match) {
   }
 
   if (realMatch) {
-    const xpWinBase = pvpMatch ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
-    const xpLossBase = pvpMatch ? XP_REWARDS.pvpLoss : XP_REWARDS.botLoss;
-    const baseBet = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
-    const exposureA = exposureBetForXp(a, baseBet);
-    const exposureB = exposureBetForXp(b, baseBet);
-    const multiplierA = xpBetMultiplierFromAmount(exposureA);
-    const multiplierB = xpBetMultiplierFromAmount(exposureB);
-    xpMetaByPlayer[aId] = { betAmount: exposureA, multiplier: multiplierA };
-    xpMetaByPlayer[bId] = { betAmount: exposureB, multiplier: multiplierB };
+    // XP progression is based on the main round bet only (side bets excluded by design).
+    const mainBetForXp = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
+    const mainBetMultiplier = xpBetMultiplierFromAmount(mainBetForXp);
+    xpMetaByPlayer[aId] = { betAmount: mainBetForXp, multiplier: mainBetMultiplier };
+    xpMetaByPlayer[bId] = { betAmount: mainBetForXp, multiplier: mainBetMultiplier };
     const awardXpDelta = (user, amount) => {
       if (!user) return 0;
       const before = Math.max(0, Math.floor(Number(user.xp) || 0));
@@ -6279,44 +6299,38 @@ function resolveRound(match) {
     };
     if (netA > 0) {
       if (userA) {
-        const gain = Math.max(
-          1,
-          Math.floor(
-            xpWinBase *
-            multiplierA *
-            xpStreakBonusMultiplier(userA)
-          )
-        );
+        const gain = xpWinAmountForMainBet({
+          isPvp: pvpMatch,
+          betAmount: mainBetForXp,
+          streakMultiplier: xpStreakBonusMultiplier(userA)
+        });
         xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
       }
       if (userB) {
-        const gain = Math.max(1, Math.floor(xpLossBase * multiplierB));
+        const gain = xpLossAmountForMainBet({ isPvp: pvpMatch, betAmount: mainBetForXp });
         xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
       }
     } else if (netA < 0) {
       if (userB) {
-        const gain = Math.max(
-          1,
-          Math.floor(
-            xpWinBase *
-            multiplierB *
-            xpStreakBonusMultiplier(userB)
-          )
-        );
+        const gain = xpWinAmountForMainBet({
+          isPvp: pvpMatch,
+          betAmount: mainBetForXp,
+          streakMultiplier: xpStreakBonusMultiplier(userB)
+        });
         xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
       }
       if (userA) {
-        const gain = Math.max(1, Math.floor(xpLossBase * multiplierA));
+        const gain = xpLossAmountForMainBet({ isPvp: pvpMatch, betAmount: mainBetForXp });
         xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
       }
     } else {
       // Push still grants a small amount of progression.
       if (userA) {
-        const gain = Math.max(1, Math.floor((xpLossBase * 0.5) * multiplierA));
+        const gain = Math.max(1, Math.floor(xpLossAmountForMainBet({ isPvp: pvpMatch, betAmount: mainBetForXp }) * 0.5));
         xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
       }
       if (userB) {
-        const gain = Math.max(1, Math.floor((xpLossBase * 0.5) * multiplierB));
+        const gain = Math.max(1, Math.floor(xpLossAmountForMainBet({ isPvp: pvpMatch, betAmount: mainBetForXp }) * 0.5));
         xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
       }
     }
@@ -6798,116 +6812,280 @@ function recordHumanActionForBotLearning(match, playerId, action) {
   model.aggression = Math.max(0.2, Math.min(0.8, aggressiveCount / denominator));
 }
 
-function botShouldSurrenderOpeningHand(observation, hand, opponentUpCardTotal, difficultyKey = 'normal') {
+function normalizeDealerUpcardValue(upcard) {
+  const numeric = Math.floor(Number(upcard) || 0);
+  if (numeric >= 2 && numeric <= 11) return numeric;
+  return 10;
+}
+
+function normalizePairRankForStrategy(hand) {
+  const rank = String(hand?.pairRank || '').trim().toUpperCase();
+  if (!rank) return '';
+  return isTenValueRank(rank) ? '10' : rank;
+}
+
+function botOpeningState(hand) {
   if (!hand) return false;
-  if ((hand.actionCount || 0) > 0) return false;
-  if ((hand.hitCount || 0) > 0) return false;
-  if ((hand.doubleCount || 0) > 0) return false;
+  return (hand.actionCount || 0) === 0
+    && (hand.hitCount || 0) === 0
+    && (hand.doubleCount || 0) === 0
+    && !Boolean(hand.doubled);
+}
+
+function legalActionSetForBot(allowedActions = []) {
+  return new Set((Array.isArray(allowedActions) ? allowedActions : []).filter(Boolean));
+}
+
+function fallbackBotAction(legalSet, preferred = []) {
+  for (const action of preferred) {
+    if (legalSet.has(action)) return action;
+  }
+  if (legalSet.has('stand')) return 'stand';
+  return legalSet.values().next().value || 'stand';
+}
+
+function chooseLegalBotAction(legalSet, preferredAction) {
+  if (preferredAction && legalSet.has(preferredAction)) return preferredAction;
+  if (preferredAction === 'double') return fallbackBotAction(legalSet, ['hit', 'stand', 'split', 'surrender']);
+  if (preferredAction === 'split') return fallbackBotAction(legalSet, ['hit', 'stand', 'double', 'surrender']);
+  if (preferredAction === 'surrender') return fallbackBotAction(legalSet, ['hit', 'stand', 'double', 'split']);
+  return fallbackBotAction(legalSet, ['stand', 'hit', 'double', 'split', 'surrender']);
+}
+
+function botShouldSurrenderByTable({ hand, dealerUp, allowSurrender = false, legalSet = new Set() } = {}) {
+  if (!allowSurrender || !legalSet.has('surrender')) return false;
+  if (!hand || !botOpeningState(hand)) return false;
   if (hand.isSoft) return false;
-  if ((hand.total || 0) >= 17) return false;
-  if (hand.splitEligible && ['A', '8'].includes(String(hand.pairRank || ''))) return false;
-
-  const total = hand.total || 0;
-  const up = Number(opponentUpCardTotal) || 10;
-  const highStakes = Math.max(0, Math.floor(Number(observation?.public?.baseBet) || 0)) >= HIGH_ROLLER_MIN_BET;
-
-  if (total >= 15 && up >= 10) {
-    let chance = difficultyKey === 'medium' ? 0.08 : 0.12;
-    if (up === 11) chance += 0.03;
-    if (highStakes) chance *= 0.45;
-    chance = Math.max(0.02, Math.min(0.16, chance));
-    return secureRandomFloat() < chance;
-  }
-
-  if (total === 14 && up === 11) {
-    let chance = difficultyKey === 'medium' ? 0.04 : 0.06;
-    if (highStakes) chance *= 0.45;
-    chance = Math.max(0.01, Math.min(0.08, chance));
-    return secureRandomFloat() < chance;
-  }
-
+  const total = Math.floor(Number(hand.total) || 0);
+  if (total === 16 && [9, 10, 11].includes(dealerUp)) return true;
+  if (total === 15 && dealerUp === 10) return true;
   return false;
+}
+
+function botPolicyForDecision(observation, difficultyKey = 'normal') {
+  const normalizedDifficulty = String(difficultyKey || 'normal').trim().toLowerCase();
+  const matchType = String(observation?.public?.matchType || '').toUpperCase();
+  const highRollerMatch = matchType === 'HIGH_ROLLER'
+    || Math.max(0, Math.floor(Number(observation?.public?.baseBet) || 0)) >= HIGH_ROLLER_MIN_BET;
+  if (highRollerMatch) {
+    return {
+      key: 'high_roller',
+      deterministic: true,
+      allowSurrender: true,
+      allowSplitTens: false,
+      splitTensChance: 0,
+      strictDouble: true,
+      accuracy: 1
+    };
+  }
+  if (normalizedDifficulty === 'easy') {
+    return {
+      key: 'easy',
+      deterministic: false,
+      allowSurrender: false,
+      allowSplitTens: false,
+      splitTensChance: 0,
+      strictDouble: true,
+      accuracy: 0.62
+    };
+  }
+  if (normalizedDifficulty === 'medium') {
+    return {
+      key: 'medium',
+      deterministic: false,
+      allowSurrender: true,
+      allowSplitTens: true,
+      splitTensChance: 0.05,
+      strictDouble: true,
+      accuracy: 0.85
+    };
+  }
+  return {
+    key: 'normal',
+    deterministic: false,
+    allowSurrender: true,
+    allowSplitTens: true,
+    splitTensChance: 0.08,
+    strictDouble: true,
+    accuracy: 0.94
+  };
+}
+
+function basicStrategyActionFromObservation(hand, up, options = {}) {
+  const legalSet = options?.legalSet instanceof Set ? options.legalSet : new Set();
+  const allowSurrender = Boolean(options?.allowSurrender);
+  const allowSplitTens = Boolean(options?.allowSplitTens);
+  const splitTensEventActive = Boolean(options?.splitTensEventActive);
+  const strictDouble = options?.strictDouble !== false;
+  const dealerUp = normalizeDealerUpcardValue(up);
+
+  if (!hand) {
+    return { action: chooseLegalBotAction(legalSet, 'stand'), rule: 'no_hand' };
+  }
+
+  const total = Math.floor(Number(hand.total) || 0);
+  const isSoft = Boolean(hand.isSoft);
+  const splitEligible = Boolean(hand.splitEligible && hand.pairRank);
+  const pairRank = normalizePairRankForStrategy(hand);
+  const openingState = botOpeningState(hand);
+  const canDoubleByPolicy = (!strictDouble || openingState) && legalSet.has('double');
+
+  if (botShouldSurrenderByTable({ hand, dealerUp, allowSurrender, legalSet })) {
+    return { action: 'surrender', rule: 'surrender_table' };
+  }
+
+  if (splitEligible && legalSet.has('split')) {
+    if (pairRank === 'A' || pairRank === '8') return { action: 'split', rule: 'pair_forced_split' };
+    if (pairRank === '9' && [2, 3, 4, 5, 6, 8, 9].includes(dealerUp)) return { action: 'split', rule: 'pair_9' };
+    if (pairRank === '7' && dealerUp >= 2 && dealerUp <= 7) return { action: 'split', rule: 'pair_7' };
+    if (pairRank === '6' && dealerUp >= 2 && dealerUp <= 6) return { action: 'split', rule: 'pair_6' };
+    if ((pairRank === '2' || pairRank === '3') && dealerUp >= 2 && dealerUp <= 7) return { action: 'split', rule: 'pair_2_3' };
+    if (pairRank === '4' && (dealerUp === 5 || dealerUp === 6)) return { action: 'split', rule: 'pair_4' };
+    if (pairRank === '10' && allowSplitTens && splitTensEventActive) return { action: 'split', rule: 'split_tens_event' };
+  }
+
+  const resolveDoubleFallback = (ruleName = 'double_fallback') => ({
+    action: canDoubleByPolicy ? 'double' : 'hit',
+    rule: canDoubleByPolicy ? ruleName : `${ruleName}_to_hit`
+  });
+
+  if (isSoft) {
+    if (total >= 19) return { action: 'stand', rule: 'soft_19_plus' };
+    if (total === 18) {
+      if (dealerUp >= 3 && dealerUp <= 6) return resolveDoubleFallback('soft_18_double');
+      if (dealerUp >= 9 || dealerUp === 11) return { action: 'hit', rule: 'soft_18_high_up' };
+      return { action: 'stand', rule: 'soft_18_stand' };
+    }
+    if (total === 17) return (dealerUp >= 3 && dealerUp <= 6)
+      ? resolveDoubleFallback('soft_17_double')
+      : { action: 'hit', rule: 'soft_17_hit' };
+    if (total === 16 || total === 15) return (dealerUp >= 4 && dealerUp <= 6)
+      ? resolveDoubleFallback('soft_16_15_double')
+      : { action: 'hit', rule: 'soft_16_15_hit' };
+    if (total === 14 || total === 13) return (dealerUp >= 5 && dealerUp <= 6)
+      ? resolveDoubleFallback('soft_14_13_double')
+      : { action: 'hit', rule: 'soft_14_13_hit' };
+    if (total === 12) return (dealerUp >= 5 && dealerUp <= 6)
+      ? resolveDoubleFallback('soft_12_double')
+      : { action: 'hit', rule: 'soft_12_hit' };
+    return { action: 'hit', rule: 'soft_default_hit' };
+  }
+
+  if (total >= 17) return { action: 'stand', rule: 'hard_17_plus' };
+  if (total >= 13 && total <= 16) return {
+    action: dealerUp >= 7 ? 'hit' : 'stand',
+    rule: dealerUp >= 7 ? 'hard_13_16_hit' : 'hard_13_16_stand'
+  };
+  if (total === 12) return {
+    action: (dealerUp >= 4 && dealerUp <= 6) ? 'stand' : 'hit',
+    rule: (dealerUp >= 4 && dealerUp <= 6) ? 'hard_12_stand' : 'hard_12_hit'
+  };
+  if (total === 11) return resolveDoubleFallback('hard_11_double');
+  if (total === 10) return (dealerUp >= 2 && dealerUp <= 9)
+    ? resolveDoubleFallback('hard_10_double')
+    : { action: 'hit', rule: 'hard_10_hit' };
+  if (total === 9) return (dealerUp >= 3 && dealerUp <= 6)
+    ? resolveDoubleFallback('hard_9_double')
+    : { action: 'hit', rule: 'hard_9_hit' };
+  return { action: 'hit', rule: 'hard_default_hit' };
+}
+
+function applyBotHardSafetyRules({ hand, dealerUp, selectedAction, legalSet }) {
+  if (!hand) return chooseLegalBotAction(legalSet, selectedAction);
+  const total = Math.floor(Number(hand.total) || 0);
+  const isSoft = Boolean(hand.isSoft);
+  let action = chooseLegalBotAction(legalSet, selectedAction);
+
+  if (!isSoft && total >= 19 && (action === 'hit' || action === 'double')) {
+    action = chooseLegalBotAction(legalSet, 'stand');
+  }
+  if (!isSoft && total === 17 && action === 'double') {
+    action = chooseLegalBotAction(legalSet, 'stand');
+  }
+  if (!isSoft && total === 14 && dealerUp === 10 && action === 'stand') {
+    action = chooseLegalBotAction(legalSet, 'hit');
+  }
+  if (!isSoft && total === 16 && dealerUp === 7 && action === 'stand') {
+    action = chooseLegalBotAction(legalSet, 'hit');
+  }
+
+  return action;
 }
 
 function chooseBotActionFromObservation(observation, difficulty = 'normal') {
   if (!observation || observation.phase !== PHASES.ACTION_TURN) return 'stand';
   if (process.env.NODE_ENV !== 'production') assertSafeBotObservation(observation);
   const difficultyKey = String(difficulty || 'normal').trim().toLowerCase();
+  const policy = botPolicyForDecision(observation, difficultyKey);
   let legal = Array.isArray(observation.allowedActions) ? observation.allowedActions : [];
-  if (difficultyKey === 'easy') {
+  if (policy.key === 'easy') {
     legal = legal.filter((action) => action !== 'double' && action !== 'split');
   }
-  if (!legal.length) return 'stand';
+  const legalSet = legalActionSetForBot(legal);
+  if (!legalSet.size) return 'stand';
 
   const activeHandIndex = observation.bot?.activeHandIndex ?? 0;
   const hand = observation.bot?.hands?.[activeHandIndex] || null;
-  if (!hand) return legal.includes('stand') ? 'stand' : legal[0];
-  const splitTensEventActive = Boolean(observation.public?.splitTensEventActive);
-  if (splitTensEventActive && hand.splitEligible && hand.pairRank === '10' && legal.includes('split') && difficultyKey !== 'easy') {
-    const splitTensChance = difficultyKey === 'medium' ? 0.06 : 0.12;
-    if (secureRandomFloat() < splitTensChance) return 'split';
-  }
+  if (!hand) return fallbackBotAction(legalSet, ['stand', 'hit']);
   const opponentUpCard = observation.opponent?.hands?.[0]?.upcards?.[0] || null;
-  const opponentUpCardTotal = opponentUpCard ? cardValue(opponentUpCard) : 10;
-  if (legal.includes('surrender') && botShouldSurrenderOpeningHand(observation, hand, opponentUpCardTotal, difficultyKey)) {
-    return 'surrender';
-  }
-  let ideal = basicStrategyActionFromObservation(hand, opponentUpCardTotal);
-  if (!legal.includes(ideal)) ideal = legal[0];
-  const aggression = botAggressionBias();
-  if (difficultyKey !== 'easy') {
-    if (legal.includes('double') && hand.total >= 9 && hand.total <= 11 && hand.actionCount <= 1) {
-      const pressureDoubleChance = difficultyKey === 'medium'
-        ? (0.22 + (aggression * 0.2))
-        : (0.34 + (aggression * 0.22));
-      if (secureRandomFloat() < pressureDoubleChance) return 'double';
+  const dealerUp = normalizeDealerUpcardValue(opponentUpCard ? cardValue(opponentUpCard) : 10);
+  const strategy = basicStrategyActionFromObservation(hand, dealerUp, {
+    legalSet,
+    allowSurrender: policy.allowSurrender,
+    allowSplitTens: policy.allowSplitTens,
+    splitTensEventActive: Boolean(observation?.public?.splitTensEventActive),
+    strictDouble: policy.strictDouble
+  });
+
+  let selectedAction = chooseLegalBotAction(legalSet, strategy.action);
+  if (!policy.deterministic) {
+    if (secureRandomFloat() > policy.accuracy) {
+      const alternatives = [...legalSet].filter((action) => action !== selectedAction && action !== 'surrender');
+      if (alternatives.length) {
+        selectedAction = alternatives[randomIntInclusive(0, alternatives.length - 1)];
+      }
     }
-    if (legal.includes('split') && hand.splitEligible && hand.pairRank && hand.pairRank !== '10') {
-      const pressureSplitChance = difficultyKey === 'medium'
-        ? (0.14 + (aggression * 0.16))
-        : (0.22 + (aggression * 0.18));
-      if (secureRandomFloat() < pressureSplitChance && ['A', '8', '9', '7', '6'].includes(hand.pairRank)) return 'split';
+    const pairRank = normalizePairRankForStrategy(hand);
+    if (
+      policy.allowSplitTens &&
+      Boolean(observation?.public?.splitTensEventActive) &&
+      pairRank === '10' &&
+      legalSet.has('split') &&
+      secureRandomFloat() < policy.splitTensChance
+    ) {
+      selectedAction = 'split';
     }
   }
-  const accuracyBase = difficultyKey === 'easy' ? 0.45 : difficultyKey === 'medium' ? 0.75 : 0.94;
-  const adaptiveAccuracy = difficultyKey === 'easy'
-    ? accuracyBase
-    : Math.max(0.55, Math.min(0.98, accuracyBase + ((aggression - 0.5) * (difficultyKey === 'normal' ? 0.12 : 0.08))));
-  const accuracy = adaptiveAccuracy;
-  if (secureRandomFloat() <= accuracy) return ideal;
 
-  const alternatives = legal.filter((a) => a !== ideal && a !== 'surrender');
-  if (!alternatives.length) return ideal;
-  return alternatives[randomIntInclusive(0, alternatives.length - 1)];
-}
+  const finalAction = applyBotHardSafetyRules({
+    hand,
+    dealerUp,
+    selectedAction,
+    legalSet
+  });
 
-function basicStrategyActionFromObservation(hand, up) {
-  const total = hand.total || 0;
-  if (hand.splitEligible && hand.pairRank) {
-    const r = hand.pairRank;
-    if (r === 'A' || r === '8') return 'split';
-    if (r === '9' && ![7, 10, 11].includes(up)) return 'split';
-    if (r === '7' && up <= 7) return 'split';
-    if (r === '6' && up >= 2 && up <= 6) return 'split';
-    if ((r === '2' || r === '3') && up >= 2 && up <= 7) return 'split';
-    if (r === '4' && (up === 5 || up === 6)) return 'split';
+  if (BOT_DECISION_DEBUG) {
+    // eslint-disable-next-line no-console
+    console.log('[bot-decision]', JSON.stringify({
+      policy: policy.key,
+      difficulty: difficultyKey,
+      dealerUp,
+      hand: {
+        total: hand.total,
+        isSoft: Boolean(hand.isSoft),
+        pairRank: hand.pairRank || null,
+        actionCount: hand.actionCount || 0,
+        hitCount: hand.hitCount || 0,
+        doubleCount: hand.doubleCount || 0
+      },
+      legalActions: [...legalSet],
+      strategyAction: strategy.action,
+      strategyRule: strategy.rule,
+      finalAction
+    }));
   }
 
-  if (hand.isSoft) {
-    if (total >= 19) return 'stand';
-    if (total === 18) return up >= 9 || up === 11 ? 'hit' : 'stand';
-    if (total === 17 || total === 16) return up >= 4 && up <= 6 ? 'double' : 'hit';
-    if (total === 15 || total === 14) return up >= 4 && up <= 6 ? 'double' : 'hit';
-    if (total === 13 || total === 12) return up >= 5 && up <= 6 ? 'double' : 'hit';
-  }
-
-  if (total >= 17) return 'stand';
-  if (total >= 13 && total <= 16) return up >= 7 ? 'hit' : 'stand';
-  if (total === 12) return up >= 4 && up <= 6 ? 'stand' : 'hit';
-  if (total === 11) return 'double';
-  if (total === 10) return up <= 9 ? 'double' : 'hit';
-  if (total === 9) return up >= 3 && up <= 6 ? 'double' : 'hit';
-  return 'hit';
+  return finalAction;
 }
 
 function chooseBotPressureDecisionFromObservation(observation, difficulty = 'normal') {
@@ -9505,5 +9683,7 @@ export {
   recomputeTitleUnlocks,
   sampleBlackjackFrequency,
   getBotObservation,
-  chooseBotActionFromObservation
+  chooseBotActionFromObservation,
+  xpWinAmountForMainBet,
+  xpLossAmountForMainBet
 };

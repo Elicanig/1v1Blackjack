@@ -34,7 +34,8 @@ import {
   streakCountsAfterOutcome,
   matchWinStreakAfterOutcome,
   getBotObservation,
-  chooseBotActionFromObservation
+  chooseBotActionFromObservation,
+  xpWinAmountForMainBet
 } from '../server.js';
 
 function card(rank, suit = 'H') {
@@ -1322,6 +1323,130 @@ test('41n easy bots never choose split/double while normal and medium can', () =
     const action = chooseBotActionFromObservation(withEasyFallback, 'easy');
     assert.equal(action === 'double' || action === 'split', false);
   }
+});
+
+function dealerRankFromUpcard(value = 10) {
+  const raw = String(value || '').trim().toUpperCase();
+  if (raw === 'A' || raw === '11') return 'A';
+  const numeric = Math.max(2, Math.min(10, Math.floor(Number(raw) || 10)));
+  return String(numeric);
+}
+
+function makeStrategyObservation({
+  total = 16,
+  isSoft = false,
+  allowedActions = ['hit', 'stand', 'double', 'split', 'surrender'],
+  dealerUp = 10,
+  splitEligible = false,
+  pairRank = null,
+  matchType = 'HIGH_ROLLER',
+  baseBet = 2500,
+  actionCount = 0,
+  hitCount = 0,
+  doubleCount = 0
+} = {}) {
+  return {
+    phase: PHASES.ACTION_TURN,
+    allowedActions,
+    bot: {
+      activeHandIndex: 0,
+      hands: [{
+        total,
+        isSoft,
+        splitEligible,
+        pairRank,
+        actionCount,
+        hitCount,
+        doubleCount
+      }]
+    },
+    opponent: {
+      hands: [{ upcards: [{ rank: dealerRankFromUpcard(dealerUp), suit: 'S' }] }]
+    },
+    public: {
+      baseBet,
+      matchType,
+      splitTensEventActive: false
+    }
+  };
+}
+
+test('41o High Roller hard 19 always stands', () => {
+  const observation = makeStrategyObservation({
+    total: 19,
+    isSoft: false,
+    dealerUp: 6,
+    allowedActions: ['hit', 'stand', 'double']
+  });
+  assert.equal(chooseBotActionFromObservation(observation, 'normal'), 'stand');
+});
+
+test('41p High Roller hard 17 never doubles', () => {
+  const observation = makeStrategyObservation({
+    total: 17,
+    isSoft: false,
+    dealerUp: 5,
+    allowedActions: ['hit', 'stand', 'double']
+  });
+  assert.equal(chooseBotActionFromObservation(observation, 'normal'), 'stand');
+});
+
+test('41q High Roller hard 14 vs dealer 10 hits', () => {
+  const observation = makeStrategyObservation({
+    total: 14,
+    isSoft: false,
+    dealerUp: 10,
+    allowedActions: ['hit', 'stand']
+  });
+  assert.equal(chooseBotActionFromObservation(observation, 'normal'), 'hit');
+});
+
+test('41r High Roller hard 16 vs dealer 7 hits', () => {
+  const observation = makeStrategyObservation({
+    total: 16,
+    isSoft: false,
+    dealerUp: 7,
+    allowedActions: ['hit', 'stand']
+  });
+  assert.equal(chooseBotActionFromObservation(observation, 'normal'), 'hit');
+});
+
+test('41s High Roller canonical strategy samples are stable', () => {
+  const hard12v2 = makeStrategyObservation({ total: 12, isSoft: false, dealerUp: 2, allowedActions: ['hit', 'stand'] });
+  const hard12v3 = makeStrategyObservation({ total: 12, isSoft: false, dealerUp: 3, allowedActions: ['hit', 'stand'] });
+  const hard11vA = makeStrategyObservation({ total: 11, isSoft: false, dealerUp: 'A', allowedActions: ['hit', 'stand', 'double'] });
+  const soft18vA = makeStrategyObservation({ total: 18, isSoft: true, dealerUp: 'A', allowedActions: ['hit', 'stand', 'double'] });
+  const pair8 = makeStrategyObservation({ total: 16, isSoft: false, dealerUp: 10, splitEligible: true, pairRank: '8', allowedActions: ['hit', 'stand', 'split'] });
+  const pairA = makeStrategyObservation({ total: 12, isSoft: true, dealerUp: 6, splitEligible: true, pairRank: 'A', allowedActions: ['hit', 'stand', 'split'] });
+
+  assert.equal(chooseBotActionFromObservation(hard12v2, 'normal'), 'hit');
+  assert.equal(chooseBotActionFromObservation(hard12v3, 'normal'), 'hit');
+  assert.equal(chooseBotActionFromObservation(hard11vA, 'normal'), 'double');
+  assert.equal(chooseBotActionFromObservation(soft18vA, 'normal'), 'hit');
+  assert.equal(chooseBotActionFromObservation(pair8, 'normal'), 'split');
+  assert.equal(chooseBotActionFromObservation(pairA, 'normal'), 'split');
+});
+
+test('41t High Roller does not split tens by default', () => {
+  const observation = makeStrategyObservation({
+    total: 20,
+    isSoft: false,
+    dealerUp: 6,
+    splitEligible: true,
+    pairRank: '10',
+    allowedActions: ['hit', 'stand', 'split']
+  });
+  assert.equal(chooseBotActionFromObservation(observation, 'normal'), 'stand');
+});
+
+test('41u XP scaling gives meaningful progression for high bets', () => {
+  const low = xpWinAmountForMainBet({ isPvp: false, betAmount: 50 });
+  const mid = xpWinAmountForMainBet({ isPvp: false, betAmount: 500 });
+  const high = xpWinAmountForMainBet({ isPvp: false, betAmount: 5000 });
+  assert.equal(low > 0, true);
+  assert.equal(mid > low, true);
+  assert.equal(high > mid, true);
+  assert.equal(high >= 150 && high <= 250, true);
 });
 
 test('42 practice matches do not advance challenge progress, real matches (including bot) do', () => {
