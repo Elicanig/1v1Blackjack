@@ -57,6 +57,13 @@ const RANKED_PER_GAME_LOSS_ELO_MIN = 9;
 const RANKED_PER_GAME_LOSS_ELO_MAX = 14;
 const RANKED_TEST_WIN_ELO_DELTA = 35;
 const RANKED_TEST_LOSS_ELO_DELTA = 11;
+const RANKED_RANK_FLOORS = Object.freeze({
+  BRONZE: 0,
+  SILVER: 1200,
+  GOLD: 1400,
+  DIAMOND: 1600,
+  LEGENDARY: 1850
+});
 const RANKED_MATCH_MAX_ELO_GAP = 220;
 const RANKED_QUEUE_TIMEOUT_MS = 60_000;
 const RANKED_SERIES_TARGET_GAMES = 9;
@@ -2826,17 +2833,16 @@ async function processRankedQueue() {
       const userB = getUserById(b.userId);
       if (!userB || userA.id === userB.id) continue;
       if (Math.abs((a.elo || RANKED_BASE_ELO) - (b.elo || RANKED_BASE_ELO)) > RANKED_MATCH_MAX_ELO_GAP) continue;
-      if (a.rankTier !== b.rankTier) continue;
-      if (Math.floor(Number(a.fixedBet) || 0) !== Math.floor(Number(b.fixedBet) || 0)) continue;
-      if (Math.floor(Number(userA.chips) || 0) < Math.floor(Number(a.fixedBet) || 0)) continue;
-      if (Math.floor(Number(userB.chips) || 0) < Math.floor(Number(b.fixedBet) || 0)) continue;
+      const matchupStake = rankedSeriesStakeForMatchup(a, b);
+      if (Math.floor(Number(userA.chips) || 0) < matchupStake) continue;
+      if (Math.floor(Number(userB.chips) || 0) < matchupStake) continue;
       foundIndex = j;
       break;
     }
     if (foundIndex === -1) continue;
     const b = rankedQueue[foundIndex];
     const userB = getUserById(b.userId);
-    const fixedBet = Math.max(1, Math.floor(Number(a.fixedBet || b.fixedBet) || 0));
+    const fixedBet = rankedSeriesStakeForMatchup(a, b);
     rankedQueue.splice(foundIndex, 1);
     rankedQueue.splice(i, 1);
     rankedQueueByUser.delete(a.userId);
@@ -2870,7 +2876,7 @@ async function processRankedQueue() {
       matchId: match.id,
       userA: userA.id,
       userB: userB.id,
-      rankTier: a.rankTier,
+      rankTier: `${a.rankTier || 'UNKNOWN'}_vs_${b.rankTier || 'UNKNOWN'}`,
       fixedBet
     });
     matchedEntries.push({ userId: userA.id, payload: buildRankedFoundPayload(match, userA.id, fixedBet) });
@@ -3205,7 +3211,7 @@ function rankedSeriesDeltaForOutcome({
     ? (won ? Math.abs(parsedMagnitude) : -Math.abs(parsedMagnitude))
     : fallbackDelta;
   const lossSoftener = clampedDelta < 0 ? rankedLossSoftenerForTier(rankTierKey || rankedTierFromElo(startElo).key) : 1;
-  const finalDelta = clampedDelta;
+  const finalDelta = won ? Math.max(1, clampedDelta) : Math.min(-1, clampedDelta);
   return {
     startElo,
     oppElo,
@@ -3220,57 +3226,67 @@ function rankedSeriesDeltaForOutcome({
   };
 }
 
-function applyRankedPerGameElo({
-  winnerId = null,
-  loserId = null,
-  p1Id = null,
-  p2Id = null
-} = {}) {
-  if (!winnerId || !loserId || !p1Id || !p2Id) return null;
-  const p1User = getUserById(p1Id);
-  const p2User = getUserById(p2Id);
-  if (!p1User || !p2User) return null;
+function rankedFloorForTier(rankTierKey) {
+  const safeTier = String(rankTierKey || '').trim().toUpperCase();
+  if (Number.isFinite(Number(RANKED_RANK_FLOORS[safeTier]))) {
+    return Math.max(0, Math.floor(Number(RANKED_RANK_FLOORS[safeTier]) || 0));
+  }
+  const tierMeta = rankedTierByKey(safeTier);
+  if (tierMeta && Number.isFinite(Number(tierMeta.min))) {
+    return Math.max(0, Math.floor(Number(tierMeta.min) || 0));
+  }
+  return 0;
+}
 
-  ensureRankedState(p1User);
-  ensureRankedState(p2User);
-
-  const beforeByPlayer = {
-    [p1Id]: normalizeRankedElo(p1User.rankedElo),
-    [p2Id]: normalizeRankedElo(p2User.rankedElo)
+function enforceSeriesOutcomeDeltaSign(seriesId, playerId, outcome, proposedDelta) {
+  const safeOutcome = String(outcome || '').trim().toLowerCase();
+  const safeDelta = Math.floor(Number(proposedDelta) || 0);
+  const invalid = (safeOutcome === 'win' && safeDelta <= 0) || (safeOutcome === 'loss' && safeDelta >= 0);
+  if (!invalid) return safeDelta;
+  const normalized = safeOutcome === 'win'
+    ? Math.max(1, Math.abs(safeDelta) || RANKED_TEST_WIN_ELO_DELTA)
+    : -Math.max(1, Math.abs(safeDelta) || RANKED_TEST_LOSS_ELO_DELTA);
+  const payload = {
+    seriesId: seriesId || null,
+    playerId: playerId || null,
+    outcome: safeOutcome,
+    proposedDelta: safeDelta,
+    normalizedDelta: normalized
   };
+  if (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development') {
+    throw new Error(`[ranked-series-elo-sign] ${JSON.stringify(payload)}`);
+  }
+  // eslint-disable-next-line no-console
+  console.error('[ranked-series-elo-sign]', JSON.stringify(payload));
+  return normalized;
+}
 
-  const winnerDelta = rankedSeriesDeltaForOutcome({
-    playerElo: beforeByPlayer[winnerId],
-    opponentElo: beforeByPlayer[loserId],
-    won: true,
-    rankTierKey: rankedTierFromElo(beforeByPlayer[winnerId]).key
-  }).finalDelta;
-  const loserDelta = rankedSeriesDeltaForOutcome({
-    playerElo: beforeByPlayer[loserId],
-    opponentElo: beforeByPlayer[winnerId],
-    won: false,
-    rankTierKey: rankedTierFromElo(beforeByPlayer[loserId]).key
-  }).finalDelta;
+function rankedSeriesStakeForMatchup(entryA, entryB) {
+  const tierA = rankedTierByKey(entryA?.rankTier);
+  const tierB = rankedTierByKey(entryB?.rankTier);
+  if (tierA && tierB) {
+    const lowerTier = tierA.min <= tierB.min ? tierA : tierB;
+    const lowerStake = Math.max(1, Math.floor(Number(lowerTier?.bets?.min) || 0));
+    if (lowerStake > 0) return lowerStake;
+  }
+  const fixedA = Math.max(1, Math.floor(Number(entryA?.fixedBet) || 0));
+  const fixedB = Math.max(1, Math.floor(Number(entryB?.fixedBet) || 0));
+  return Math.max(1, Math.min(fixedA, fixedB));
+}
 
-  const deltaByPlayer = {
-    [winnerId]: Math.floor(Number(winnerDelta) || 0),
-    [loserId]: Math.floor(Number(loserDelta) || 0)
-  };
-  if (!Number.isFinite(Number(deltaByPlayer[p1Id]))) deltaByPlayer[p1Id] = 0;
-  if (!Number.isFinite(Number(deltaByPlayer[p2Id]))) deltaByPlayer[p2Id] = 0;
-
-  p1User.rankedElo = Math.max(0, beforeByPlayer[p1Id] + deltaByPlayer[p1Id]);
-  p2User.rankedElo = Math.max(0, beforeByPlayer[p2Id] + deltaByPlayer[p2Id]);
-  ensureRankedState(p1User);
-  ensureRankedState(p2User);
-
+function applyRankedLossFloorClamp(currentElo, lossDelta, rankTierKey) {
+  const startElo = normalizeRankedElo(currentElo);
+  const rawLoss = Math.min(-1, Math.floor(Number(lossDelta) || 0));
+  const floor = rankedFloorForTier(rankTierKey || rankedTierFromElo(startElo).key);
+  const rawAfter = startElo + rawLoss;
+  let clampedAfter = Math.max(floor, rawAfter);
+  if (clampedAfter > startElo) clampedAfter = startElo;
   return {
-    deltaByPlayer,
-    beforeByPlayer,
-    afterByPlayer: {
-      [p1Id]: p1User.rankedElo,
-      [p2Id]: p2User.rankedElo
-    }
+    startElo,
+    rankFloor: floor,
+    rawLossDelta: rawLoss,
+    endElo: clampedAfter,
+    finalDelta: clampedAfter - startElo
   };
 }
 
@@ -3776,14 +3792,64 @@ function finalizeRankedSeriesElo(series, {
   }
   const p1Id = series.p1;
   const p2Id = series.p2;
+  const participantIds = new Set([p1Id, p2Id]);
+  if (!participantIds.has(winnerId) || !participantIds.has(loserId) || winnerId === loserId) return null;
   const user1 = getUserById(p1Id);
   const user2 = getUserById(p2Id);
   if (!user1 || !user2) return null;
   ensureRankedState(user1);
   ensureRankedState(user2);
 
-  const startElo1 = normalizeRankedElo(series.p1EloStart ?? user1.rankedElo);
-  const startElo2 = normalizeRankedElo(series.p2EloStart ?? user2.rankedElo);
+  const startElo1 = normalizeRankedElo(user1.rankedElo);
+  const startElo2 = normalizeRankedElo(user2.rankedElo);
+  const winnerIsP1 = winnerId === p1Id;
+  const winnerUser = winnerIsP1 ? user1 : user2;
+  const loserUser = loserId === p1Id ? user1 : user2;
+  const winnerStartElo = winnerIsP1 ? startElo1 : startElo2;
+  const loserStartElo = loserId === p1Id ? startElo1 : startElo2;
+  const winnerTierKey = String(winnerUser?.rankTier || rankedTierFromElo(winnerStartElo).key).trim().toUpperCase();
+  const loserTierKey = String(loserUser?.rankTier || rankedTierFromElo(loserStartElo).key).trim().toUpperCase();
+  const winnerCalc = rankedSeriesDeltaForOutcome({
+    playerElo: winnerStartElo,
+    opponentElo: loserStartElo,
+    won: true,
+    rankTierKey: winnerTierKey
+  });
+  let winnerDelta = enforceSeriesOutcomeDeltaSign(series.id, winnerId, 'win', winnerCalc.finalDelta);
+
+  const loserCalc = rankedSeriesDeltaForOutcome({
+    playerElo: loserStartElo,
+    opponentElo: winnerStartElo,
+    won: false,
+    rankTierKey: loserTierKey
+  });
+  const rawLoserDelta = enforceSeriesOutcomeDeltaSign(series.id, loserId, 'loss', loserCalc.finalDelta);
+  const loserClamp = applyRankedLossFloorClamp(loserStartElo, rawLoserDelta, loserTierKey);
+  let loserDelta = Math.floor(Number(loserClamp.finalDelta) || 0);
+  if (loserDelta > 0) {
+    const payload = {
+      seriesId: series.id,
+      loserId,
+      loserStartElo,
+      rawLoserDelta,
+      rankFloor: loserClamp.rankFloor,
+      clampedLoserDelta: loserDelta
+    };
+    if (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development') {
+      throw new Error(`[ranked-series-elo-loss-positive] ${JSON.stringify(payload)}`);
+    }
+    // eslint-disable-next-line no-console
+    console.error('[ranked-series-elo-loss-positive]', JSON.stringify(payload));
+    loserDelta = 0;
+  }
+  winnerDelta = Math.max(1, Math.floor(Number(winnerDelta) || 0));
+
+  const deltaByPlayer = {
+    [p1Id]: winnerIsP1 ? winnerDelta : loserDelta,
+    [p2Id]: winnerIsP1 ? loserDelta : winnerDelta
+  };
+  user1.rankedElo = Math.max(0, startElo1 + deltaByPlayer[p1Id]);
+  user2.rankedElo = Math.max(0, startElo2 + deltaByPlayer[p2Id]);
   const endElo1 = normalizeRankedElo(user1.rankedElo);
   const endElo2 = normalizeRankedElo(user2.rankedElo);
   const delta1 = endElo1 - startElo1;
@@ -3814,6 +3880,12 @@ function finalizeRankedSeriesElo(series, {
     finalizedAt: now,
     p1Id,
     p2Id,
+    perSeriesRanges: {
+      winMin: RANKED_PER_GAME_WIN_ELO_MIN,
+      winMax: RANKED_PER_GAME_WIN_ELO_MAX,
+      lossMinAbs: RANKED_PER_GAME_LOSS_ELO_MIN,
+      lossMaxAbs: RANKED_PER_GAME_LOSS_ELO_MAX
+    },
     perGameRanges: {
       winMin: RANKED_PER_GAME_WIN_ELO_MIN,
       winMax: RANKED_PER_GAME_WIN_ELO_MAX,
@@ -3825,26 +3897,28 @@ function finalizeRankedSeriesElo(series, {
     p1: {
       startElo: startElo1,
       oppElo: startElo2,
-      expected: null,
+      expected: Number(Number((winnerId === p1Id ? winnerCalc.expected : loserCalc.expected) || 0).toFixed(6)),
       actual: winnerId === p1Id ? 1 : 0,
-      k: null,
-      rawDelta: null,
-      clampedDelta: null,
-      lossSoftener: null,
+      k: winnerId === p1Id ? winnerCalc.k : loserCalc.k,
+      rawDelta: Number(Number((winnerId === p1Id ? winnerCalc.rawDelta : loserCalc.rawDelta) || 0).toFixed(6)),
+      clampedDelta: winnerId === p1Id ? winnerCalc.clampedDelta : loserCalc.clampedDelta,
+      lossSoftener: winnerId === p1Id ? winnerCalc.lossSoftener : loserCalc.lossSoftener,
       finalDelta: delta1,
+      rankFloor: rankedFloorForTier(String(user1.rankTier || rankedTierFromElo(startElo1).key).toUpperCase()),
       aggregateGameDelta: aggregateDeltaP1,
       endElo: endElo1
     },
     p2: {
       startElo: startElo2,
       oppElo: startElo1,
-      expected: null,
+      expected: Number(Number((winnerId === p2Id ? winnerCalc.expected : loserCalc.expected) || 0).toFixed(6)),
       actual: winnerId === p2Id ? 1 : 0,
-      k: null,
-      rawDelta: null,
-      clampedDelta: null,
-      lossSoftener: null,
+      k: winnerId === p2Id ? winnerCalc.k : loserCalc.k,
+      rawDelta: Number(Number((winnerId === p2Id ? winnerCalc.rawDelta : loserCalc.rawDelta) || 0).toFixed(6)),
+      clampedDelta: winnerId === p2Id ? winnerCalc.clampedDelta : loserCalc.clampedDelta,
+      lossSoftener: winnerId === p2Id ? winnerCalc.lossSoftener : loserCalc.lossSoftener,
       finalDelta: delta2,
+      rankFloor: rankedFloorForTier(String(user2.rankTier || rankedTierFromElo(startElo2).key).toUpperCase()),
       aggregateGameDelta: aggregateDeltaP2,
       endElo: endElo2
     }
@@ -3861,6 +3935,12 @@ function finalizeRankedSeriesElo(series, {
       winnerId,
       loserId,
       reason,
+      p1EloBefore: startElo1,
+      p1EloAfter: endElo1,
+      p1Delta: delta1,
+      p2EloBefore: startElo2,
+      p2EloAfter: endElo2,
+      p2Delta: delta2,
       p1: seriesElo.p1,
       p2: seriesElo.p2
     }));
@@ -5267,22 +5347,12 @@ function resolveRound(match) {
 
   let rankedSeriesUpdate = null;
   let rankedSeriesResultByPlayer = null;
-  let rankedPerGameEloResult = null;
   if (rankedRound) {
-    if (winnerId && loserId) {
-      rankedPerGameEloResult = applyRankedPerGameElo({
-        winnerId,
-        loserId,
-        p1Id: aId,
-        p2Id: bId
-      });
-    }
     ensureRankedSeriesForMatch(match, { createIfMissing: true });
     rankedSeriesUpdate = recordRankedSeriesGame(match, {
       winnerId,
       loserId,
-      netByPlayer: chipsDelta,
-      eloResult: rankedPerGameEloResult
+      netByPlayer: chipsDelta
     });
     if (rankedSeriesUpdate?.complete && rankedSeriesUpdate?.winnerId) {
       finalizeRankedSeriesElo(rankedSeriesUpdate.series, {
@@ -6818,12 +6888,6 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
 
   if (!botMatch && opponentId && rankedMatch && leaverUser && opponentUser) {
     ensureRankedSeriesForMatch(match, { createIfMissing: true });
-    const rankedForfeitEloResult = applyRankedPerGameElo({
-      winnerId: opponentId,
-      loserId: leaverId,
-      p1Id: match.playerIds[0],
-      p2Id: match.playerIds[1]
-    });
     const netByPlayer = {
       [leaverId]: -Math.max(0, Math.floor(Number(chargedAmount) || 0)),
       [opponentId]: Math.max(0, Math.floor(Number(chargedAmount) || 0))
@@ -6832,7 +6896,6 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
       winnerId: opponentId,
       loserId: leaverId,
       netByPlayer,
-      eloResult: rankedForfeitEloResult,
       forfeit: true
     });
     const finalizedSeries = finalizeRankedSeriesByForfeit(match, opponentId, leaverId) || seriesUpdate?.series;
@@ -8467,6 +8530,9 @@ export {
   rankedKFactorForElo,
   rankedEloDeltaForGame,
   rankedSeriesDeltaForOutcome,
+  rankedFloorForTier,
+  applyRankedLossFloorClamp,
+  rankedSeriesStakeForMatchup,
   finalizeRankedSeriesElo,
   streakCountsAfterOutcome,
   matchWinStreakAfterOutcome,

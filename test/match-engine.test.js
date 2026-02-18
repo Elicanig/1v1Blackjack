@@ -27,6 +27,9 @@ import {
   rankedKFactorForElo,
   rankedEloDeltaForGame,
   rankedSeriesDeltaForOutcome,
+  rankedFloorForTier,
+  applyRankedLossFloorClamp,
+  rankedSeriesStakeForMatchup,
   streakCountsAfterOutcome,
   matchWinStreakAfterOutcome,
   getBotObservation,
@@ -709,6 +712,45 @@ test('39bg series Elo win/loss ranges hold regardless of elo gap', () => {
   assert.equal(favoredWin.finalDelta <= 39, true);
   assert.equal(expectedLoss.finalDelta <= -9, true);
   assert.equal(expectedLoss.finalDelta >= -14, true);
+});
+
+test('39bh series Elo uses deterministic deltas in test env', () => {
+  const seriesWin = rankedSeriesDeltaForOutcome({
+    playerElo: 1400,
+    opponentElo: 1400,
+    won: true
+  });
+  const seriesLoss = rankedSeriesDeltaForOutcome({
+    playerElo: 1400,
+    opponentElo: 1400,
+    won: false
+  });
+  assert.equal(seriesWin.finalDelta, 35);
+  assert.equal(seriesLoss.finalDelta, -11);
+});
+
+test('39bi ranked loss floor clamp never drops below rank floor and never increases Elo', () => {
+  assert.equal(rankedFloorForTier('BRONZE'), 0);
+  assert.equal(rankedFloorForTier('SILVER'), 1200);
+  const silverClamp = applyRankedLossFloorClamp(1205, -11, 'SILVER');
+  assert.equal(silverClamp.endElo, 1200);
+  assert.equal(silverClamp.finalDelta, -5);
+  const preFloorClamp = applyRankedLossFloorClamp(1180, -11, 'SILVER');
+  assert.equal(preFloorClamp.endElo, 1180);
+  assert.equal(preFloorClamp.finalDelta, 0);
+});
+
+test('39bj ranked mixed-tier matchup uses lower-rank stake', () => {
+  const bronzeVsSilver = rankedSeriesStakeForMatchup(
+    { rankTier: 'BRONZE', fixedBet: 50 },
+    { rankTier: 'SILVER', fixedBet: 100 }
+  );
+  const goldVsDiamond = rankedSeriesStakeForMatchup(
+    { rankTier: 'GOLD', fixedBet: 250 },
+    { rankTier: 'DIAMOND', fixedBet: 500 }
+  );
+  assert.equal(bronzeVsSilver, 50);
+  assert.equal(goldVsDiamond, 250);
 });
 
 test('39c double is allowed even if opponent may have to surrender pressure', () => {
