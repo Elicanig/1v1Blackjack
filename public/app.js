@@ -7221,6 +7221,7 @@ function renderPlayingCard(card, cardIndex = 0, options = {}) {
   const colorClass = isRed ? 'red' : 'black';
   return `
     <article class="playing-card face ${colorClass} deck-skin-${deckSkinToken}${cardClasses ? ` ${cardClasses}` : ''}"${styleAttr}${idAttr} aria-label="${card.rank} of ${suitLabel(card.suit)}"${ariaHidden}>
+      <div class="card-face-sheen" aria-hidden="true"></div>
       <div class="corner top">
         <span class="rank">${card.rank}</span>
         ${renderSuitIcon(card.suit, 'corner-suit')}
