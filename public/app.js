@@ -7074,6 +7074,42 @@ function renderRules() {
           </article>
         </div>
       </section>
+
+      <section class="card section rules-section-card">
+        <h3>Side Bets</h3>
+        <div class="rules-grid">
+          <article>
+            <h4>Availability & Round Flow</h4>
+            <ul class="rules-list">
+              <li>Side bets are currently available in non-ranked real-chip modes (disabled in Ranked and Practice).</li>
+              <li>Each round starts with a Side Bet Phase (up to 60 seconds).</li>
+              <li>During Side Bet Phase, the table is locked/greyed out and cards are not dealt yet.</li>
+              <li>Either player can press Done; if both press Done, the round starts immediately.</li>
+            </ul>
+          </article>
+          <article>
+            <h4>Stakes & Payouts</h4>
+            <ul class="rules-list">
+              <li>Each side bet costs exactly the confirmed round base bet amount.</li>
+              <li>You can enter multiple side bets in one round, and each one costs the full base bet amount.</li>
+              <li>Closest to 21: +1:2 profit (house-paid).</li>
+              <li>Blackjack this round: +10:1 profit (house-paid).</li>
+              <li>Perfect pair: +3:1 profit (house-paid).</li>
+              <li>Suited blackjack (natural blackjack, same suit): +50:1 profit (house-paid).</li>
+              <li>Bust bonus: +1:1 profit (house-paid).</li>
+            </ul>
+          </article>
+          <article>
+            <h4>Blackjack Race (H2H)</h4>
+            <ul class="rules-list">
+              <li>Blackjack Race is proposed by one player and accepted or declined by the other.</li>
+              <li>It pays 3:4 from the H2H pot (not from the house).</li>
+              <li>It persists across rounds until someone hits a natural blackjack first.</li>
+              <li>If a player leaves/disconnects mid-race, both race stakes are refunded.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
     </main>
   `;
   bindShellNav();
@@ -7199,19 +7235,20 @@ function renderPlayingCard(card, cardIndex = 0, options = {}) {
 }
 
 function renderDeckSkinPreviewCards(deckSkinToken = 'classic') {
-  const previewCards = [
-    { rank: 'A', suit: 'S' },
-    { rank: '10', suit: 'D' },
-    { rank: 'K', suit: 'H' }
-  ];
-  return previewCards
-    .map((card, index) => renderPlayingCard(card, index, {
+  const frontTenSpades = { rank: '10', suit: 'S' };
+  const backTenSpades = { hidden: true };
+  return [
+    renderPlayingCard(frontTenSpades, 0, {
       deckSkinToken,
-      skipAnimation: true,
-      extraClass: 'profile-preview-card-sample',
+      extraClass: 'profile-preview-card-sample profile-preview-card-front',
       ariaHidden: true
-    }))
-    .join('');
+    }),
+    renderPlayingCard(backTenSpades, 1, {
+      deckSkinToken,
+      extraClass: 'profile-preview-card-sample profile-preview-card-back',
+      ariaHidden: true
+    })
+  ].join('');
 }
 
 function sideBetCountdownSeconds(match) {

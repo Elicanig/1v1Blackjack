@@ -949,6 +949,7 @@ const lobbyToMatch = new Map();
 const disconnectTimers = new Map();
 const botTurnTimers = new Map();
 const botBetConfirmTimers = new Map();
+const botRaceAcceptTimers = new Map();
 const roundPhaseTimers = new Map();
 const afkTurnTimers = new Map();
 const emoteCooldownByUser = new Map();
@@ -4314,6 +4315,43 @@ function clearRoundPhaseTimer(matchId) {
   }
 }
 
+function clearBotRaceAcceptTimer(matchId) {
+  const timer = botRaceAcceptTimers.get(matchId);
+  if (timer) {
+    clearTimeout(timer);
+    botRaceAcceptTimers.delete(matchId);
+  }
+}
+
+function scheduleBotBlackjackRaceAutoAccept(match, botId) {
+  if (!match || !botId || !isBotPlayer(botId)) return;
+  clearBotRaceAcceptTimer(match.id);
+  const delayMs = randomIntInclusive(250, 750);
+  const timer = setTimeout(() => {
+    botRaceAcceptTimers.delete(match.id);
+    if (!matches.has(match.id)) return;
+    if (match.phase !== PHASES.SIDE_BET_PHASE) return;
+    const sideBets = match.round?.sideBets;
+    if (!sideBets?.enabled || sideBets.locked) return;
+    const race = ensureSideBetRace(match);
+    if (!race?.proposedBy || race.active) return;
+    if (race.proposedBy === botId) return;
+
+    const previousReady = Boolean(sideBets.readyByPlayer?.[botId]);
+    sideBets.readyByPlayer[botId] = false;
+    const result = applyBlackjackRaceAction(match, botId, 'accept');
+    if (result?.error) {
+      sideBets.readyByPlayer[botId] = previousReady;
+      return;
+    }
+    // Keep bot ready so human can still short-circuit the timer by pressing Done.
+    sideBets.readyByPlayer[botId] = true;
+    pushMatchState(match);
+    db.write();
+  }, delayMs);
+  botRaceAcceptTimers.set(match.id, timer);
+}
+
 function buildClientSideBetState(match, viewerId, opponentId) {
   const sideBets = match?.round?.sideBets;
   const race = ensureSideBetRace(match);
@@ -5205,6 +5243,7 @@ function finalizeSideBetPhase(match, { source = 'timer' } = {}) {
   match.round.sideBets = sideBets;
   sideBets.locked = true;
   sideBets.phaseEndsAt = sideBets.phaseEndsAt || nowIso();
+  clearBotRaceAcceptTimer(match.id);
   clearPendingRaceProposal(match);
   clearRoundPhaseTimer(match.id);
   beginActionPhase(match);
@@ -5213,6 +5252,7 @@ function finalizeSideBetPhase(match, { source = 'timer' } = {}) {
 
 function beginSideBetPhase(match) {
   if (!match?.round) return { error: 'Round missing' };
+  clearBotRaceAcceptTimer(match.id);
   const sideBets = match.round.sideBets || buildRoundSideBetState(match);
   match.round.sideBets = sideBets;
   if (!sideBets.enabled) {
@@ -5342,18 +5382,13 @@ function applyBlackjackRaceAction(match, playerId, action) {
     sideBets.readyByPlayer[playerId] = false;
 
     if (isBotPlayer(opponentId)) {
-      const difficulty = getBotDifficulty(match, opponentId);
-      const chance = difficulty === 'easy' ? 0.34 : difficulty === 'medium' ? 0.48 : 0.6;
-      const accepted = secureRandomFloat() <= chance;
-      const followUp = applyBlackjackRaceAction(match, opponentId, accepted ? 'accept' : 'decline');
-      if (followUp?.error && accepted) {
-        applyBlackjackRaceAction(match, opponentId, 'decline');
-      }
+      scheduleBotBlackjackRaceAutoAccept(match, opponentId);
     }
     return { ok: true, status: 'pending' };
   }
 
   if (normalized === 'accept') {
+    clearBotRaceAcceptTimer(match.id);
     if (!race.proposedBy) return { error: 'No Blackjack Race proposal to accept' };
     if (race.proposedBy === playerId) return { error: 'You cannot accept your own proposal' };
     const proposerId = race.proposedBy;
@@ -5385,6 +5420,7 @@ function applyBlackjackRaceAction(match, playerId, action) {
   }
 
   if (normalized === 'decline') {
+    clearBotRaceAcceptTimer(match.id);
     if (!race.proposedBy) return { error: 'No Blackjack Race proposal to decline' };
     if (race.proposedBy === playerId) return { error: 'You cannot decline your own proposal' };
     race.declinedBy = playerId;
@@ -5398,6 +5434,7 @@ function applyBlackjackRaceAction(match, playerId, action) {
   }
 
   if (normalized === 'cancel') {
+    clearBotRaceAcceptTimer(match.id);
     if (!race.proposedBy) return { error: 'No Blackjack Race proposal to cancel' };
     if (race.proposedBy !== playerId) return { error: 'Only the proposer can cancel this request' };
     race.proposedBy = null;
@@ -7640,6 +7677,7 @@ function emitLobbyUpdate(lobby) {
 
 function cleanupMatch(match) {
   clearRoundPhaseTimer(match.id);
+  clearBotRaceAcceptTimer(match.id);
   clearAfkTurnTimer(match.id);
   const timer = botTurnTimers.get(match.id);
   if (timer) {
