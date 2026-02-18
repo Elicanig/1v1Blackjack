@@ -2495,11 +2495,8 @@ select:focus-visible {
 .play-layout {
   grid-template-areas:
     "status"
-    "opponent"
-    "player"
-    "actions"
-    "details";
-  grid-template-rows: auto minmax(138px, 1fr) minmax(138px, 1fr) auto auto;
+    "stage";
+  grid-template-rows: auto minmax(0, 1fr);
   row-gap: 8px;
   min-height: 0;
   overflow: hidden;
@@ -2509,20 +2506,168 @@ select:focus-visible {
   grid-area: status;
 }
 
-.play-layout > .opponent-zone {
-  grid-area: opponent;
+.play-layout > .table-stage {
+  grid-area: stage;
 }
 
-.play-layout > .you-zone {
-  grid-area: player;
+.table-stage {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(200px, 230px) minmax(0, 1fr) minmax(200px, 230px);
+  gap: 10px;
 }
 
-.play-layout > .actions-panel {
-  grid-area: actions;
+.table-center {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(132px, 1fr) minmax(132px, 1fr) auto auto;
+  gap: 8px;
+  position: relative;
 }
 
-.play-layout > .match-details {
-  grid-area: details;
+.table-center.is-locked {
+  pointer-events: none;
+  filter: grayscale(0.32) saturate(0.74);
+  opacity: 0.74;
+}
+
+.table-lock-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  background: rgba(8, 20, 16, 0.56);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(236, 241, 233, 0.14);
+  color: #dae8df;
+  letter-spacing: 0.02em;
+  font-weight: 700;
+  z-index: 7;
+}
+
+.side-bet-rail {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.side-bet-rail-panel {
+  min-height: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(236, 241, 233, 0.16);
+  background: linear-gradient(180deg, rgba(10, 22, 18, 0.75), rgba(9, 18, 15, 0.72));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 18px rgba(0, 0, 0, 0.2);
+  padding: 8px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 8px;
+}
+
+.side-bet-rail-head {
+  display: grid;
+  gap: 2px;
+}
+
+.side-bet-phase-controls {
+  display: grid;
+  gap: 5px;
+}
+
+.side-bet-ready-line {
+  font-size: 0.68rem;
+}
+
+.side-bet-tile-list {
+  min-height: 0;
+  display: grid;
+  gap: 7px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.side-bet-tile {
+  border-radius: 10px;
+  border: 1px solid rgba(236, 241, 233, 0.14);
+  background: linear-gradient(180deg, rgba(14, 29, 24, 0.74), rgba(11, 21, 18, 0.64));
+  padding: 8px;
+  display: grid;
+  gap: 5px;
+}
+
+.side-bet-tile.is-active {
+  border-color: rgba(205, 167, 100, 0.44);
+  box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.2) inset;
+}
+
+.side-bet-tile header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.side-bet-detail {
+  font-size: 0.69rem;
+  line-height: 1.2;
+}
+
+.side-bet-status {
+  font-size: 0.68rem;
+}
+
+.side-bet-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.side-bet-actions button {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 0.74rem;
+}
+
+.side-bet-result {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid rgba(236, 241, 233, 0.2);
+  background: rgba(11, 23, 19, 0.72);
+  padding: 2px 8px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.side-bet-result.is-win {
+  color: #8ce8bf;
+  border-color: rgba(79, 196, 140, 0.46);
+  background: rgba(31, 83, 59, 0.42);
+}
+
+.side-bet-result.is-loss {
+  color: #f3b0ad;
+  border-color: rgba(214, 106, 99, 0.46);
+  background: rgba(83, 33, 30, 0.44);
+}
+
+.side-bet-result.is-push {
+  color: #e8d6ad;
+  border-color: rgba(205, 167, 100, 0.42);
+  background: rgba(63, 49, 24, 0.4);
+}
+
+.side-bet-race.is-attention {
+  animation: sideBetProposalPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes sideBetProposalPulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.18) inset; }
+  50% { box-shadow: 0 0 0 1px rgba(205, 167, 100, 0.34) inset, 0 0 16px rgba(205, 167, 100, 0.16); }
 }
 
 .betting-layout {
@@ -3134,9 +3279,9 @@ select:focus-visible {
   pointer-events: none;
   z-index: 1;
   background:
-    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.56), transparent 38%),
+    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.26), transparent 30%),
     radial-gradient(circle at 88% 92%, rgba(11, 25, 21, 0.07), transparent 42%);
-  opacity: 0.74;
+  opacity: 0.6;
 }
 
 .playing-card.face.deck-skin-classic {
@@ -3189,6 +3334,15 @@ select:focus-visible {
   background: linear-gradient(180deg, #2a343f 0%, #171f27 100%);
   border-color: rgba(168, 183, 199, 0.42);
   color: #f2f5f8;
+}
+
+.playing-card.face.deck-skin-obsidian::after,
+.playing-card.face.deck-skin-obsidian-luxe-ii::after,
+.playing-card.face.deck-skin-void-prism::after {
+  background:
+    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.14), transparent 24%),
+    radial-gradient(circle at 86% 90%, rgba(12, 26, 22, 0.14), transparent 40%);
+  opacity: 0.52;
 }
 
 .playing-card.face.deck-skin-obsidian.red {
@@ -3318,6 +3472,8 @@ select:focus-visible {
   align-items: center;
   line-height: 1;
   gap: 1px;
+  padding: 2px 3px;
+  border-radius: 8px;
   font-family: var(--font-card);
   font-weight: 700;
   font-size: clamp(0.66rem, 1.6vw, 0.86rem);
@@ -3337,9 +3493,22 @@ select:focus-visible {
 
 .playing-card .rank {
   font-family: var(--font-card);
+  font-weight: 800;
   font-size: clamp(0.72rem, 1.72vw, 0.96rem);
-  letter-spacing: 0.01em;
-  text-shadow: 0 0 0 rgba(0, 0, 0, 0.25), 0 0.5px 0 rgba(255, 255, 255, 0.5);
+  letter-spacing: 0.015em;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.44), 0 0.5px 0 rgba(255, 255, 255, 0.45);
+}
+
+.playing-card.face.deck-skin-obsidian .corner,
+.playing-card.face.deck-skin-obsidian-luxe-ii .corner,
+.playing-card.face.deck-skin-void-prism .corner {
+  background: linear-gradient(180deg, rgba(6, 12, 15, 0.55), rgba(8, 15, 12, 0.36));
+  border: 1px solid rgba(228, 235, 243, 0.22);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+}
+
+.playing-card.face.deck-skin-obsidian-luxe-ii .rank {
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.72), 0 0 7px rgba(255, 211, 140, 0.18);
 }
 
 .suit-icon {
@@ -3373,9 +3542,44 @@ select:focus-visible {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(132deg, rgba(255, 255, 255, 0.45), transparent 43%, rgba(255, 255, 255, 0.08));
+  background: linear-gradient(132deg, rgba(255, 255, 255, 0.18), transparent 43%, rgba(255, 255, 255, 0.03));
   mix-blend-mode: screen;
   z-index: 1;
+  opacity: 0.35;
+}
+
+.card-face-sheen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(16% 0, 100% 0, 100% 84%, 84% 100%, 0 100%, 0 16%);
+  background: linear-gradient(112deg, transparent 34%, rgba(255, 255, 255, 0.16) 48%, transparent 63%);
+  transform: translateX(-145%);
+  opacity: 0;
+  animation: cardFaceSheenSweep var(--sheen-cycle, 14s) ease-in-out var(--sheen-delay, 0s) infinite;
+}
+
+.playing-card.face.deck-skin-obsidian .card-face-sheen::after,
+.playing-card.face.deck-skin-obsidian-luxe-ii .card-face-sheen::after,
+.playing-card.face.deck-skin-void-prism .card-face-sheen::after {
+  background: linear-gradient(112deg, transparent 34%, rgba(242, 221, 185, 0.13) 48%, transparent 63%);
+}
+
+@keyframes cardFaceSheenSweep {
+  0%, 78% {
+    transform: translateX(-145%);
+    opacity: 0;
+  }
+  83% {
+    opacity: 0.14;
+  }
+  90% {
+    opacity: 0.1;
+  }
+  100% {
+    transform: translateX(145%);
+    opacity: 0;
+  }
 }
 
 .playing-card.hidden {
@@ -5561,12 +5765,27 @@ select:focus-visible {
   .play-layout {
     grid-template-areas:
       "status"
-      "opponent"
-      "player"
-      "actions"
-      "details";
-    grid-template-rows: auto minmax(132px, 1fr) minmax(132px, 1fr) auto auto;
+      "stage";
+    grid-template-rows: auto minmax(0, 1fr);
     row-gap: 8px;
+  }
+
+  .table-stage {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .table-center {
+    grid-template-rows: minmax(124px, 1fr) minmax(124px, 1fr) auto auto;
+  }
+
+  .side-bet-rail-panel {
+    grid-template-rows: auto auto auto;
+  }
+
+  .side-bet-tile-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow: visible;
   }
 
   .rules-strip {
@@ -5872,12 +6091,13 @@ select:focus-visible {
   .play-layout {
     grid-template-areas:
       "status"
-      "opponent"
-      "player"
-      "actions"
-      "details";
-    grid-template-rows: auto minmax(124px, 1fr) minmax(124px, 1fr) auto auto;
+      "stage";
+    grid-template-rows: auto minmax(0, 1fr);
     row-gap: 6px;
+  }
+
+  .table-center {
+    grid-template-rows: minmax(118px, 1fr) minmax(118px, 1fr) auto auto;
   }
 
   .match-zone {
@@ -5898,7 +6118,9 @@ select:focus-visible {
   .card-enter,
   .card-reveal,
   .card-shift,
+  .card-face-sheen::after,
   .attention-pulse,
+  .side-bet-race.is-attention,
   .quickplay-spinner,
   .match-shell::before,
   .match-shell::after,

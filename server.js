@@ -89,6 +89,7 @@ const BOT_ACTION_DELAY_MAX_MS = 1200;
 const BOT_FIRST_ACTION_DELAY_MIN_MS = 2000;
 const BOT_FIRST_ACTION_DELAY_MAX_MS = 3000;
 const ROUND_REVEAL_MS = 2200;
+const SIDE_BET_PHASE_MS = 7000;
 const PATCH_NOTES_CACHE_MS = 10 * 60 * 1000;
 const PATCH_REPO = 'Elicanig/1v1Blackjack';
 const FRIEND_INVITE_TTL_MS = 30 * 60 * 1000;
@@ -1100,6 +1101,7 @@ const BOT_ACCURACY = {
 const PHASES = {
   LOBBY: 'LOBBY',
   ROUND_INIT: 'ROUND_INIT',
+  SIDE_BET_PHASE: 'SIDE_BET_PHASE',
   DEAL: 'DEAL',
   ACTION_TURN: 'ACTION_TURN',
   PRESSURE_RESPONSE: 'PRESSURE_RESPONSE',
@@ -1152,6 +1154,31 @@ const RULES = {
   MAX_DOUBLES_PER_HAND: 3,
   ALL_IN_ON_INSUFFICIENT_BASE_BET: true
 };
+
+const SIDE_BET_KEYS = Object.freeze({
+  BLACKJACK_RACE: 'BLACKJACK_RACE',
+  CLOSEST_TO_21: 'CLOSEST_TO_21',
+  BLACKJACK_THIS_ROUND: 'BLACKJACK_THIS_ROUND',
+  PERFECT_PAIR: 'PERFECT_PAIR',
+  SUITED_BLACKJACK: 'SUITED_BLACKJACK',
+  BUST_BONUS: 'BUST_BONUS'
+});
+
+const PER_ROUND_SIDE_BET_KEYS = Object.freeze([
+  SIDE_BET_KEYS.CLOSEST_TO_21,
+  SIDE_BET_KEYS.BLACKJACK_THIS_ROUND,
+  SIDE_BET_KEYS.PERFECT_PAIR,
+  SIDE_BET_KEYS.SUITED_BLACKJACK,
+  SIDE_BET_KEYS.BUST_BONUS
+]);
+
+const SIDE_BET_PROFIT_MULTIPLIERS = Object.freeze({
+  [SIDE_BET_KEYS.CLOSEST_TO_21]: 0.5,
+  [SIDE_BET_KEYS.BLACKJACK_THIS_ROUND]: 10,
+  [SIDE_BET_KEYS.PERFECT_PAIR]: 3,
+  [SIDE_BET_KEYS.SUITED_BLACKJACK]: 50,
+  [SIDE_BET_KEYS.BUST_BONUS]: 1
+});
 
 function getBetLimitsForDifficulty(difficulty = 'normal') {
   return BOT_BET_LIMITS[difficulty] || BOT_BET_LIMITS.normal;
@@ -1228,6 +1255,137 @@ function isBotPlayer(playerId) {
 
 function isBotMatch(match) {
   return Boolean(match?.playerIds?.some((id) => isBotPlayer(id)));
+}
+
+function isRankedMatch(match) {
+  return String(match?.matchType || '').toUpperCase() === 'RANKED';
+}
+
+function sideBetsEnabledForMatch(match) {
+  if (!match) return false;
+  if (isRankedMatch(match)) return false;
+  // Keep practice/no-delta simple: no side bet economy simulation.
+  if (isPracticeMatch(match)) return false;
+  return true;
+}
+
+function sideBetStakeForRound(match) {
+  return Math.max(1, Math.floor(Number(match?.round?.baseBet) || BASE_BET));
+}
+
+function reservedMainStakeForSideBets(match, playerId) {
+  if (!isRealMatch(match) || isBotPlayer(playerId)) return 0;
+  const intendedBase = sideBetStakeForRound(match);
+  const baseline = Math.max(
+    0,
+    Math.floor(
+      Number(match?.round?.sideBets?.bankrollBaselineByPlayer?.[playerId]) ||
+      Number(getParticipantChips(match, playerId)) ||
+      0
+    )
+  );
+  return Math.min(intendedBase, baseline);
+}
+
+function canAffordSideBetIncrement(match, playerId, increment) {
+  if (!isRealMatch(match) || isBotPlayer(playerId)) return true;
+  const chips = Math.max(0, Math.floor(Number(getParticipantChips(match, playerId)) || 0));
+  const amount = Math.max(0, Math.floor(Number(increment) || 0));
+  const reserve = reservedMainStakeForSideBets(match, playerId);
+  return chips - amount >= reserve;
+}
+
+function sideBetTemplateByPlayer() {
+  return PER_ROUND_SIDE_BET_KEYS.reduce((acc, key) => {
+    acc[key] = { enabled: false, escrowed: 0, result: null };
+    return acc;
+  }, {});
+}
+
+function rankStrength(rank) {
+  if (rank === 'A') return 14;
+  if (rank === 'K') return 13;
+  if (rank === 'Q') return 12;
+  if (rank === 'J') return 11;
+  return Math.max(0, Math.floor(Number(rank) || 0));
+}
+
+function sideBetResultLabel(outcome, net) {
+  if (outcome === 'push') return 'PUSH';
+  const value = Math.max(0, Math.floor(Math.abs(Number(net) || 0)));
+  return `${Number(net) >= 0 ? '+' : '-'}${value}`;
+}
+
+function clearPendingRaceProposal(match) {
+  const race = ensureSideBetRace(match);
+  if (race.active) return;
+  race.proposedBy = null;
+  race.proposedAt = null;
+  race.acceptedBy = null;
+  race.acceptedAt = null;
+}
+
+function ensureSideBetRace(match) {
+  if (!match) return null;
+  const [p1, p2] = match.playerIds || [];
+  if (!match.sideBetRace || typeof match.sideBetRace !== 'object' || Array.isArray(match.sideBetRace)) {
+    match.sideBetRace = {
+      active: false,
+      stake: 0,
+      escrowByPlayer: {
+        [p1]: 0,
+        [p2]: 0
+      },
+      proposedBy: null,
+      proposedAt: null,
+      acceptedBy: null,
+      acceptedAt: null,
+      declinedBy: null,
+      declinedAt: null,
+      roundActivated: null,
+      lastResolved: null
+    };
+  }
+  if (!match.sideBetRace.escrowByPlayer || typeof match.sideBetRace.escrowByPlayer !== 'object') {
+    match.sideBetRace.escrowByPlayer = {};
+  }
+  for (const pid of [p1, p2]) {
+    if (!pid) continue;
+    if (!Number.isFinite(Number(match.sideBetRace.escrowByPlayer[pid]))) {
+      match.sideBetRace.escrowByPlayer[pid] = 0;
+    }
+  }
+  if (typeof match.sideBetRace.active !== 'boolean') match.sideBetRace.active = false;
+  if (!Number.isFinite(Number(match.sideBetRace.stake))) match.sideBetRace.stake = 0;
+  return match.sideBetRace;
+}
+
+function buildRoundSideBetState(match) {
+  const [p1, p2] = match.playerIds;
+  const enabled = sideBetsEnabledForMatch(match);
+  const stake = sideBetStakeForRound(match);
+  return {
+    enabled,
+    stake,
+    locked: !enabled,
+    phaseEndsAt: null,
+    readyByPlayer: {
+      [p1]: !enabled,
+      [p2]: !enabled
+    },
+    bankrollBaselineByPlayer: {
+      [p1]: getParticipantChips(match, p1),
+      [p2]: getParticipantChips(match, p2)
+    },
+    tilesByPlayer: {
+      [p1]: sideBetTemplateByPlayer(),
+      [p2]: sideBetTemplateByPlayer()
+    },
+    resultByPlayer: {
+      [p1]: {},
+      [p2]: {}
+    }
+  };
 }
 
 function isDoubleOrNothingEnabledForMatch(match) {
@@ -4156,6 +4314,71 @@ function clearRoundPhaseTimer(matchId) {
   }
 }
 
+function buildClientSideBetState(match, viewerId, opponentId) {
+  const sideBets = match?.round?.sideBets;
+  const race = ensureSideBetRace(match);
+  const available = Boolean(sideBets?.enabled);
+  const phaseActive = match?.phase === PHASES.SIDE_BET_PHASE;
+  const disabledReason = isRankedMatch(match)
+    ? 'Side bets disabled in Ranked.'
+    : (isPracticeMatch(match) ? 'Side bets disabled in Practice mode.' : 'Side bets unavailable.');
+  const yourTiles = sideBets?.tilesByPlayer?.[viewerId] || sideBetTemplateByPlayer();
+  const results = sideBets?.resultByPlayer?.[viewerId] || {};
+  const pendingProposal = Boolean(!race?.active && race?.proposedBy);
+  const proposalBy = race?.proposedBy || null;
+  const awaitingYourResponse = pendingProposal && proposalBy === opponentId;
+  const awaitingOpponentResponse = pendingProposal && proposalBy === viewerId;
+  const canPropose = Boolean(available && phaseActive && !race?.active && !pendingProposal);
+  const canAccept = Boolean(available && phaseActive && awaitingYourResponse);
+  const canDecline = Boolean(available && phaseActive && awaitingYourResponse);
+  const canCancel = Boolean(available && phaseActive && awaitingOpponentResponse);
+  const stake = Math.max(1, Math.floor(Number(sideBets?.stake) || sideBetStakeForRound(match)));
+
+  const tileState = {};
+  for (const key of PER_ROUND_SIDE_BET_KEYS) {
+    const tile = yourTiles[key] || { enabled: false, escrowed: 0, result: null };
+    tileState[key] = {
+      enabled: Boolean(tile.enabled && Number(tile.escrowed) > 0),
+      escrowed: Math.max(0, Math.floor(Number(tile.escrowed) || 0)),
+      result: results[key] || tile.result || null
+    };
+  }
+
+  const raceResult = (sideBets?.resultByPlayer?.[viewerId] || {})[SIDE_BET_KEYS.BLACKJACK_RACE]
+    || race?.lastResolved?.outcomeByPlayer?.[viewerId]
+    || null;
+
+  return {
+    available,
+    disabledReason: available ? null : disabledReason,
+    phaseActive,
+    locked: Boolean(sideBets?.locked || !phaseActive),
+    phaseEndsAt: sideBets?.phaseEndsAt || null,
+    stake,
+    yourReady: Boolean(sideBets?.readyByPlayer?.[viewerId]),
+    opponentReady: Boolean(sideBets?.readyByPlayer?.[opponentId]),
+    allReady: Boolean(sideBets?.readyByPlayer?.[viewerId] && sideBets?.readyByPlayer?.[opponentId]),
+    tiles: tileState,
+    race: {
+      active: Boolean(race?.active),
+      stake: Math.max(0, Math.floor(Number(race?.stake) || 0)),
+      escrowed: Math.max(0, Math.floor(Number(race?.escrowByPlayer?.[viewerId]) || 0)),
+      opponentEscrowed: Math.max(0, Math.floor(Number(race?.escrowByPlayer?.[opponentId]) || 0)),
+      proposedBy: proposalBy,
+      acceptedBy: race?.acceptedBy || null,
+      declinedBy: race?.declinedBy || null,
+      pendingProposal,
+      awaitingYourResponse,
+      awaitingOpponentResponse,
+      canPropose,
+      canAccept,
+      canDecline,
+      canCancel,
+      result: raceResult
+    }
+  };
+}
+
 // Build per-viewer sanitized state to avoid leaking opponent hole/hit cards.
 function buildClientState(match, viewerId) {
   const round = match.round;
@@ -4190,6 +4413,7 @@ function buildClientState(match, viewerId) {
       })()
     : null;
   const opponentId = nextPlayerId(match, viewerId);
+  const sideBetState = buildClientSideBetState(match, viewerId, opponentId);
   const yourProposal = negotiation ? Number(negotiation.proposalsByPlayerId?.[viewerId]) || null : null;
   const opponentProposal = negotiation ? Number(negotiation.proposalsByPlayerId?.[opponentId]) || null : null;
   const agreedAmount = negotiation ? Number(negotiation.agreedAmount) || null : null;
@@ -4264,6 +4488,7 @@ function buildClientState(match, viewerId) {
     turnExpiresAt: round.turnExpiresAt || null,
     turnTimeoutMs: TURN_TIMEOUT_MS,
     pendingPressure: round.pendingPressure,
+    sideBets: sideBetState,
     baseBet: round.baseBet,
     betLocked: Boolean(round.firstActionTaken),
     selectedBet: match.betSettings?.selectedBetById?.[viewerId] || BASE_BET,
@@ -4843,6 +5068,7 @@ function startRound(match) {
     firstActionPlayerId: null,
     turnPlayerId: null,
     resultByPlayer: null,
+    sideBets: null,
     players: {
       [p1]: {
         activeHandIndex: 0,
@@ -4854,6 +5080,8 @@ function startRound(match) {
       }
     }
   };
+  match.round.sideBets = buildRoundSideBetState(match);
+  ensureSideBetRace(match);
   clearRoundPhaseTimer(match.id);
   match.resultFinalized = false;
   match.phase = PHASES.ROUND_INIT;
@@ -4970,12 +5198,491 @@ function beginActionPhase(match) {
   }
 }
 
+function finalizeSideBetPhase(match, { source = 'timer' } = {}) {
+  if (!match?.round) return { error: 'Round missing' };
+  if (match.phase !== PHASES.SIDE_BET_PHASE) return { error: 'Side bet phase is not active' };
+  const sideBets = match.round.sideBets || buildRoundSideBetState(match);
+  match.round.sideBets = sideBets;
+  sideBets.locked = true;
+  sideBets.phaseEndsAt = sideBets.phaseEndsAt || nowIso();
+  clearPendingRaceProposal(match);
+  clearRoundPhaseTimer(match.id);
+  beginActionPhase(match);
+  return { ok: true, source };
+}
+
+function beginSideBetPhase(match) {
+  if (!match?.round) return { error: 'Round missing' };
+  const sideBets = match.round.sideBets || buildRoundSideBetState(match);
+  match.round.sideBets = sideBets;
+  if (!sideBets.enabled) {
+    beginActionPhase(match);
+    return { ok: true, skipped: true };
+  }
+
+  sideBets.stake = sideBetStakeForRound(match);
+  sideBets.locked = false;
+  sideBets.phaseEndsAt = new Date(Date.now() + SIDE_BET_PHASE_MS).toISOString();
+  for (const pid of match.playerIds) {
+    sideBets.readyByPlayer[pid] = false;
+  }
+  match.phase = PHASES.SIDE_BET_PHASE;
+
+  const botId = match.playerIds.find((pid) => isBotPlayer(pid));
+  if (botId) {
+    sideBets.readyByPlayer[botId] = true;
+  }
+
+  clearRoundPhaseTimer(match.id);
+  const timer = setTimeout(() => {
+    if (!matches.has(match.id)) return;
+    if (match.phase !== PHASES.SIDE_BET_PHASE) return;
+    finalizeSideBetPhase(match, { source: 'timer' });
+    pushMatchState(match);
+    scheduleBotTurn(match);
+    db.write();
+  }, SIDE_BET_PHASE_MS);
+  roundPhaseTimers.set(match.id, timer);
+  return { ok: true };
+}
+
+function allPlayersSideBetReady(match) {
+  const sideBets = match?.round?.sideBets;
+  if (!sideBets?.readyByPlayer) return false;
+  return match.playerIds.every((pid) => Boolean(sideBets.readyByPlayer[pid]));
+}
+
+function applySideBetToggle(match, playerId, key, enabled) {
+  if (!match?.round) return { error: 'Round missing' };
+  if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.SIDE_BET_PHASE) return { error: 'Side bets are closed for this round' };
+  const sideBets = match.round.sideBets;
+  if (!sideBets?.enabled) return { error: 'Side bets are disabled in this mode' };
+  if (sideBets.locked) return { error: 'Side bets are locked for this round' };
+  const normalizedKey = String(key || '').toUpperCase();
+  if (!PER_ROUND_SIDE_BET_KEYS.includes(normalizedKey)) return { error: 'Invalid side bet' };
+  const tile = sideBets.tilesByPlayer?.[playerId]?.[normalizedKey];
+  if (!tile) return { error: 'Invalid side bet' };
+  const target = Boolean(enabled);
+  const current = Boolean(tile.enabled && Number(tile.escrowed) > 0);
+  if (target === current) return { ok: true, unchanged: true };
+
+  const stake = Math.max(1, Math.floor(Number(sideBets.stake) || sideBetStakeForRound(match)));
+  if (target) {
+    if (!canAffordIncrement(match, playerId, stake)) return { error: `Need ${stake.toLocaleString()} chips for this side bet` };
+    if (!canAffordSideBetIncrement(match, playerId, stake)) {
+      return { error: `Keep ${sideBetStakeForRound(match).toLocaleString()} chips reserved for your base bet before adding this side bet` };
+    }
+    tile.enabled = true;
+    tile.escrowed = stake;
+    tile.result = null;
+    if (isRealMatch(match) && !isBotPlayer(playerId)) {
+      setParticipantChips(match, playerId, getParticipantChips(match, playerId) - stake);
+      emitUserUpdate(playerId);
+    }
+  } else {
+    const refund = Math.max(0, Math.floor(Number(tile.escrowed) || 0));
+    tile.enabled = false;
+    tile.escrowed = 0;
+    tile.result = null;
+    if (refund > 0 && isRealMatch(match) && !isBotPlayer(playerId)) {
+      setParticipantChips(match, playerId, getParticipantChips(match, playerId) + refund);
+      emitUserUpdate(playerId);
+    }
+  }
+
+  sideBets.readyByPlayer[playerId] = false;
+  return { ok: true };
+}
+
+function applySideBetReady(match, playerId, ready = true) {
+  if (!match?.round) return { error: 'Round missing' };
+  if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.SIDE_BET_PHASE) return { error: 'Side bet phase is not active' };
+  const sideBets = match.round.sideBets;
+  if (!sideBets?.enabled) return { error: 'Side bets are disabled in this mode' };
+  if (sideBets.locked) return { error: 'Side bets are already locked' };
+  sideBets.readyByPlayer[playerId] = Boolean(ready);
+  const bothReady = allPlayersSideBetReady(match);
+  if (bothReady) {
+    finalizeSideBetPhase(match, { source: 'ready' });
+    return { ok: true, advanced: true };
+  }
+  return { ok: true, waiting: true };
+}
+
+function applyBlackjackRaceAction(match, playerId, action) {
+  if (!match?.round) return { error: 'Round missing' };
+  if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.SIDE_BET_PHASE) return { error: 'Blackjack Race is only available during side bet phase' };
+  const sideBets = match.round.sideBets;
+  if (!sideBets?.enabled) return { error: 'Blackjack Race is disabled in this mode' };
+  if (sideBets.locked) return { error: 'Side bets are locked for this round' };
+  const race = ensureSideBetRace(match);
+  const opponentId = nextPlayerId(match, playerId);
+  const normalized = String(action || '').trim().toLowerCase();
+
+  if (race.active) return { error: 'Blackjack Race is already active' };
+
+  if (normalized === 'propose') {
+    if (race.proposedBy) return { error: 'Blackjack Race proposal already pending' };
+    race.proposedBy = playerId;
+    race.proposedAt = nowIso();
+    race.acceptedBy = null;
+    race.acceptedAt = null;
+    race.declinedBy = null;
+    race.declinedAt = null;
+    sideBets.readyByPlayer[playerId] = false;
+
+    if (isBotPlayer(opponentId)) {
+      const difficulty = getBotDifficulty(match, opponentId);
+      const chance = difficulty === 'easy' ? 0.34 : difficulty === 'medium' ? 0.48 : 0.6;
+      const accepted = secureRandomFloat() <= chance;
+      const followUp = applyBlackjackRaceAction(match, opponentId, accepted ? 'accept' : 'decline');
+      if (followUp?.error && accepted) {
+        applyBlackjackRaceAction(match, opponentId, 'decline');
+      }
+    }
+    return { ok: true, status: 'pending' };
+  }
+
+  if (normalized === 'accept') {
+    if (!race.proposedBy) return { error: 'No Blackjack Race proposal to accept' };
+    if (race.proposedBy === playerId) return { error: 'You cannot accept your own proposal' };
+    const proposerId = race.proposedBy;
+    const stake = Math.max(1, Math.floor(Number(sideBets.stake) || sideBetStakeForRound(match)));
+    for (const pid of match.playerIds) {
+      if (!canAffordIncrement(match, pid, stake)) return { error: `Both players need ${stake.toLocaleString()} chips to accept` };
+      if (!canAffordSideBetIncrement(match, pid, stake)) {
+        return { error: `Both players must keep ${sideBetStakeForRound(match).toLocaleString()} chips reserved for the base bet` };
+      }
+    }
+    for (const pid of match.playerIds) {
+      if (isRealMatch(match) && !isBotPlayer(pid)) {
+        setParticipantChips(match, pid, getParticipantChips(match, pid) - stake);
+        emitUserUpdate(pid);
+      }
+      race.escrowByPlayer[pid] = stake;
+    }
+    race.active = true;
+    race.stake = stake;
+    race.acceptedBy = playerId;
+    race.acceptedAt = nowIso();
+    race.roundActivated = match.roundNumber;
+    race.declinedBy = null;
+    race.declinedAt = null;
+    race.proposedBy = proposerId;
+    sideBets.readyByPlayer[playerId] = false;
+    sideBets.readyByPlayer[proposerId] = false;
+    return { ok: true, status: 'active' };
+  }
+
+  if (normalized === 'decline') {
+    if (!race.proposedBy) return { error: 'No Blackjack Race proposal to decline' };
+    if (race.proposedBy === playerId) return { error: 'You cannot decline your own proposal' };
+    race.declinedBy = playerId;
+    race.declinedAt = nowIso();
+    race.proposedBy = null;
+    race.proposedAt = null;
+    race.acceptedBy = null;
+    race.acceptedAt = null;
+    sideBets.readyByPlayer[playerId] = false;
+    return { ok: true, status: 'declined' };
+  }
+
+  if (normalized === 'cancel') {
+    if (!race.proposedBy) return { error: 'No Blackjack Race proposal to cancel' };
+    if (race.proposedBy !== playerId) return { error: 'Only the proposer can cancel this request' };
+    race.proposedBy = null;
+    race.proposedAt = null;
+    race.acceptedBy = null;
+    race.acceptedAt = null;
+    race.declinedBy = null;
+    race.declinedAt = null;
+    sideBets.readyByPlayer[playerId] = false;
+    return { ok: true, status: 'cancelled' };
+  }
+
+  return { error: 'Invalid Blackjack Race action' };
+}
+
 function maybeBeginRoundAfterBetConfirm(match) {
   const confirmed = match.playerIds.every((pid) => match.round.betConfirmedByPlayer[pid]);
   if (!confirmed) return;
-  beginActionPhase(match);
+  if (match.round?.sideBets?.enabled) {
+    beginSideBetPhase(match);
+  } else {
+    beginActionPhase(match);
+  }
   pushMatchState(match);
   scheduleBotTurn(match);
+}
+
+function playerBestNonBustTotal(playerState) {
+  if (!playerState?.hands?.length) return 0;
+  let best = 0;
+  for (const hand of playerState.hands) {
+    const meta = handMeta(hand.cards || []);
+    if (!meta.isBust) best = Math.max(best, Math.max(0, Math.floor(Number(meta.total) || 0)));
+  }
+  return best;
+}
+
+function playerAllHandsBust(playerState) {
+  if (!playerState?.hands?.length) return false;
+  return playerState.hands.every((hand) => handMeta(hand.cards || []).isBust);
+}
+
+function firstTwoCardsForPlayer(playerState) {
+  const cards = playerState?.hands?.[0]?.cards || [];
+  if (cards.length < 2) return [];
+  return [cards[0], cards[1]];
+}
+
+function playerHasNaturalBlackjack(playerState) {
+  return Boolean((playerState?.hands || []).some((hand) => Boolean(hand?.naturalBlackjack)));
+}
+
+function playerHasSuitedNaturalBlackjack(playerState) {
+  return Boolean((playerState?.hands || []).some((hand) => {
+    if (!hand?.naturalBlackjack) return false;
+    const cards = hand.cards || [];
+    return cards.length === 2 && cards[0]?.suit && cards[0]?.suit === cards[1]?.suit;
+  }));
+}
+
+function sideBetResultEntry(outcome, stake, payout) {
+  const safeStake = Math.max(0, Math.floor(Number(stake) || 0));
+  const safePayout = Math.max(0, Math.floor(Number(payout) || 0));
+  const net = safePayout - safeStake;
+  return {
+    outcome,
+    stake: safeStake,
+    payout: safePayout,
+    net,
+    label: sideBetResultLabel(outcome, net)
+  };
+}
+
+function settlePerRoundSideBets(match, { aId, bId, aState, bState }) {
+  const payoutByPlayer = { [aId]: 0, [bId]: 0 };
+  const netByPlayer = { [aId]: 0, [bId]: 0 };
+  const sideBets = match.round?.sideBets;
+  if (!sideBets?.enabled) return { payoutByPlayer, netByPlayer };
+
+  const bestA = playerBestNonBustTotal(aState);
+  const bestB = playerBestNonBustTotal(bState);
+  const aBustAll = playerAllHandsBust(aState);
+  const bBustAll = playerAllHandsBust(bState);
+  const aNatural = playerHasNaturalBlackjack(aState);
+  const bNatural = playerHasNaturalBlackjack(bState);
+  const aSuitedNatural = playerHasSuitedNaturalBlackjack(aState);
+  const bSuitedNatural = playerHasSuitedNaturalBlackjack(bState);
+  const aFirst = firstTwoCardsForPlayer(aState);
+  const bFirst = firstTwoCardsForPlayer(bState);
+  const aPair = aFirst.length === 2 && aFirst[0]?.rank && aFirst[0].rank === aFirst[1]?.rank;
+  const bPair = bFirst.length === 2 && bFirst[0]?.rank && bFirst[0].rank === bFirst[1]?.rank;
+  const aPairRank = aPair ? rankStrength(aFirst[0]?.rank) : 0;
+  const bPairRank = bPair ? rankStrength(bFirst[0]?.rank) : 0;
+
+  const evaluateOutcome = (playerId, key) => {
+    const opponentId = playerId === aId ? bId : aId;
+    if (key === SIDE_BET_KEYS.CLOSEST_TO_21) {
+      const own = playerId === aId ? bestA : bestB;
+      const opp = opponentId === aId ? bestA : bestB;
+      if (own > opp) return 'win';
+      if (own === opp) return 'push';
+      return 'lose';
+    }
+    if (key === SIDE_BET_KEYS.BLACKJACK_THIS_ROUND) {
+      const own = playerId === aId ? aNatural : bNatural;
+      const opp = opponentId === aId ? aNatural : bNatural;
+      if (own && !opp) return 'win';
+      return 'push';
+    }
+    if (key === SIDE_BET_KEYS.PERFECT_PAIR) {
+      const ownPair = playerId === aId ? aPair : bPair;
+      const oppPair = opponentId === aId ? aPair : bPair;
+      const ownRank = playerId === aId ? aPairRank : bPairRank;
+      const oppRank = opponentId === aId ? aPairRank : bPairRank;
+      if (ownPair && !oppPair) return 'win';
+      if (!ownPair && oppPair) return 'lose';
+      if (!ownPair && !oppPair) return 'lose';
+      if (ownRank > oppRank) return 'win';
+      if (ownRank < oppRank) return 'lose';
+      return 'push';
+    }
+    if (key === SIDE_BET_KEYS.SUITED_BLACKJACK) {
+      const own = playerId === aId ? aSuitedNatural : bSuitedNatural;
+      const opp = opponentId === aId ? aSuitedNatural : bSuitedNatural;
+      if (own && opp) return 'push';
+      if (own) return 'win';
+      return 'lose';
+    }
+    if (key === SIDE_BET_KEYS.BUST_BONUS) {
+      const ownBust = playerId === aId ? aBustAll : bBustAll;
+      const oppBust = opponentId === aId ? aBustAll : bBustAll;
+      if (oppBust && !ownBust) return 'win';
+      if (oppBust && ownBust) return 'push';
+      return 'lose';
+    }
+    return 'lose';
+  };
+
+  for (const pid of [aId, bId]) {
+    const tiles = sideBets.tilesByPlayer?.[pid] || {};
+    const results = sideBets.resultByPlayer?.[pid] || {};
+    for (const key of PER_ROUND_SIDE_BET_KEYS) {
+      const tile = tiles[key];
+      const stake = Math.max(0, Math.floor(Number(tile?.escrowed) || 0));
+      if (stake <= 0 || !tile?.enabled) continue;
+      const outcome = evaluateOutcome(pid, key);
+      const profitMultiplier = Number(SIDE_BET_PROFIT_MULTIPLIERS[key]) || 0;
+      const payout = outcome === 'win'
+        ? (stake + Math.max(0, Math.floor(stake * profitMultiplier)))
+        : outcome === 'push'
+          ? stake
+          : 0;
+      const entry = sideBetResultEntry(outcome, stake, payout);
+      results[key] = entry;
+      tile.result = entry;
+      tile.enabled = false;
+      tile.escrowed = 0;
+      payoutByPlayer[pid] += entry.payout;
+      netByPlayer[pid] += entry.net;
+    }
+    sideBets.resultByPlayer[pid] = results;
+  }
+  return { payoutByPlayer, netByPlayer };
+}
+
+function settleBlackjackRaceIfTriggered(match, { aId, bId, aState, bState }) {
+  const payoutByPlayer = { [aId]: 0, [bId]: 0 };
+  const netByPlayer = { [aId]: 0, [bId]: 0 };
+  const race = ensureSideBetRace(match);
+  if (!race?.active) return { payoutByPlayer, netByPlayer };
+
+  const aNatural = playerHasNaturalBlackjack(aState);
+  const bNatural = playerHasNaturalBlackjack(bState);
+  if (!aNatural && !bNatural) return { payoutByPlayer, netByPlayer };
+
+  const stake = Math.max(0, Math.floor(Number(race.stake) || 0));
+  const pool = stake * 2;
+  let winnerId = null;
+  let loserId = null;
+  let outcomeA = 'push';
+  let outcomeB = 'push';
+  if (aNatural && !bNatural) {
+    winnerId = aId;
+    loserId = bId;
+    outcomeA = 'win';
+    outcomeB = 'lose';
+  } else if (bNatural && !aNatural) {
+    winnerId = bId;
+    loserId = aId;
+    outcomeA = 'lose';
+    outcomeB = 'win';
+  }
+
+  if (winnerId && loserId) {
+    const winnerProfit = Math.max(0, Math.round(stake * 0.75));
+    const winnerReturn = Math.max(0, Math.min(pool, stake + winnerProfit));
+    const loserReturn = Math.max(0, pool - winnerReturn);
+    payoutByPlayer[winnerId] = winnerReturn;
+    payoutByPlayer[loserId] = loserReturn;
+    netByPlayer[winnerId] = winnerReturn - stake;
+    netByPlayer[loserId] = loserReturn - stake;
+  } else {
+    payoutByPlayer[aId] = stake;
+    payoutByPlayer[bId] = stake;
+    netByPlayer[aId] = 0;
+    netByPlayer[bId] = 0;
+  }
+
+  const sideBets = match.round?.sideBets;
+  if (sideBets?.enabled) {
+    const entryA = sideBetResultEntry(outcomeA, stake, payoutByPlayer[aId]);
+    const entryB = sideBetResultEntry(outcomeB, stake, payoutByPlayer[bId]);
+    sideBets.resultByPlayer[aId][SIDE_BET_KEYS.BLACKJACK_RACE] = entryA;
+    sideBets.resultByPlayer[bId][SIDE_BET_KEYS.BLACKJACK_RACE] = entryB;
+  }
+
+  race.lastResolved = {
+    resolvedAt: nowIso(),
+    roundNumber: match.roundNumber,
+    winnerId: winnerId || null,
+    stake,
+    outcomeByPlayer: {
+      [aId]: {
+        outcome: outcomeA,
+        net: netByPlayer[aId],
+        payout: payoutByPlayer[aId]
+      },
+      [bId]: {
+        outcome: outcomeB,
+        net: netByPlayer[bId],
+        payout: payoutByPlayer[bId]
+      }
+    }
+  };
+  race.active = false;
+  race.stake = 0;
+  race.escrowByPlayer[aId] = 0;
+  race.escrowByPlayer[bId] = 0;
+  race.proposedBy = null;
+  race.proposedAt = null;
+  race.acceptedBy = null;
+  race.acceptedAt = null;
+  race.declinedBy = null;
+  race.declinedAt = null;
+  race.roundActivated = null;
+
+  return { payoutByPlayer, netByPlayer };
+}
+
+function refundBlackjackRaceEscrow(match, reason = 'match_end') {
+  const race = ensureSideBetRace(match);
+  if (!race) return { refunded: 0 };
+  const [p1, p2] = match.playerIds || [];
+  const refunds = {
+    [p1]: Math.max(0, Math.floor(Number(race.escrowByPlayer?.[p1]) || 0)),
+    [p2]: Math.max(0, Math.floor(Number(race.escrowByPlayer?.[p2]) || 0))
+  };
+  let totalRefunded = 0;
+  for (const pid of [p1, p2]) {
+    const amount = refunds[pid] || 0;
+    if (amount <= 0) continue;
+    if (isRealMatch(match) && !isBotPlayer(pid)) {
+      setParticipantChips(match, pid, getParticipantChips(match, pid) + amount);
+      emitUserUpdate(pid);
+    }
+    totalRefunded += amount;
+  }
+  if (race.active || totalRefunded > 0) {
+    race.lastResolved = {
+      resolvedAt: nowIso(),
+      roundNumber: match.roundNumber,
+      winnerId: null,
+      stake: Math.max(0, Math.floor(Number(race.stake) || 0)),
+      reason,
+      outcomeByPlayer: {
+        [p1]: { outcome: 'push', net: 0, payout: refunds[p1] || 0 },
+        [p2]: { outcome: 'push', net: 0, payout: refunds[p2] || 0 }
+      }
+    };
+  }
+  race.active = false;
+  race.stake = 0;
+  race.escrowByPlayer[p1] = 0;
+  race.escrowByPlayer[p2] = 0;
+  race.proposedBy = null;
+  race.proposedAt = null;
+  race.acceptedBy = null;
+  race.acceptedAt = null;
+  race.declinedBy = null;
+  race.declinedAt = null;
+  race.roundActivated = null;
+  return { refunded: totalRefunded };
 }
 
 function resolveRound(match) {
@@ -4999,7 +5706,33 @@ function resolveRound(match) {
     [aId]: getParticipantChips(match, aId),
     [bId]: getParticipantChips(match, bId)
   };
+  const bankrollBaseline = {
+    [aId]: Math.max(
+      0,
+      Math.floor(
+        Number(match.round?.sideBets?.bankrollBaselineByPlayer?.[aId]) ||
+        Number(bankrollBefore[aId]) ||
+        0
+      )
+    ),
+    [bId]: Math.max(
+      0,
+      Math.floor(
+        Number(match.round?.sideBets?.bankrollBaselineByPlayer?.[bId]) ||
+        Number(bankrollBefore[bId]) ||
+        0
+      )
+    )
+  };
   const chipsDelta = {
+    [aId]: 0,
+    [bId]: 0
+  };
+  const sideBetPayoutByPlayer = {
+    [aId]: 0,
+    [bId]: 0
+  };
+  const sideBetNetByPlayer = {
     [aId]: 0,
     [bId]: 0
   };
@@ -5166,10 +5899,43 @@ function resolveRound(match) {
     }
   }
 
+  const roundSideBetSettlement = settlePerRoundSideBets(match, {
+    aId,
+    bId,
+    aState: a,
+    bState: b
+  });
+  const raceSettlement = settleBlackjackRaceIfTriggered(match, {
+    aId,
+    bId,
+    aState: a,
+    bState: b
+  });
+  sideBetPayoutByPlayer[aId] = Math.max(
+    0,
+    Math.floor(Number(roundSideBetSettlement.payoutByPlayer[aId]) || 0) +
+    Math.floor(Number(raceSettlement.payoutByPlayer[aId]) || 0)
+  );
+  sideBetPayoutByPlayer[bId] = Math.max(
+    0,
+    Math.floor(Number(roundSideBetSettlement.payoutByPlayer[bId]) || 0) +
+    Math.floor(Number(raceSettlement.payoutByPlayer[bId]) || 0)
+  );
+  sideBetNetByPlayer[aId] =
+    Math.floor(Number(roundSideBetSettlement.netByPlayer[aId]) || 0) +
+    Math.floor(Number(raceSettlement.netByPlayer[aId]) || 0);
+  sideBetNetByPlayer[bId] =
+    Math.floor(Number(roundSideBetSettlement.netByPlayer[bId]) || 0) +
+    Math.floor(Number(raceSettlement.netByPlayer[bId]) || 0);
+
   if (realMatch) {
     const committed = match.round?.stakesCommittedByPlayer || {};
-    const payoutA = usesRoundStartStakeCommit(match) ? chipsDelta[aId] + (committed[aId] || 0) : chipsDelta[aId];
-    const payoutB = usesRoundStartStakeCommit(match) ? chipsDelta[bId] + (committed[bId] || 0) : chipsDelta[bId];
+    const payoutA = (
+      usesRoundStartStakeCommit(match) ? chipsDelta[aId] + (committed[aId] || 0) : chipsDelta[aId]
+    ) + sideBetPayoutByPlayer[aId];
+    const payoutB = (
+      usesRoundStartStakeCommit(match) ? chipsDelta[bId] + (committed[bId] || 0) : chipsDelta[bId]
+    ) + sideBetPayoutByPlayer[bId];
     setParticipantChips(match, aId, getParticipantChips(match, aId) + payoutA);
     setParticipantChips(match, bId, getParticipantChips(match, bId) + payoutB);
   }
@@ -5177,11 +5943,30 @@ function resolveRound(match) {
     [aId]: getParticipantChips(match, aId),
     [bId]: getParticipantChips(match, bId)
   };
+  const hasConcreteBankrollTracking = match.playerIds.every((pid) => {
+    if (isBotPlayer(pid)) return true;
+    if (isPracticeMatch(match) && match.practiceBankrollById && Number.isFinite(Number(match.practiceBankrollById[pid]))) {
+      return true;
+    }
+    return Boolean(getUserById(pid));
+  });
+  const roundNetByPlayer = {
+    [aId]: hasConcreteBankrollTracking
+      ? (Math.floor(Number(bankrollAfter[aId]) || 0) - Math.floor(Number(bankrollBaseline[aId]) || 0))
+      : (Math.floor(Number(chipsDelta[aId]) || 0) + Math.floor(Number(sideBetNetByPlayer[aId]) || 0)),
+    [bId]: hasConcreteBankrollTracking
+      ? (Math.floor(Number(bankrollAfter[bId]) || 0) - Math.floor(Number(bankrollBaseline[bId]) || 0))
+      : (Math.floor(Number(chipsDelta[bId]) || 0) + Math.floor(Number(sideBetNetByPlayer[bId]) || 0))
+  };
   logMatchEconomyEvent('SETTLEMENT_APPLIED', {
     matchId: match.id,
     matchType: match.matchType || null,
     chipsDelta,
+    sideBetPayoutByPlayer,
+    sideBetNetByPlayer,
+    roundNetByPlayer,
     bankrollBefore,
+    bankrollBaseline,
     bankrollAfter
   });
 
@@ -5333,7 +6118,7 @@ function resolveRound(match) {
     }
   }
 
-  const netA = chipsDelta[aId];
+  const netA = roundNetByPlayer[aId];
 
   if (realMatch && netA > 0) {
     if (userA) {
@@ -5416,7 +6201,7 @@ function resolveRound(match) {
     rankedSeriesUpdate = recordRankedSeriesGame(match, {
       winnerId,
       loserId,
-      netByPlayer: chipsDelta
+      netByPlayer: roundNetByPlayer
     });
     if (rankedSeriesUpdate?.complete && rankedSeriesUpdate?.winnerId) {
       finalizeRankedSeriesElo(rankedSeriesUpdate.series, {
@@ -5543,8 +6328,8 @@ function resolveRound(match) {
 
   const aHasNatural = a.hands.some((h) => Boolean(h.naturalBlackjack));
   const bHasNatural = b.hands.some((h) => Boolean(h.naturalBlackjack));
-  const outcomeA = chipsDelta[aId] > 0 ? 'win' : chipsDelta[aId] < 0 ? 'lose' : 'push';
-  const outcomeB = chipsDelta[bId] > 0 ? 'win' : chipsDelta[bId] < 0 ? 'lose' : 'push';
+  const outcomeA = roundNetByPlayer[aId] > 0 ? 'win' : roundNetByPlayer[aId] < 0 ? 'lose' : 'push';
+  const outcomeB = roundNetByPlayer[bId] > 0 ? 'win' : roundNetByPlayer[bId] < 0 ? 'lose' : 'push';
   const titleFor = (viewerId) => {
     const viewerNatural = viewerId === aId ? aHasNatural : bHasNatural;
     const opponentNatural = viewerId === aId ? bHasNatural : aHasNatural;
@@ -5562,13 +6347,14 @@ function resolveRound(match) {
       roundNumber: match.roundNumber,
       outcome: outcomeA,
       title: titleFor(aId),
-      deltaChips: chipsDelta[aId],
+      deltaChips: roundNetByPlayer[aId],
       xpDelta: xpDeltaByPlayer[aId] || 0,
       xpBetAmount: xpMetaByPlayer[aId]?.betAmount || 0,
       xpBetMultiplier: xpMetaByPlayer[aId]?.multiplier || 1,
-      previousBankroll: bankrollBefore[aId],
+      previousBankroll: bankrollBaseline[aId],
       newBankroll: bankrollAfter[aId],
       isPractice: isPracticeMatch(match),
+      sideBetResults: match.round?.sideBets?.resultByPlayer?.[aId] || {},
       rankedSeries: rankedSeriesUpdate ? rankedSeriesSummaryForUser(rankedSeriesUpdate.series, aId) : null,
       seriesResult: rankedSeriesResultByPlayer?.[aId] || null
     },
@@ -5577,13 +6363,14 @@ function resolveRound(match) {
       roundNumber: match.roundNumber,
       outcome: outcomeB,
       title: titleFor(bId),
-      deltaChips: chipsDelta[bId],
+      deltaChips: roundNetByPlayer[bId],
       xpDelta: xpDeltaByPlayer[bId] || 0,
       xpBetAmount: xpMetaByPlayer[bId]?.betAmount || 0,
       xpBetMultiplier: xpMetaByPlayer[bId]?.multiplier || 1,
-      previousBankroll: bankrollBefore[bId],
+      previousBankroll: bankrollBaseline[bId],
       newBankroll: bankrollAfter[bId],
       isPractice: isPracticeMatch(match),
+      sideBetResults: match.round?.sideBets?.resultByPlayer?.[bId] || {},
       rankedSeries: rankedSeriesUpdate ? rankedSeriesSummaryForUser(rankedSeriesUpdate.series, bId) : null,
       seriesResult: rankedSeriesResultByPlayer?.[bId] || null
     }
@@ -6896,27 +7683,34 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
     phase: match.phase,
     isSettled: settledNoPenaltyExit
   });
+  const raceRefund = refundBlackjackRaceEscrow(
+    match,
+    source === 'disconnect_timeout' ? 'disconnect_timeout_refund' : 'match_end_refund'
+  );
   if (settledNoPenaltyExit) {
     const leaverReason = botMatch ? 'Match settled. Returned to lobby.' : 'Match settled. Returned to menu.';
     const opponentReason = 'Opponent left after settlement.';
     emitToUser(leaverId, 'match:ended', { reason: leaverReason, seriesResult: null });
     if (opponentId) emitToUser(opponentId, 'match:ended', { reason: opponentReason, seriesResult: null });
+    if (raceRefund.refunded > 0) db.write();
     cleanupMatch(match);
     logMatchEconomyEvent('LEAVE_SETTLED_NO_PENALTY', {
       matchId: match.id,
       leaverId,
-      chargedAmount: 0
+      chargedAmount: 0,
+      raceRefunded: raceRefund.refunded
     });
     return { ok: true, forfeited: false, charged: false, chargedAmount: 0, preRoundExit: false, settledExit: true };
   }
   const leaverUser = !isBotPlayer(leaverId) ? getUserById(leaverId) : null;
   const opponentUser = !isBotPlayer(opponentId) ? getUserById(opponentId) : null;
   const roundStarted = Boolean(match.round?.stakesCommitted);
-  const preRoundBotExit = botMatch && (!roundStarted || match.phase === PHASES.ROUND_INIT || isRoundSettledPhase(match));
+  const preRoundBotExit = botMatch
+    && (!roundStarted || match.phase === PHASES.ROUND_INIT || match.phase === PHASES.SIDE_BET_PHASE || isRoundSettledPhase(match));
   let forfeited = false;
   let charged = false;
   let chargedAmount = 0;
-  let wrote = false;
+  let wrote = raceRefund.refunded > 0;
   let rankedSeriesResultByPlayer = null;
 
   if (leaverUser && isRealMatch(match)) {
@@ -7029,9 +7823,10 @@ function leaveMatchByForfeit(match, leaverId, { source = 'manual' } = {}) {
     source,
     charged,
     chargedAmount,
-    forfeited
+    forfeited,
+    raceRefunded: raceRefund.refunded
   });
-  return { ok: true, forfeited, charged, chargedAmount, preRoundExit: preRoundBotExit };
+  return { ok: true, forfeited, charged, chargedAmount, preRoundExit: preRoundBotExit, raceRefunded: raceRefund.refunded };
 }
 
 function buildNewUser(username) {
@@ -8429,6 +9224,40 @@ io.on('connection', (socket) => {
     pushMatchState(match);
     db.write();
     scheduleBotBetConfirm(match);
+    return null;
+  });
+
+  socket.on('match:toggleSideBet', (payload = {}) => {
+    const { matchId, key, enabled } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    const result = applySideBetToggle(match, userId, key, enabled);
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    return null;
+  });
+
+  socket.on('match:sideBetReady', (payload = {}) => {
+    const { matchId, ready } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    const result = applySideBetReady(match, userId, ready);
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    scheduleBotTurn(match);
+    return null;
+  });
+
+  socket.on('match:blackjackRace', (payload = {}) => {
+    const { matchId, action } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    const result = applyBlackjackRaceAction(match, userId, action);
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
     return null;
   });
 

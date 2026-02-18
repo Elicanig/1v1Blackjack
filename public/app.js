@@ -38,6 +38,25 @@ const QUICK_PLAY_BUCKETS = [10, 50, 100, 250, 500, 1000, 2000, 5000];
 const HIGH_ROLLER_MIN_BET = 2500;
 const HIGH_ROLLER_UNLOCK_CHIPS = 10000;
 const HIGH_ROLLER_UNLOCK_MESSAGE = `High Roller unlocks at ${HIGH_ROLLER_UNLOCK_CHIPS.toLocaleString()} chips.`;
+const SIDE_BET_KEYS = Object.freeze({
+  BLACKJACK_RACE: 'BLACKJACK_RACE',
+  CLOSEST_TO_21: 'CLOSEST_TO_21',
+  BLACKJACK_THIS_ROUND: 'BLACKJACK_THIS_ROUND',
+  PERFECT_PAIR: 'PERFECT_PAIR',
+  SUITED_BLACKJACK: 'SUITED_BLACKJACK',
+  BUST_BONUS: 'BUST_BONUS'
+});
+const SIDE_BET_TILE_DEFS = Object.freeze([
+  { key: SIDE_BET_KEYS.BLACKJACK_RACE, name: 'Blackjack Race', detail: 'H2H race to first natural blackjack', payout: '3:4 net (H2H)' },
+  { key: SIDE_BET_KEYS.CLOSEST_TO_21, name: 'Closest to 21', detail: 'Best non-bust total vs opponent', payout: '+1:2 profit' },
+  { key: SIDE_BET_KEYS.BLACKJACK_THIS_ROUND, name: 'Blackjack This Round', detail: 'Natural blackjack while opponent misses', payout: '+10:1 profit' },
+  { key: SIDE_BET_KEYS.PERFECT_PAIR, name: 'Perfect Pair', detail: 'First two cards pair by rank', payout: '+3:1 profit' },
+  { key: SIDE_BET_KEYS.SUITED_BLACKJACK, name: 'Suited Blackjack', detail: 'Natural blackjack, same suit', payout: '+50:1 profit' },
+  { key: SIDE_BET_KEYS.BUST_BONUS, name: 'Bust Bonus', detail: 'Opponent busts while you avoid bust', payout: '+1:1 profit' }
+]);
+const SIDE_BET_TILE_DEF_MAP = new Map(SIDE_BET_TILE_DEFS.map((entry) => [entry.key, entry]));
+const SIDE_BET_LEFT_KEYS = [SIDE_BET_KEYS.BLACKJACK_RACE, SIDE_BET_KEYS.CLOSEST_TO_21, SIDE_BET_KEYS.BLACKJACK_THIS_ROUND];
+const SIDE_BET_RIGHT_KEYS = [SIDE_BET_KEYS.PERFECT_PAIR, SIDE_BET_KEYS.SUITED_BLACKJACK, SIDE_BET_KEYS.BUST_BONUS];
 const SPLIT_TENS_EVENT_ID = 'split_tens_24h';
 const LEADERBOARD_LIMIT = 25;
 const RANKED_TIER_META = Object.freeze({
@@ -2091,6 +2110,15 @@ function syncTurnCountdownUI() {
   });
 }
 
+function syncSideBetCountdownUI() {
+  const nodes = document.querySelectorAll('[data-sidebet-countdown]');
+  if (!nodes.length) return;
+  const seconds = sideBetCountdownSeconds(state.currentMatch);
+  nodes.forEach((node) => {
+    node.textContent = String(seconds);
+  });
+}
+
 const FALLBACK_PATCH_NOTES = [
   { date: '2026-02-15', title: 'Account persistence hardening', bullets: ['Fix: accounts now persist across deployments and patches (no forced re-registration).', 'Storage boot now loads existing persistent data without reseeding users.'] },
   { date: '2026-02-14', title: 'Match UI fit and polish pass', bullets: ['Match layout cleaned up for no-overlap/no-scroll card-first flow.', 'Logo shine slowed down and stats/rules strip refinements applied.'] },
@@ -3133,6 +3161,21 @@ function emitAction(action) {
 function emitPressureDecision(decision) {
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:pressureDecision', { matchId: state.currentMatch.id, decision });
+}
+
+function emitToggleSideBet(key, enabled) {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('match:toggleSideBet', { matchId: state.currentMatch.id, key, enabled });
+}
+
+function emitSideBetReady(ready = true) {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('match:sideBetReady', { matchId: state.currentMatch.id, ready: Boolean(ready) });
+}
+
+function emitBlackjackRaceAction(action) {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('match:blackjackRace', { matchId: state.currentMatch.id, action });
 }
 
 function emitSetBaseBet(amount) {
@@ -5060,7 +5103,7 @@ function renderHome() {
                         ${botLaunchShowBusy ? '<div class="muted practice-queue-note"><span class="btn-spinner" aria-hidden="true"></span>Finding bot table...</div>' : ''}
                         <div class="home-inline-actions">
                           <div class="real-bot-cta-wrap">
-                            <button class="gold bot-play-btn" id="playRealBotBtn" ${botLaunchPending ? 'disabled' : ''}>${realBotLaunching && botLaunchShowBusy ? '<span class="btn-spinner" aria-hidden="true"></span>Finding bot table...' : 'Play Real Bot'}</button>
+                            <button class="gold bot-play-btn" id="playRealBotBtn" ${botLaunchPending ? 'disabled' : ''}>${realBotLaunching && botLaunchShowBusy ? '<span class="btn-spinner" aria-hidden="true"></span>Finding bot table...' : 'Play Real Bot (Real chips)'}</button>
                             <div class="muted real-bot-chip-note">Real chips (win/lose)</div>
                           </div>
                           <button class="ghost bot-play-btn" id="playPracticeBotBtn" ${botLaunchPending ? 'disabled' : ''}>${practiceBotLaunching && botLaunchShowBusy ? '<span class="btn-spinner" aria-hidden="true"></span>Finding bot table...' : 'Start Practice Bot'}</button>
@@ -7109,6 +7152,24 @@ function renderSuitIcon(suit, className = '') {
   return renderSuitIconSvg(suit, className);
 }
 
+function hashToken(value = '') {
+  const source = String(value || '');
+  let hash = 0;
+  for (let i = 0; i < source.length; i += 1) {
+    hash = ((hash << 5) - hash) + source.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function sheenTimingForCard(card, cardIndex = 0) {
+  const token = String(card?.id || `${card?.rank || ''}${card?.suit || ''}:${cardIndex}`);
+  const hash = hashToken(token);
+  const cycle = 10 + (hash % 9);
+  const delay = -1 * (hash % cycle);
+  return { cycle, delay };
+}
+
 function renderPlayingCard(card, cardIndex = 0, options = {}) {
   const deckSkinToken = String(options.deckSkinToken || deckSkinForUser(state.me)?.token || 'classic').trim() || 'classic';
   const anim = cardAnimationMeta(card);
@@ -7124,6 +7185,9 @@ function renderPlayingCard(card, cardIndex = 0, options = {}) {
     styleTokens.push(`--card-enter-delay:${cardIndex * 35}ms`);
     if (anim.cardId) styleTokens.push(`--card-enter-rot:${anim.tiltDeg.toFixed(2)}deg`);
   }
+  const sheenTiming = sheenTimingForCard(card, cardIndex);
+  styleTokens.push(`--sheen-cycle:${sheenTiming.cycle}s`);
+  styleTokens.push(`--sheen-delay:${sheenTiming.delay}s`);
   const styleAttr = styleTokens.length ? ` style="${styleTokens.join(';')}"` : '';
   const idAttr = !skipAnimation && anim.cardId ? ` data-card-id="${anim.cardId}"` : '';
   const cardClasses = `${animationClasses.join(' ')}${extraClass ? ` ${extraClass}` : ''}`.trim();
@@ -7170,6 +7234,142 @@ function renderDeckSkinPreviewCards(deckSkinToken = 'classic') {
       ariaHidden: true
     }))
     .join('');
+}
+
+function sideBetCountdownSeconds(match) {
+  const endsAt = match?.sideBets?.phaseEndsAt;
+  const endsMs = endsAt ? new Date(endsAt).getTime() : NaN;
+  if (!Number.isFinite(endsMs)) return 0;
+  return Math.max(0, Math.ceil((endsMs - Date.now()) / 1000));
+}
+
+function sideBetResultBadge(result) {
+  if (!result) return '';
+  const outcome = String(result.outcome || '').toLowerCase();
+  const label = String(result.label || '').trim()
+    || (outcome === 'push' ? 'PUSH' : `${Number(result.net) >= 0 ? '+' : ''}${Math.floor(Number(result.net) || 0)}`);
+  const toneClass = outcome === 'win' ? 'is-win' : outcome === 'lose' ? 'is-loss' : 'is-push';
+  return `<span class="side-bet-result ${toneClass}">${label}</span>`;
+}
+
+function renderBlackjackRaceTile(sideBetState) {
+  const def = SIDE_BET_TILE_DEF_MAP.get(SIDE_BET_KEYS.BLACKJACK_RACE);
+  const available = Boolean(sideBetState?.available);
+  const phaseActive = Boolean(sideBetState?.phaseActive && available);
+  const race = sideBetState?.race || {};
+  const resultBadge = sideBetResultBadge(race.result);
+  const pendingAttention = phaseActive && race.awaitingYourResponse;
+
+  let status = available ? 'Waiting for proposal' : (sideBetState?.disabledReason || 'Disabled');
+  if (race.active) status = `Race active • Stake ${Number(race.stake || sideBetState?.stake || 0).toLocaleString()}`;
+  else if (race.awaitingYourResponse) status = 'Opponent proposed a race';
+  else if (race.awaitingOpponentResponse) status = 'Proposal sent';
+  else if (race.declinedBy && phaseActive) status = 'Proposal declined';
+  else if (!phaseActive && available) status = 'Race locked for this round';
+
+  return `
+    <article class="side-bet-tile side-bet-race ${pendingAttention ? 'is-attention' : ''} ${race.active ? 'is-active' : ''}">
+      <header>
+        <strong>${def.name}</strong>
+        <span class="muted">${def.payout}</span>
+      </header>
+      <div class="muted side-bet-detail">${def.detail}</div>
+      <div class="muted side-bet-status">${status}</div>
+      ${resultBadge}
+      <div class="side-bet-actions">
+        ${
+          !available
+            ? `<button class="ghost" disabled>${sideBetState?.disabledReason || 'Disabled'}</button>`
+            : phaseActive
+              ? race.active
+                ? '<button class="ghost" disabled>Race live</button>'
+                : race.canPropose
+                  ? '<button class="gold" data-race-action="propose">Propose</button>'
+                  : race.canAccept
+                    ? '<button class="primary" data-race-action="accept">Accept</button><button class="warn" data-race-action="decline">Decline</button>'
+                    : race.canCancel
+                      ? '<button class="ghost" data-race-action="cancel">Cancel</button>'
+                      : '<button class="ghost" disabled>Waiting</button>'
+              : '<button class="ghost" disabled>Locked</button>'
+        }
+      </div>
+    </article>
+  `;
+}
+
+function renderStandardSideBetTile(key, sideBetState) {
+  const def = SIDE_BET_TILE_DEF_MAP.get(key);
+  const available = Boolean(sideBetState?.available);
+  const phaseActive = Boolean(sideBetState?.phaseActive && available);
+  const tile = sideBetState?.tiles?.[key] || { enabled: false, escrowed: 0, result: null };
+  const enabled = Boolean(tile.enabled);
+  const stake = Math.max(0, Math.floor(Number(sideBetState?.stake) || 0));
+  const resultBadge = sideBetResultBadge(tile.result);
+  const status = enabled
+    ? `Staked ${Number(tile.escrowed || stake || 0).toLocaleString()}`
+    : (phaseActive ? 'Not entered' : 'Locked');
+  return `
+    <article class="side-bet-tile ${enabled ? 'is-active' : ''}">
+      <header>
+        <strong>${def.name}</strong>
+        <span class="muted">${def.payout}</span>
+      </header>
+      <div class="muted side-bet-detail">${def.detail}</div>
+      <div class="muted side-bet-status">${status}</div>
+      ${resultBadge}
+      <div class="side-bet-actions">
+        ${
+          !available
+            ? `<button class="ghost" disabled>${sideBetState?.disabledReason || 'Disabled'}</button>`
+            : phaseActive
+              ? `<button class="${enabled ? 'warn' : 'gold'}" data-sidebet-toggle="${key}" data-sidebet-enabled="${enabled ? '0' : '1'}">${enabled ? 'Remove' : `Add ${stake.toLocaleString()}`}</button>`
+              : '<button class="ghost" disabled>Locked</button>'
+        }
+      </div>
+    </article>
+  `;
+}
+
+function renderSideBetRail(keys, sideBetState, options = {}) {
+  const title = options.title || 'Side Bets';
+  const showControls = Boolean(options.showControls);
+  const available = Boolean(sideBetState?.available);
+  const phaseActive = Boolean(sideBetState?.phaseActive && available);
+  const countdown = sideBetCountdownSeconds(state.currentMatch);
+  const headerText = available
+    ? (
+      phaseActive
+        ? `Side bets open: <span data-sidebet-countdown>${countdown}</span>s`
+        : 'Side bets locked for this round'
+    )
+    : (sideBetState?.disabledReason || 'Side bets disabled');
+  return `
+    <section class="side-bet-rail-panel">
+      <div class="side-bet-rail-head">
+        <strong>${title}</strong>
+        <span class="muted">${headerText}</span>
+      </div>
+      ${
+        showControls
+          ? `<div class="side-bet-phase-controls">
+               ${
+                 available && phaseActive
+                   ? `<button class="${sideBetState?.yourReady ? 'ghost' : 'primary'}" data-sidebet-ready="${sideBetState?.yourReady ? '0' : '1'}">${sideBetState?.yourReady ? 'Edit Bets' : 'Done'}</button>`
+                   : `<button class="ghost" disabled>${available ? 'Waiting to deal' : 'Disabled'}</button>`
+               }
+               <div class="muted side-bet-ready-line">You: ${sideBetState?.yourReady ? 'ready' : 'editing'} • Opponent: ${sideBetState?.opponentReady ? 'ready' : 'editing'}</div>
+             </div>`
+          : ''
+      }
+      <div class="side-bet-tile-list">
+        ${keys.map((key) => (
+          key === SIDE_BET_KEYS.BLACKJACK_RACE
+            ? renderBlackjackRaceTile(sideBetState)
+            : renderStandardSideBetTile(key, sideBetState)
+        )).join('')}
+      </div>
+    </section>
+  `;
 }
 
 function renderMatch() {
@@ -7222,6 +7422,7 @@ function renderMatch() {
   const oppMeta = renderPlayerMeta(match.participants?.[oppId] || {});
   const phaseLabelMap = {
     ROUND_INIT: 'Betting',
+    SIDE_BET_PHASE: 'Side Bet Phase',
     DEAL: 'Dealing',
     ACTION_TURN: 'Action',
     PRESSURE_RESPONSE: 'Pressure',
@@ -7237,6 +7438,16 @@ function renderMatch() {
     match.phase === 'REVEAL' ||
     match.phase === 'RESULT' ||
     match.phase === 'NEXT_ROUND';
+  const sideBetState = match.sideBets || {
+    available: false,
+    phaseActive: false,
+    disabledReason: 'Side bets unavailable',
+    yourReady: false,
+    opponentReady: false,
+    tiles: {},
+    race: {}
+  };
+  const sideBetPhaseActive = Boolean(sideBetState.available && sideBetState.phaseActive && match.phase === 'SIDE_BET_PHASE');
   const displayBankroll =
     isOfflineMatchActive()
       ? (myState.bankroll ?? 0)
@@ -7303,6 +7514,8 @@ function renderMatch() {
   const doubleLegalForHand = Boolean(canAct && handCanDouble(activeHand, match.maxDoublesPerHand || 1));
   const actionHint = canAct
     ? 'Choose an action for your active hand.'
+    : sideBetPhaseActive
+      ? 'Side bet phase is live. Gameplay starts when the timer ends or both players are ready.'
     : waitingPressure
       ? 'Respond to pressure: Match or Surrender.'
       : opponentThinking
@@ -7316,7 +7529,7 @@ function renderMatch() {
     : actionHint;
   const noPenaltyLeave =
     isBotOpponent &&
-    (!match.stakesCommitted || match.phase === 'ROUND_INIT' || match.phase === 'RESULT' || match.phase === 'REVEAL');
+    (!match.stakesCommitted || match.phase === 'ROUND_INIT' || match.phase === 'SIDE_BET_PHASE' || match.phase === 'RESULT' || match.phase === 'REVEAL');
   const leaveWarningText = rankedMatch
     ? 'Forfeiting ends the ranked series immediately and counts as an automatic loss.'
     : (noPenaltyLeave
@@ -7330,6 +7543,8 @@ function renderMatch() {
     ? '<span class="mode-pill mode-pill-practice">Practice</span>'
     : (isBotOpponent ? '<span class="mode-pill mode-pill-real">Real Chips</span>' : '');
   const streakFlameMarkup = '<span class="streak-flame" aria-hidden="true"><svg viewBox="0 0 24 24" class="streak-flame-svg" focusable="false"><path class="streak-flame-glow-path" d="M12 2.2c3.5 2.6 5.6 5.7 5.6 9 0 4-2.4 8.2-5.6 10.5C8.8 19.4 6.4 15.2 6.4 11.2c0-2.8 1.4-5.7 3.9-8.1.3 2.3 1.6 3.8 2.7 4.7.5-1.8 1.2-3.5-.9-5.6Z"/><path class="streak-flame-main-path" d="M12 3.6c2.4 2 3.9 4.3 3.9 6.9 0 3.2-1.9 6.6-3.9 8.4-2-1.8-3.9-5.2-3.9-8.4 0-2.2 1.1-4.4 3-6.4.4 1.7 1.4 2.8 2.2 3.5.3-1.2.6-2.4-1.3-4Z"/></svg></span>';
+  const sideBetLeftRail = renderSideBetRail(SIDE_BET_LEFT_KEYS, sideBetState, { title: 'Side Bets', showControls: true });
+  const sideBetRightRail = renderSideBetRail(SIDE_BET_RIGHT_KEYS, sideBetState, { title: 'Round Props', showControls: false });
 
   app.innerHTML = `
     ${renderTopbar('Blackjack Battle')}
@@ -7474,112 +7689,117 @@ function renderMatch() {
                     <div class="strip-item bankroll-pill"><span class="muted">Bankroll</span> <strong>${Math.round(displayBankroll).toLocaleString()}</strong></div>
                   </div>
                 </div>
-                <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">
-                  ${renderEmoteBubble(oppId)}
-                  <div class="zone-head">
-                    <div class="zone-player">
-                      <span class="player-tag">Opponent</span>
-                      <h4>${playerName(oppId)}</h4>
-                      <span class="zone-player-meta">${oppMeta}</span>
-                      <span class="muted player-sub">${isBotOpponent ? (practiceMode ? 'Bot practice' : 'Bot match') : opponentConnected ? 'Connected' : 'Disconnected'}</span>
-                    </div>
-                  </div>
-                  <div class="hands">
-                    ${oppHands.length
-                      ? oppHands.map((h, idx) => renderHand(h, idx, idx === oppActiveHandIndex, pressureOpp.has(idx))).join('')
-                      : renderHandPlaceholder('Opponent Hand')}
-                  </div>
-                </div>
-                <div class="match-zone you-zone ${myTurn ? 'turn-active-zone' : ''}">
-                  ${renderEmoteBubble(me.id)}
-                  <div class="zone-head">
-                    <div class="zone-player">
-                      <span class="player-tag">You</span>
-                      <h4>${playerName(me.id)}</h4>
-                      <span class="zone-player-meta">${myMeta}</span>
-                    </div>
-                    <div class="zone-head-meta">
-                      <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
-                    </div>
-                  </div>
-                  <div class="hands">
-                    ${myHands.length
-                      ? myHands.map((h, idx) => renderHand(h, idx, idx === myActiveHandIndex, pressureMine.has(idx))).join('')
-                      : renderHandPlaceholder('Your Hand')}
-                  </div>
-                </div>
-
-                <div class="actions-panel" ${roundResolved ? 'style="display:none"' : ''}>
-                  <div class="actions-row">
-                    <div class="actions actions-main ${doubleModeActive ? 'action-double-mode' : ''}">
-                      <button data-action="hit" title="${hitButtonTitle}" class="primary" ${!canAct || hitBlockedAfterDouble ? 'disabled' : ''}>Hit</button>
-                      <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost ${doubleModeActive ? 'double-mode-cta' : ''}" ${!canAct ? 'disabled' : ''}>Stand</button>
-                      <button data-action="double" class="${doubleModeActive ? 'double-mode-cta' : ''}" title="${canAct ? (doubleLegalForHand ? 'Double your bet and draw one card (re-double allowed while eligible)' : 'Double is only available as your first move on this hand (or as a re-double chain).') : actionHint}" ${!doubleLegalForHand ? 'disabled' : ''}>Double</button>
-                      <button data-action="split" title="${splitButtonTitle}" ${!canAct || !splitLegalForHand || doubleModeActive ? 'disabled' : ''}>Split</button>
-                      <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender || doubleModeActive ? 'disabled' : ''}>Surrender</button>
-                    </div>
-                    <div class="actions-timer-slot">
-                      ${renderTurnTimer(me.id, turnTimerState, 'action')}
-                    </div>
-                  </div>
-                  <div class="muted action-hint">${actionHint}</div>
-                  ${
-                    isPvpMatch
-                      ? `<div class="emote-dock ${state.emotePickerOpen ? 'is-open' : ''}">
-                           <button id="toggleEmoteBtn" class="ghost emote-toggle-btn" type="button" ${emoteCoolingDown ? 'disabled' : ''}>🙂 Emote</button>
-                           ${
-                             state.emotePickerOpen
-                               ? `<div class="emote-popover card">
-                                    <div class="emote-grid">
-                                      <button data-emote-type="emoji" data-emote-value="😂" ${emoteCoolingDown ? 'disabled' : ''}>😂</button>
-                                      <button data-emote-type="emoji" data-emote-value="😡" ${emoteCoolingDown ? 'disabled' : ''}>😡</button>
-                                      <button data-emote-type="emoji" data-emote-value="😭" ${emoteCoolingDown ? 'disabled' : ''}>😭</button>
-                                      <button data-emote-type="emoji" data-emote-value="👍" ${emoteCoolingDown ? 'disabled' : ''}>👍</button>
-                                    </div>
-                                    <div class="emote-quips">
-                                      <button data-emote-type="quip" data-emote-value="Bitchmade" ${emoteCoolingDown ? 'disabled' : ''}>Bitchmade</button>
-                                      <button data-emote-type="quip" data-emote-value="Fuck you" ${emoteCoolingDown ? 'disabled' : ''}>Fuck you</button>
-                                      <button data-emote-type="quip" data-emote-value="Skill issue" ${emoteCoolingDown ? 'disabled' : ''}>Skill issue</button>
-                                      <button data-emote-type="quip" data-emote-value="L" ${emoteCoolingDown ? 'disabled' : ''}>L</button>
-                                    </div>
-                                  </div>`
-                               : ''
-                           }
-                         </div>
-                         <div class="actions actions-extra">
-                           <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${rankedMatch ? 'Forfeit Series' : 'Leave'}</button>
-                         </div>`
-                      : ''
-                  }
-                ${
-                  state.leaveMatchModal
-                      ? `<div class="leave-inline">
-                        <strong>${rankedMatch ? 'Forfeit Ranked Series?' : 'Leave Match?'}</strong>
-                        <p class="muted">${leaveWarningText}</p>
-                        <div class="pressure-actions">
-                          <button id="confirmLeaveMatchBtn" class="warn">${rankedMatch ? 'Forfeit Series' : 'Leave Match'}</button>
-                          <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
+                <div class="table-stage ${sideBetPhaseActive ? 'is-side-bet-phase' : ''}">
+                  <aside class="side-bet-rail side-bet-rail-left">${sideBetLeftRail}</aside>
+                  <div class="table-center ${sideBetPhaseActive ? 'is-locked' : ''}">
+                    ${sideBetPhaseActive ? '<div class="table-lock-overlay">Table is locked while side bets are open.</div>' : ''}
+                    <div class="match-zone opponent-zone ${match.currentTurn === oppId ? 'turn-active-zone' : ''}">
+                      ${renderEmoteBubble(oppId)}
+                      <div class="zone-head">
+                        <div class="zone-player">
+                          <span class="player-tag">Opponent</span>
+                          <h4>${playerName(oppId)}</h4>
+                          <span class="zone-player-meta">${oppMeta}</span>
+                          <span class="muted player-sub">${isBotOpponent ? (practiceMode ? 'Bot practice' : 'Bot match') : opponentConnected ? 'Connected' : 'Disconnected'}</span>
                         </div>
-                      </div>`
-                      : ''
-                  }
-                </div>
-
-                <details class="match-details">
-                  <summary>Details</summary>
-                  <div class="muted">
+                      </div>
+                      <div class="hands">
+                        ${oppHands.length
+                          ? oppHands.map((h, idx) => renderHand(h, idx, idx === oppActiveHandIndex, pressureOpp.has(idx))).join('')
+                          : renderHandPlaceholder('Opponent Hand')}
+                      </div>
+                    </div>
+                    <div class="match-zone you-zone ${myTurn ? 'turn-active-zone' : ''}">
+                      ${renderEmoteBubble(me.id)}
+                      <div class="zone-head">
+                        <div class="zone-player">
+                          <span class="player-tag">You</span>
+                          <h4>${playerName(me.id)}</h4>
+                          <span class="zone-player-meta">${myMeta}</span>
+                        </div>
+                        <div class="zone-head-meta">
+                          <span class="turn ${myTurn ? 'turn-on' : ''}">${myTurn ? 'Your turn' : 'Stand by'}</span>
+                        </div>
+                      </div>
+                      <div class="hands">
+                        ${myHands.length
+                          ? myHands.map((h, idx) => renderHand(h, idx, idx === myActiveHandIndex, pressureMine.has(idx))).join('')
+                          : renderHandPlaceholder('Your Hand')}
+                      </div>
+                    </div>
+                    <div class="actions-panel" ${roundResolved ? 'style="display:none"' : ''}>
+                      <div class="actions-row">
+                        <div class="actions actions-main ${doubleModeActive ? 'action-double-mode' : ''}">
+                          <button data-action="hit" title="${hitButtonTitle}" class="primary" ${!canAct || hitBlockedAfterDouble ? 'disabled' : ''}>Hit</button>
+                          <button data-action="stand" title="${canAct ? 'Lock this hand' : actionHint}" class="ghost ${doubleModeActive ? 'double-mode-cta' : ''}" ${!canAct ? 'disabled' : ''}>Stand</button>
+                          <button data-action="double" class="${doubleModeActive ? 'double-mode-cta' : ''}" title="${canAct ? (doubleLegalForHand ? 'Double your bet and draw one card (re-double allowed while eligible)' : 'Double is only available as your first move on this hand (or as a re-double chain).') : actionHint}" ${!doubleLegalForHand ? 'disabled' : ''}>Double</button>
+                          <button data-action="split" title="${splitButtonTitle}" ${!canAct || !splitLegalForHand || doubleModeActive ? 'disabled' : ''}>Split</button>
+                          <button class="warn" data-action="surrender" title="${canSurrender ? 'Lose 75% and lock hand' : 'Surrender only available before you act.'}" ${!canSurrender || doubleModeActive ? 'disabled' : ''}>Surrender</button>
+                        </div>
+                        <div class="actions-timer-slot">
+                          ${renderTurnTimer(me.id, turnTimerState, 'action')}
+                        </div>
+                      </div>
+                      <div class="muted action-hint">${actionHint}</div>
+                      ${
+                        isPvpMatch
+                          ? `<div class="emote-dock ${state.emotePickerOpen ? 'is-open' : ''}">
+                               <button id="toggleEmoteBtn" class="ghost emote-toggle-btn" type="button" ${emoteCoolingDown ? 'disabled' : ''}>🙂 Emote</button>
+                               ${
+                                 state.emotePickerOpen
+                                   ? `<div class="emote-popover card">
+                                        <div class="emote-grid">
+                                          <button data-emote-type="emoji" data-emote-value="😂" ${emoteCoolingDown ? 'disabled' : ''}>😂</button>
+                                          <button data-emote-type="emoji" data-emote-value="😡" ${emoteCoolingDown ? 'disabled' : ''}>😡</button>
+                                          <button data-emote-type="emoji" data-emote-value="😭" ${emoteCoolingDown ? 'disabled' : ''}>😭</button>
+                                          <button data-emote-type="emoji" data-emote-value="👍" ${emoteCoolingDown ? 'disabled' : ''}>👍</button>
+                                        </div>
+                                        <div class="emote-quips">
+                                          <button data-emote-type="quip" data-emote-value="Bitchmade" ${emoteCoolingDown ? 'disabled' : ''}>Bitchmade</button>
+                                          <button data-emote-type="quip" data-emote-value="Fuck you" ${emoteCoolingDown ? 'disabled' : ''}>Fuck you</button>
+                                          <button data-emote-type="quip" data-emote-value="Skill issue" ${emoteCoolingDown ? 'disabled' : ''}>Skill issue</button>
+                                          <button data-emote-type="quip" data-emote-value="L" ${emoteCoolingDown ? 'disabled' : ''}>L</button>
+                                        </div>
+                                      </div>`
+                                   : ''
+                               }
+                             </div>
+                             <div class="actions actions-extra">
+                               <button id="leaveMatchBtn" class="ghost leave-btn" type="button">${rankedMatch ? 'Forfeit Series' : 'Leave'}</button>
+                             </div>`
+                          : ''
+                      }
                     ${
-                      isBotOpponent
-                        ? `Opponent is ${playerName(oppId)} (${match.participants?.[oppId]?.difficulty} difficulty).`
-                        : `Disconnect grace: up to 60 seconds reconnect is allowed. Connected states: You ${
-                            match.disconnects[me.id]?.connected ? 'online' : 'offline'
-                          } / Opponent ${opponentConnected ? 'online' : 'offline'}`
-                    }
+                      state.leaveMatchModal
+                          ? `<div class="leave-inline">
+                            <strong>${rankedMatch ? 'Forfeit Ranked Series?' : 'Leave Match?'}</strong>
+                            <p class="muted">${leaveWarningText}</p>
+                            <div class="pressure-actions">
+                              <button id="confirmLeaveMatchBtn" class="warn">${rankedMatch ? 'Forfeit Series' : 'Leave Match'}</button>
+                              <button id="cancelLeaveMatchBtn" class="ghost">Cancel</button>
+                            </div>
+                          </div>`
+                          : ''
+                      }
+                    </div>
+                    <details class="match-details">
+                      <summary>Details</summary>
+                      <div class="muted">
+                        ${
+                          isBotOpponent
+                            ? `Opponent is ${playerName(oppId)} (${match.participants?.[oppId]?.difficulty} difficulty).`
+                            : `Disconnect grace: up to 60 seconds reconnect is allowed. Connected states: You ${
+                                match.disconnects[me.id]?.connected ? 'online' : 'offline'
+                              } / Opponent ${opponentConnected ? 'online' : 'offline'}`
+                        }
+                      </div>
+                      ${practiceMode ? '<div class="muted">Practice mode active: No chips won/lost.</div>' : ''}
+                      <div class="muted">AFK protection enabled: inactive turns auto-stand after ${Math.round((match.turnTimeoutMs || 30000) / 1000)}s.</div>
+                      <div class="muted">${actionHint}</div>
+                    </details>
                   </div>
-                  ${practiceMode ? '<div class="muted">Practice mode active: No chips won/lost.</div>' : ''}
-                  <div class="muted">AFK protection enabled: inactive turns auto-stand after ${Math.round((match.turnTimeoutMs || 30000) / 1000)}s.</div>
-                  <div class="muted">${actionHint}</div>
-                </details>
+                  <aside class="side-bet-rail side-bet-rail-right">${sideBetRightRail}</aside>
+                </div>
               </section>`
         }
         ${
@@ -7615,6 +7835,21 @@ function renderMatch() {
 
   app.querySelectorAll('[data-action]').forEach((btn) => {
     btn.onclick = () => triggerAction(btn.dataset.action);
+  });
+  app.querySelectorAll('[data-sidebet-toggle]').forEach((btn) => {
+    btn.onclick = () => {
+      emitToggleSideBet(btn.dataset.sidebetToggle, btn.dataset.sidebetEnabled === '1');
+    };
+  });
+  app.querySelectorAll('[data-sidebet-ready]').forEach((btn) => {
+    btn.onclick = () => {
+      emitSideBetReady(btn.dataset.sidebetReady === '1');
+    };
+  });
+  app.querySelectorAll('[data-race-action]').forEach((btn) => {
+    btn.onclick = () => {
+      emitBlackjackRaceAction(btn.dataset.raceAction);
+    };
   });
   const betMinus = document.getElementById('betMinus');
   if (betMinus) betMinus.onclick = () => adjustBet(-5);
@@ -7779,6 +8014,7 @@ function renderMatch() {
     };
   }
   syncTurnCountdownUI();
+  syncSideBetCountdownUI();
 }
 
 function syncPressureOverlay() {
@@ -8061,6 +8297,7 @@ function render() {
   syncQuickPlayOverlay();
   syncRankedOverlay();
   syncTurnCountdownUI();
+  syncSideBetCountdownUI();
   syncXpBars();
   if (enteringFriends && state.token) loadFriendsData();
 }
@@ -8175,6 +8412,7 @@ function render() {
     matchTurnTicker = setInterval(() => {
       if (state.view !== 'match') return;
       syncTurnCountdownUI();
+      syncSideBetCountdownUI();
     }, 120);
   }
   if (!challengeCountdownTicker) {
