@@ -1449,6 +1449,20 @@ test('41u XP scaling gives meaningful progression for high bets', () => {
   assert.equal(high >= 150 && high <= 250, true);
 });
 
+test('41v XP scaling applies difficulty/ranked multipliers consistently', () => {
+  const easy = xpWinAmountForMainBet({ isPvp: false, betAmount: 500, botDifficulty: 'easy' });
+  const medium = xpWinAmountForMainBet({ isPvp: false, betAmount: 500, botDifficulty: 'medium' });
+  const normal = xpWinAmountForMainBet({ isPvp: false, betAmount: 500, botDifficulty: 'normal' });
+  const highRoller = xpWinAmountForMainBet({ isPvp: false, betAmount: 500, botDifficulty: 'high_roller' });
+  const unrankedPvp = xpWinAmountForMainBet({ isPvp: true, ranked: false, betAmount: 500 });
+  const rankedPvp = xpWinAmountForMainBet({ isPvp: true, ranked: true, betAmount: 500 });
+
+  assert.equal(easy < medium, true);
+  assert.equal(medium < normal, true);
+  assert.equal(normal < highRoller, true);
+  assert.equal(rankedPvp > unrankedPvp, true);
+});
+
 test('42 practice matches do not advance challenge progress, real matches (including bot) do', () => {
   const user = { challengeSets: {}, skillChallenges: [] };
   refreshChallengesForUser(user, true);

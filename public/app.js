@@ -3168,6 +3168,11 @@ function emitToggleSideBet(key, enabled) {
   state.socket.emit('match:toggleSideBet', { matchId: state.currentMatch.id, key, enabled });
 }
 
+function emitReplaySideBets() {
+  if (!state.currentMatch || !state.socket) return;
+  state.socket.emit('match:replaySideBets', { matchId: state.currentMatch.id });
+}
+
 function emitSideBetReady(ready = true) {
   if (!state.currentMatch || !state.socket) return;
   state.socket.emit('match:sideBetReady', { matchId: state.currentMatch.id, ready: Boolean(ready) });
@@ -3420,6 +3425,9 @@ async function handleAuth(mode, form) {
 
 async function saveProfile(form) {
   if (state.profileSaving) return;
+  const desiredUsername = String(form.querySelector('[name="username"]')?.value || '').trim();
+  const currentUsername = String(state.me?.username || '').trim();
+  const usernameChanged = desiredUsername && desiredUsername !== currentUsername;
   const avatarStyle = form.querySelector('[name="avatar_style"]').value.trim();
   const avatarSeed = form.querySelector('[name="avatar_seed"]').value.trim();
   const selectedDeckSkin = normalizeDeckSkinId(form.querySelector('[name="selected_deck_skin"]')?.value || 'CLASSIC');
@@ -3433,6 +3441,13 @@ async function saveProfile(form) {
   }
   state.profileSaving = true;
   try {
+    let usernameData = null;
+    if (usernameChanged) {
+      usernameData = await api('/api/profile/username', {
+        method: 'PATCH',
+        body: JSON.stringify({ username: desiredUsername })
+      });
+    }
     const profileData = await api('/api/profile', {
       method: 'PUT',
       body: JSON.stringify({ avatarStyle, avatarSeed })
@@ -3449,9 +3464,13 @@ async function saveProfile(form) {
       method: 'PATCH',
       body: JSON.stringify({ selectedTitle })
     });
-    const updatedUser = titleData?.user || deckSkinData?.user || customStatData?.user || profileData?.user || null;
+    const updatedUser = titleData?.user || deckSkinData?.user || customStatData?.user || profileData?.user || usernameData?.user || null;
     if (updatedUser) {
       state.me = { ...state.me, ...updatedUser };
+    }
+    if (usernameChanged && state.me?.username) {
+      state.authUsername = state.me.username;
+      localStorage.setItem('bb_auth_username', state.me.username);
     }
     state.favoriteStatModalOpen = false;
     state.favoriteStatDraftKey = '';
@@ -5666,6 +5685,8 @@ function renderProfile() {
   const favoriteStats = favoriteStatOptionsForUser(me);
   const selectedFavoriteKey = normalizeFavoriteStatKey(me.favoriteStatKey);
   const selectedFavorite = favoriteStats.find((entry) => entry.key === selectedFavoriteKey) || favoriteStats[0];
+  const usernameChangesRemaining = Math.max(0, Math.floor(Number(me.usernameChangesRemaining) || 0));
+  const usernameLocked = usernameChangesRemaining <= 0;
   const favoriteDraftKey = normalizeFavoriteStatKey(state.favoriteStatDraftKey || selectedFavorite.key);
   const favoriteStatFilter = String(state.favoriteStatFilter || '').trim().toLowerCase();
   const filteredFavoriteStats = favoriteStatFilter
@@ -5718,7 +5739,8 @@ function renderProfile() {
     <div class="profile-two-col">
       <div class="profile-form-grid">
         <label>Username</label>
-        <input value="${me.username}" disabled />
+        <input name="username" value="${me.username}" maxlength="24" ${usernameLocked ? 'disabled' : ''} />
+        <div class="muted profile-username-limit">${usernameLocked ? 'Username changes remaining: 0 (used)' : `Username changes remaining: ${usernameChangesRemaining}`}</div>
         <label>Avatar Style</label>
         <select name="avatar_style">
           ${['adventurer', 'pixel-art', 'bottts', 'fun-emoji']
@@ -7381,10 +7403,20 @@ function renderSideBetRail(keys, sideBetState, options = {}) {
                  available && phaseActive
                    ? sideBetState?.yourReady
                      ? '<button class="ghost" disabled>Ready</button>'
-                     : '<button class="primary" data-sidebet-ready="1">Done</button>'
+                     : `<div class="side-bet-phase-actions">
+                          <button class="primary" data-sidebet-ready="1">Done</button>
+                          <button class="ghost" data-sidebet-replay="1" ${sideBetState?.canReplayLast ? '' : 'disabled'}>
+                            Place Last Side Bets${sideBetState?.lastRoundCount ? ` (${sideBetState.lastRoundCount})` : ''}
+                          </button>
+                        </div>`
                    : `<button class="ghost" disabled>${available ? 'Waiting to deal' : 'Disabled'}</button>`
                }
                <div class="muted side-bet-ready-line">You: ${sideBetState?.yourReady ? 'ready' : 'editing'} • Opponent: ${sideBetState?.opponentReady ? 'ready' : 'editing'}</div>
+               ${
+                 available && phaseActive && sideBetState?.canReplayLast
+                   ? `<div class="muted side-bet-replay-line">Can afford ${Math.max(0, Math.floor(Number(sideBetState?.lastRoundAffordableCount) || 0))}/${Math.max(0, Math.floor(Number(sideBetState?.lastRoundCount) || 0))} from last round.</div>`
+                   : ''
+               }
              </div>`
           : ''
       }
@@ -7569,7 +7601,7 @@ function renderMatch() {
   const modePill = practiceMode
     ? '<span class="mode-pill mode-pill-practice">Practice</span>'
     : (isBotOpponent ? '<span class="mode-pill mode-pill-real">Real Chips</span>' : '');
-  const streakFlameMarkup = '<span class="streak-flame" aria-hidden="true"><svg viewBox="0 0 24 24" class="streak-flame-svg" focusable="false"><path class="streak-flame-glow-path" d="M12 2.2c3.5 2.6 5.6 5.7 5.6 9 0 4-2.4 8.2-5.6 10.5C8.8 19.4 6.4 15.2 6.4 11.2c0-2.8 1.4-5.7 3.9-8.1.3 2.3 1.6 3.8 2.7 4.7.5-1.8 1.2-3.5-.9-5.6Z"/><path class="streak-flame-main-path" d="M12 3.6c2.4 2 3.9 4.3 3.9 6.9 0 3.2-1.9 6.6-3.9 8.4-2-1.8-3.9-5.2-3.9-8.4 0-2.2 1.1-4.4 3-6.4.4 1.7 1.4 2.8 2.2 3.5.3-1.2.6-2.4-1.3-4Z"/></svg></span>';
+  const streakFlameMarkup = '<span class="streak-emoji" aria-hidden="true">🔥</span>';
   const sideBetLeftRail = renderSideBetRail(SIDE_BET_LEFT_KEYS, sideBetState, { title: 'Side Bets', showControls: true });
   const sideBetRightRail = renderSideBetRail(SIDE_BET_RIGHT_KEYS, sideBetState, { title: 'Round Props', showControls: false });
 
@@ -7871,6 +7903,11 @@ function renderMatch() {
   app.querySelectorAll('[data-sidebet-ready]').forEach((btn) => {
     btn.onclick = () => {
       emitSideBetReady(btn.dataset.sidebetReady === '1');
+    };
+  });
+  app.querySelectorAll('[data-sidebet-replay]').forEach((btn) => {
+    btn.onclick = () => {
+      emitReplaySideBets();
     };
   });
   app.querySelectorAll('[data-race-action]').forEach((btn) => {

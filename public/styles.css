@@ -2575,8 +2575,17 @@ select:focus-visible {
   gap: 5px;
 }
 
+.side-bet-phase-actions {
+  display: grid;
+  gap: 6px;
+}
+
 .side-bet-ready-line {
   font-size: 0.68rem;
+}
+
+.side-bet-replay-line {
+  font-size: 0.67rem;
 }
 
 .side-bet-tile-list {
@@ -3510,6 +3519,20 @@ select:focus-visible {
   box-shadow: 0 18px 30px rgba(2, 7, 5, 0.4), 0 0 0 1px rgba(226, 190, 121, 0.26) inset;
 }
 
+.playing-card.face.deck-skin-celestial-ivory.red,
+.playing-card.face.deck-skin-celestial-ivory.black {
+  color: #8c6f3a;
+}
+
+.playing-card.face.deck-skin-celestial-ivory .rank {
+  text-shadow: 0 1px 0 rgba(255, 251, 241, 0.52), 0 1px 1px rgba(58, 42, 15, 0.14);
+}
+
+.playing-card.face.deck-skin-celestial-ivory .corner-suit,
+.playing-card.face.deck-skin-celestial-ivory .center-suit-icon {
+  opacity: 0.9;
+}
+
 .playing-card.hidden.deck-skin-celestial-ivory {
   --card-back-foil: rgba(226, 190, 121, 0.34);
   --card-back-mesh-a: rgba(250, 224, 169, 0.1);
@@ -3777,71 +3800,14 @@ select:focus-visible {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 18px rgba(0, 0, 0, 0.2);
 }
 
-.streak-flame {
-  position: relative;
+.streak-emoji {
   display: inline-flex;
-  width: 30px;
-  height: 33px;
-  margin-left: 3px;
-  margin-bottom: -5px;
-  transform-origin: center bottom;
-  filter: drop-shadow(0 0 10px rgba(242, 148, 79, 0.36));
-}
-
-.streak-flame-svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-  overflow: visible;
-  animation: streakFlameBob 1.08s ease-in-out infinite;
-  transform-origin: 50% 100%;
-}
-
-.streak-flame-main-path,
-.streak-flame-glow-path {
-  transform-box: fill-box;
-  transform-origin: center bottom;
-  will-change: transform, opacity;
-}
-
-.streak-flame-main-path {
-  fill: #ffb764;
-  filter: drop-shadow(0 0 3px rgba(255, 190, 110, 0.4));
-  animation: streakFlameMain 1.02s ease-in-out infinite;
-}
-
-.streak-flame-glow-path {
-  fill: rgba(255, 180, 103, 0.42);
-  animation: streakFlameGlow 1.02s ease-in-out infinite;
-}
-
-@keyframes streakFlameBob {
-  0%, 100% {
-    transform: translateY(0) rotate(-2deg);
-  }
-  50% {
-    transform: translateY(-0.6px) rotate(2deg);
-  }
-}
-
-@keyframes streakFlameMain {
-  0%, 100% {
-    transform: scale(0.94, 1.04) rotate(-2.5deg);
-  }
-  50% {
-    transform: scale(1.04, 0.94) rotate(2.5deg);
-  }
-}
-
-@keyframes streakFlameGlow {
-  0%, 100% {
-    opacity: 0.24;
-    transform: scale(0.95);
-  }
-  50% {
-    opacity: 0.56;
-    transform: scale(1.06);
-  }
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  font-size: 1rem;
+  line-height: 1;
+  filter: drop-shadow(0 0 4px rgba(255, 167, 84, 0.34));
 }
 
 .actions-row {
@@ -4777,6 +4743,12 @@ select:focus-visible {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.82rem;
+}
+
+.profile-username-limit {
+  grid-column: 2;
+  margin-top: -6px;
+  font-size: 0.73rem;
 }
 
 .profile-preview-card {

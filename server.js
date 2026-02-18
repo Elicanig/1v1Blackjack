@@ -130,6 +130,14 @@ const XP_WIN_MAX_BOT = 420;
 const XP_LOSS_RATIO = 0.35;
 const XP_LOSS_MIN = 4;
 const XP_LOSS_MAX = 180;
+const XP_DIFFICULTY_MULTIPLIERS = Object.freeze({
+  EASY: 0.86,
+  MEDIUM: 1,
+  NORMAL: 1.12,
+  HIGH_ROLLER: 1.25,
+  RANKED: 1.18
+});
+const USERNAME_CHANGES_FREE = 1;
 const BOT_DECISION_DEBUG = parseEnvBoolean(process.env.BOT_DECISION_DEBUG || '');
 const PROFILE_BORDER_DEFS = Object.freeze([
   { id: 'NONE', name: 'None', minLevelRequired: 1, tier: 'Default', previewToken: 'none' },
@@ -599,6 +607,16 @@ for (const user of db.data.users) {
   if (!user.usernameKey) {
     user.usernameKey = normalizeUsername(user.username || '');
     dbTouched = true;
+  }
+  if (!Number.isFinite(Number(user.usernameChangesRemaining))) {
+    user.usernameChangesRemaining = USERNAME_CHANGES_FREE;
+    dbTouched = true;
+  } else {
+    const remaining = Math.max(0, Math.min(USERNAME_CHANGES_FREE, Math.floor(Number(user.usernameChangesRemaining) || 0)));
+    if (remaining !== user.usernameChangesRemaining) {
+      user.usernameChangesRemaining = remaining;
+      dbTouched = true;
+    }
   }
   if (user.lastFreeClaimAt === undefined) {
     user.lastFreeClaimAt = null;
@@ -1308,6 +1326,63 @@ function sideBetTemplateByPlayer() {
     acc[key] = { enabled: false, escrowed: 0, result: null };
     return acc;
   }, {});
+}
+
+function ensureSideBetLastRoundByPlayer(match) {
+  if (!match || !Array.isArray(match.playerIds)) return {};
+  if (!match.sideBetLastRoundByPlayer || typeof match.sideBetLastRoundByPlayer !== 'object' || Array.isArray(match.sideBetLastRoundByPlayer)) {
+    match.sideBetLastRoundByPlayer = {};
+  }
+  for (const pid of match.playerIds) {
+    if (!Array.isArray(match.sideBetLastRoundByPlayer[pid])) {
+      match.sideBetLastRoundByPlayer[pid] = [];
+    } else {
+      match.sideBetLastRoundByPlayer[pid] = match.sideBetLastRoundByPlayer[pid]
+        .map((key) => String(key || '').toUpperCase())
+        .filter((key, index, arr) => PER_ROUND_SIDE_BET_KEYS.includes(key) && arr.indexOf(key) === index);
+    }
+  }
+  return match.sideBetLastRoundByPlayer;
+}
+
+function rememberLastRoundSideBets(match) {
+  if (!match?.round?.sideBets) return;
+  const sideBets = match.round.sideBets;
+  const remembered = ensureSideBetLastRoundByPlayer(match);
+  for (const pid of match.playerIds) {
+    const playerTiles = sideBets.tilesByPlayer?.[pid] || {};
+    remembered[pid] = PER_ROUND_SIDE_BET_KEYS.filter((key) => {
+      const tile = playerTiles[key];
+      return Boolean(tile?.enabled) && Math.max(0, Math.floor(Number(tile?.escrowed) || 0)) > 0;
+    });
+  }
+}
+
+function sideBetReplayAffordableCount(match, playerId, replayKeys = [], stake = 0, { includeCurrentEscrowRefund = false } = {}) {
+  const normalizedStake = Math.max(1, Math.floor(Number(stake) || sideBetStakeForRound(match)));
+  const keys = (Array.isArray(replayKeys) ? replayKeys : [])
+    .map((key) => String(key || '').toUpperCase())
+    .filter((key, index, arr) => PER_ROUND_SIDE_BET_KEYS.includes(key) && arr.indexOf(key) === index);
+  if (!keys.length) return 0;
+  if (!isRealMatch(match) || isBotPlayer(playerId)) return keys.length;
+  let bankroll = Math.max(0, Math.floor(Number(getParticipantChips(match, playerId)) || 0));
+  if (includeCurrentEscrowRefund) {
+    const playerTiles = match?.round?.sideBets?.tilesByPlayer?.[playerId] || {};
+    const refunded = PER_ROUND_SIDE_BET_KEYS.reduce((sum, key) => {
+      const tile = playerTiles[key];
+      return sum + Math.max(0, Math.floor(Number(tile?.escrowed) || 0));
+    }, 0);
+    bankroll += refunded;
+  }
+  const reserve = reservedMainStakeForSideBets(match, playerId);
+  let affordableCount = 0;
+  for (const key of keys) {
+    if (!key) continue;
+    if (bankroll - normalizedStake < reserve) break;
+    bankroll -= normalizedStake;
+    affordableCount += 1;
+  }
+  return affordableCount;
 }
 
 function rankStrength(rank) {
@@ -2261,6 +2336,17 @@ function xpBetMultiplierFromAmount(betAmount) {
   return Math.max(1, Math.min(XP_BET_FACTOR_CAP, scaled));
 }
 
+function xpDifficultyMultiplier({ isPvp = false, ranked = false, botDifficulty = 'normal' } = {}) {
+  if (isPvp) {
+    return ranked ? XP_DIFFICULTY_MULTIPLIERS.RANKED : 1;
+  }
+  const key = String(botDifficulty || 'normal').trim().toLowerCase();
+  if (key === 'easy') return XP_DIFFICULTY_MULTIPLIERS.EASY;
+  if (key === 'medium') return XP_DIFFICULTY_MULTIPLIERS.MEDIUM;
+  if (key === 'high_roller') return XP_DIFFICULTY_MULTIPLIERS.HIGH_ROLLER;
+  return XP_DIFFICULTY_MULTIPLIERS.NORMAL;
+}
+
 function exposureBetForXp(playerRoundState, fallbackBet = BASE_BET) {
   const safeFallback = Math.max(1, Math.floor(Number(fallbackBet) || BASE_BET));
   const hands = Array.isArray(playerRoundState?.hands) ? playerRoundState.hands : [];
@@ -2269,19 +2355,21 @@ function exposureBetForXp(playerRoundState, fallbackBet = BASE_BET) {
   return Math.max(safeFallback, exposure);
 }
 
-function xpWinAmountForMainBet({ isPvp = false, betAmount = BASE_BET, streakMultiplier = 1 } = {}) {
+function xpWinAmountForMainBet({ isPvp = false, ranked = false, botDifficulty = 'normal', betAmount = BASE_BET, streakMultiplier = 1 } = {}) {
   const base = isPvp ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
   const factor = xpBetMultiplierFromAmount(betAmount);
+  const difficulty = xpDifficultyMultiplier({ isPvp, ranked, botDifficulty });
   const streak = Math.max(1, Number(streakMultiplier) || 1);
   const cap = isPvp ? XP_WIN_MAX : XP_WIN_MAX_BOT;
-  const raw = base * factor * streak;
+  const raw = base * factor * difficulty * streak;
   return Math.max(XP_WIN_MIN, Math.min(cap, Math.round(raw)));
 }
 
-function xpLossAmountForMainBet({ isPvp = false, betAmount = BASE_BET } = {}) {
+function xpLossAmountForMainBet({ isPvp = false, ranked = false, botDifficulty = 'normal', betAmount = BASE_BET } = {}) {
   const baseWin = isPvp ? XP_REWARDS.pvpWin : XP_REWARDS.botWin;
   const factor = xpBetMultiplierFromAmount(betAmount);
-  const raw = baseWin * factor * XP_LOSS_RATIO;
+  const difficulty = xpDifficultyMultiplier({ isPvp, ranked, botDifficulty });
+  const raw = baseWin * factor * difficulty * XP_LOSS_RATIO;
   return Math.max(XP_LOSS_MIN, Math.min(XP_LOSS_MAX, Math.round(raw)));
 }
 
@@ -2341,6 +2429,10 @@ function normalizeUsername(username) {
   return String(username || '').trim().toLowerCase();
 }
 
+function remainingUsernameChangesForUser(user) {
+  return Math.max(0, Math.min(USERNAME_CHANGES_FREE, Math.floor(Number(user?.usernameChangesRemaining) || 0)));
+}
+
 function avatarUrl(style, seed) {
   const safeStyle = String(style || 'adventurer').trim().toLowerCase() || 'adventurer';
   const safeSeed = String(seed || 'player').trim() || 'player';
@@ -2371,6 +2463,7 @@ function sanitizeUser(user) {
   return {
     id: user.id,
     username: user.username,
+    usernameChangesRemaining: remainingUsernameChangesForUser(user),
     avatar: user.avatar,
     avatarUrl: user.avatar,
     avatarStyle: user.avatarStyle || 'adventurer',
@@ -4379,6 +4472,7 @@ function scheduleBotBlackjackRaceAutoAccept(match, botId) {
 function buildClientSideBetState(match, viewerId, opponentId) {
   const sideBets = match?.round?.sideBets;
   const race = ensureSideBetRace(match);
+  const replayMemory = ensureSideBetLastRoundByPlayer(match);
   const available = Boolean(sideBets?.enabled);
   const phaseActive = match?.phase === PHASES.SIDE_BET_PHASE;
   const disabledReason = isRankedMatch(match)
@@ -4395,6 +4489,10 @@ function buildClientSideBetState(match, viewerId, opponentId) {
   const canDecline = Boolean(available && phaseActive && awaitingYourResponse);
   const canCancel = Boolean(available && phaseActive && awaitingOpponentResponse);
   const stake = Math.max(1, Math.floor(Number(sideBets?.stake) || sideBetStakeForRound(match)));
+  const lastRoundKeys = (replayMemory?.[viewerId] || [])
+    .map((key) => String(key || '').toUpperCase())
+    .filter((key, index, arr) => PER_ROUND_SIDE_BET_KEYS.includes(key) && arr.indexOf(key) === index);
+  const lastRoundAffordableCount = sideBetReplayAffordableCount(match, viewerId, lastRoundKeys, stake, { includeCurrentEscrowRefund: true });
 
   const tileState = {};
   for (const key of PER_ROUND_SIDE_BET_KEYS) {
@@ -4420,6 +4518,10 @@ function buildClientSideBetState(match, viewerId, opponentId) {
     yourReady: Boolean(sideBets?.readyByPlayer?.[viewerId]),
     opponentReady: Boolean(sideBets?.readyByPlayer?.[opponentId]),
     allReady: Boolean(sideBets?.readyByPlayer?.[viewerId] && sideBets?.readyByPlayer?.[opponentId]),
+    lastRoundKeys,
+    lastRoundCount: lastRoundKeys.length,
+    lastRoundAffordableCount,
+    canReplayLast: Boolean(available && phaseActive && !sideBets?.readyByPlayer?.[viewerId] && lastRoundKeys.length > 0),
     tiles: tileState,
     race: {
       active: Boolean(race?.active),
@@ -5143,6 +5245,7 @@ function startRound(match) {
     }
   };
   match.round.sideBets = buildRoundSideBetState(match);
+  ensureSideBetLastRoundByPlayer(match);
   ensureSideBetRace(match);
   clearRoundPhaseTimer(match.id);
   match.resultFinalized = false;
@@ -5267,6 +5370,7 @@ function finalizeSideBetPhase(match, { source = 'timer' } = {}) {
   match.round.sideBets = sideBets;
   sideBets.locked = true;
   sideBets.phaseEndsAt = sideBets.phaseEndsAt || nowIso();
+  rememberLastRoundSideBets(match);
   clearBotRaceAcceptTimer(match.id);
   clearPendingRaceProposal(match);
   clearRoundPhaseTimer(match.id);
@@ -5358,6 +5462,70 @@ function applySideBetToggle(match, playerId, key, enabled) {
 
   sideBets.readyByPlayer[playerId] = false;
   return { ok: true };
+}
+
+function applyReplayLastSideBets(match, playerId) {
+  if (!match?.round) return { error: 'Round missing' };
+  if (!match.playerIds.includes(playerId)) return { error: 'Unauthorized' };
+  if (match.phase !== PHASES.SIDE_BET_PHASE) return { error: 'Side bets are closed for this round' };
+  const sideBets = match.round.sideBets;
+  if (!sideBets?.enabled) return { error: 'Side bets are disabled in this mode' };
+  if (sideBets.locked) return { error: 'Side bets are locked for this round' };
+  if (sideBets.readyByPlayer?.[playerId]) return { error: 'You are marked ready for this round' };
+
+  const remembered = ensureSideBetLastRoundByPlayer(match);
+  const replayKeys = (remembered?.[playerId] || [])
+    .map((key) => String(key || '').toUpperCase())
+    .filter((key, index, arr) => PER_ROUND_SIDE_BET_KEYS.includes(key) && arr.indexOf(key) === index);
+  if (!replayKeys.length) return { error: 'No previous side bets found' };
+
+  const stake = Math.max(1, Math.floor(Number(sideBets.stake) || sideBetStakeForRound(match)));
+  const affordableCount = sideBetReplayAffordableCount(match, playerId, replayKeys, stake, { includeCurrentEscrowRefund: true });
+  if (affordableCount <= 0) {
+    return { error: `Need at least ${stake.toLocaleString()} chips to replay side bets` };
+  }
+  const keysToApply = replayKeys.slice(0, affordableCount);
+  const playerTiles = sideBets.tilesByPlayer?.[playerId];
+  if (!playerTiles) return { error: 'Invalid side bet state' };
+
+  for (const key of PER_ROUND_SIDE_BET_KEYS) {
+    const tile = playerTiles[key];
+    const refund = Math.max(0, Math.floor(Number(tile?.escrowed) || 0));
+    if (tile) {
+      tile.enabled = false;
+      tile.escrowed = 0;
+      tile.result = null;
+    }
+    if (refund > 0 && isRealMatch(match) && !isBotPlayer(playerId)) {
+      setParticipantChips(match, playerId, getParticipantChips(match, playerId) + refund);
+    }
+  }
+
+  let appliedCount = 0;
+  for (const key of keysToApply) {
+    const tile = playerTiles[key];
+    if (!tile) continue;
+    if (!canAffordIncrement(match, playerId, stake)) continue;
+    if (!canAffordSideBetIncrement(match, playerId, stake)) continue;
+    tile.enabled = true;
+    tile.escrowed = stake;
+    tile.result = null;
+    appliedCount += 1;
+    if (isRealMatch(match) && !isBotPlayer(playerId)) {
+      setParticipantChips(match, playerId, getParticipantChips(match, playerId) - stake);
+    }
+  }
+
+  if (isRealMatch(match) && !isBotPlayer(playerId)) {
+    emitUserUpdate(playerId);
+  }
+  sideBets.readyByPlayer[playerId] = false;
+  return {
+    ok: true,
+    requestedCount: replayKeys.length,
+    appliedCount,
+    skippedCount: Math.max(0, replayKeys.length - appliedCount)
+  };
 }
 
 function applySideBetReady(match, playerId, ready = true) {
@@ -6287,9 +6455,23 @@ function resolveRound(match) {
   if (realMatch) {
     // XP progression is based on the main round bet only (side bets excluded by design).
     const mainBetForXp = Math.max(1, Math.floor(Number(match.round?.baseBet) || BASE_BET));
+    const botIdForXp = isBotMatch(match) ? match.playerIds.find((id) => isBotPlayer(id)) : null;
+    const botDifficultyForXp = botIdForXp
+      ? (
+        String(match.matchType || '').toUpperCase() === 'HIGH_ROLLER'
+          ? 'high_roller'
+          : getBotDifficulty(match, botIdForXp)
+      )
+      : 'normal';
+    const difficultyMultiplierForXp = xpDifficultyMultiplier({
+      isPvp: pvpMatch,
+      ranked: rankedRound,
+      botDifficulty: botDifficultyForXp
+    });
     const mainBetMultiplier = xpBetMultiplierFromAmount(mainBetForXp);
-    xpMetaByPlayer[aId] = { betAmount: mainBetForXp, multiplier: mainBetMultiplier };
-    xpMetaByPlayer[bId] = { betAmount: mainBetForXp, multiplier: mainBetMultiplier };
+    const effectiveMultiplier = Number((mainBetMultiplier * difficultyMultiplierForXp).toFixed(2));
+    xpMetaByPlayer[aId] = { betAmount: mainBetForXp, multiplier: effectiveMultiplier };
+    xpMetaByPlayer[bId] = { betAmount: mainBetForXp, multiplier: effectiveMultiplier };
     const awardXpDelta = (user, amount) => {
       if (!user) return 0;
       const before = Math.max(0, Math.floor(Number(user.xp) || 0));
@@ -6301,36 +6483,60 @@ function resolveRound(match) {
       if (userA) {
         const gain = xpWinAmountForMainBet({
           isPvp: pvpMatch,
+          ranked: rankedRound,
+          botDifficulty: botDifficultyForXp,
           betAmount: mainBetForXp,
           streakMultiplier: xpStreakBonusMultiplier(userA)
         });
         xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
       }
       if (userB) {
-        const gain = xpLossAmountForMainBet({ isPvp: pvpMatch, betAmount: mainBetForXp });
+        const gain = xpLossAmountForMainBet({
+          isPvp: pvpMatch,
+          ranked: rankedRound,
+          botDifficulty: botDifficultyForXp,
+          betAmount: mainBetForXp
+        });
         xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
       }
     } else if (netA < 0) {
       if (userB) {
         const gain = xpWinAmountForMainBet({
           isPvp: pvpMatch,
+          ranked: rankedRound,
+          botDifficulty: botDifficultyForXp,
           betAmount: mainBetForXp,
           streakMultiplier: xpStreakBonusMultiplier(userB)
         });
         xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
       }
       if (userA) {
-        const gain = xpLossAmountForMainBet({ isPvp: pvpMatch, betAmount: mainBetForXp });
+        const gain = xpLossAmountForMainBet({
+          isPvp: pvpMatch,
+          ranked: rankedRound,
+          botDifficulty: botDifficultyForXp,
+          betAmount: mainBetForXp
+        });
         xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
       }
     } else {
       // Push still grants a small amount of progression.
       if (userA) {
-        const gain = Math.max(1, Math.floor(xpLossAmountForMainBet({ isPvp: pvpMatch, betAmount: mainBetForXp }) * 0.5));
+        const gain = Math.max(1, Math.floor(xpLossAmountForMainBet({
+          isPvp: pvpMatch,
+          ranked: rankedRound,
+          botDifficulty: botDifficultyForXp,
+          betAmount: mainBetForXp
+        }) * 0.5));
         xpDeltaByPlayer[aId] = awardXpDelta(userA, gain);
       }
       if (userB) {
-        const gain = Math.max(1, Math.floor(xpLossAmountForMainBet({ isPvp: pvpMatch, betAmount: mainBetForXp }) * 0.5));
+        const gain = Math.max(1, Math.floor(xpLossAmountForMainBet({
+          isPvp: pvpMatch,
+          ranked: rankedRound,
+          botDifficulty: botDifficultyForXp,
+          betAmount: mainBetForXp
+        }) * 0.5));
         xpDeltaByPlayer[bId] = awardXpDelta(userB, gain);
       }
     }
@@ -8060,6 +8266,7 @@ function buildNewUser(username) {
     id: nanoid(),
     username: cleanUsername,
     usernameKey,
+    usernameChangesRemaining: USERNAME_CHANGES_FREE,
     authToken: nanoid(36),
     pin,
     pinHash: bcrypt.hashSync(pin, 10),
@@ -8326,6 +8533,41 @@ app.put('/api/profile', authMiddleware, async (req, res) => {
 
 app.get('/api/profile', authMiddleware, (req, res) => {
   return res.json({ user: sanitizeSelfUser(req.user) });
+});
+
+app.patch('/api/profile/username', authMiddleware, async (req, res) => {
+  const nextUsername = String(req.body?.username || '').trim();
+  if (!nextUsername) return res.status(400).json({ error: 'Username required' });
+  if (nextUsername.length < 3) return res.status(400).json({ error: 'Username too short' });
+  const currentUsername = String(req.user.username || '').trim();
+  const currentKey = normalizeUsername(currentUsername);
+  const nextKey = normalizeUsername(nextUsername);
+  if (!nextKey) return res.status(400).json({ error: 'Username required' });
+  if (nextKey === currentKey) {
+    return res.json({ ok: true, unchanged: true, user: sanitizeSelfUser(req.user) });
+  }
+  if (remainingUsernameChangesForUser(req.user) <= 0) {
+    return res.status(403).json({ error: 'No username changes remaining' });
+  }
+  const existing = getUserByUsername(nextUsername);
+  if (existing && existing.id !== req.user.id) {
+    return res.status(409).json({ error: 'Username already exists' });
+  }
+  req.user.username = nextUsername;
+  req.user.usernameKey = nextKey;
+  req.user.usernameChangesRemaining = Math.max(0, remainingUsernameChangesForUser(req.user) - 1);
+  if (!req.user.avatarSeed || req.user.avatarSeed === currentUsername) {
+    req.user.avatarSeed = nextUsername;
+  }
+  req.user.avatar = avatarUrl(req.user.avatarStyle, req.user.avatarSeed || req.user.username);
+  invalidateLeaderboardCache();
+  await db.write();
+  return res.json({
+    ok: true,
+    username: req.user.username,
+    usernameChangesRemaining: req.user.usernameChangesRemaining,
+    user: sanitizeSelfUser(req.user)
+  });
 });
 
 app.patch('/api/profile/custom-stat', authMiddleware, async (req, res) => {
@@ -9455,6 +9697,17 @@ io.on('connection', (socket) => {
     const match = matches.get(matchId);
     if (!match) return socket.emit('match:error', { error: 'Match not found' });
     const result = applySideBetToggle(match, userId, key, enabled);
+    if (result.error) return socket.emit('match:error', result);
+    pushMatchState(match);
+    db.write();
+    return null;
+  });
+
+  socket.on('match:replaySideBets', (payload = {}) => {
+    const { matchId } = payload;
+    const match = matches.get(matchId);
+    if (!match) return socket.emit('match:error', { error: 'Match not found' });
+    const result = applyReplayLastSideBets(match, userId);
     if (result.error) return socket.emit('match:error', result);
     pushMatchState(match);
     db.write();
