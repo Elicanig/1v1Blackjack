@@ -137,7 +137,7 @@ const XP_DIFFICULTY_MULTIPLIERS = Object.freeze({
   HIGH_ROLLER: 1.25,
   RANKED: 1.18
 });
-const USERNAME_CHANGES_FREE = 2;
+const USERNAME_CHANGES_FREE = 1;
 const BOT_DECISION_DEBUG = parseEnvBoolean(process.env.BOT_DECISION_DEBUG || '');
 const PROFILE_BORDER_DEFS = Object.freeze([
   { id: 'NONE', name: 'None', minLevelRequired: 1, tier: 'Default', previewToken: 'none' },
@@ -192,14 +192,6 @@ const DECK_SKIN_DEFS = Object.freeze([
     minLevelRequired: 1,
     unlockCondition: { type: 'blackjacks', threshold: 300 },
     unlockHint: 'Deal 300 natural blackjacks.'
-  },
-  {
-    id: 'SOVEREIGN_CHROMA',
-    name: 'Sovereign Chroma',
-    description: 'Rare midnight foil with restrained chroma shimmer.',
-    minLevelRequired: 1,
-    unlockCondition: { type: 'rankedWins', threshold: 200 },
-    unlockHint: 'Win 200 ranked series.'
   }
 ]);
 const DECK_SKIN_DEFS_BY_ID = Object.freeze(
@@ -1174,13 +1166,6 @@ function isPracticeMatch(match) {
 
 function isRealMatch(match) {
   return !isPracticeMatch(match);
-}
-
-function matchCountsForChallenges(match) {
-  if (!match) return false;
-  if (isRealMatch(match)) return true;
-  // Practice bot matches still progress challenges.
-  return isPracticeMatch(match) && isBotMatch(match);
 }
 
 const RULES = {
@@ -2652,33 +2637,6 @@ function emitUserUpdate(userId) {
   const user = getUserById(userId);
   if (!user) return;
   emitToUser(userId, 'user:update', { user: sanitizeSelfUser(user) });
-}
-
-function challengeRealtimePayloadForUser(user, nowMs = Date.now()) {
-  const challengeData = buildChallengePayload(user);
-  const eventsSnapshot = eventsSnapshotPayload(nowMs);
-  return {
-    ...challengeData,
-    serverNow: eventsSnapshot.serverNow,
-    activeEvents: eventsSnapshot.activeEvents
-  };
-}
-
-function emitChallengeUpdate(userId) {
-  if (!userId || isBotPlayer(userId)) return;
-  const user = getUserById(userId);
-  if (!user) return;
-  refreshChallengesForUser(user);
-  ensureSkillChallenges(user);
-  emitToUser(userId, 'challenges:update', challengeRealtimePayloadForUser(user));
-}
-
-function emitChallengeUpdatesForMatch(match) {
-  if (!match || !Array.isArray(match.playerIds)) return;
-  for (const pid of match.playerIds) {
-    if (isBotPlayer(pid)) continue;
-    emitChallengeUpdate(pid);
-  }
 }
 
 function notificationExpiryIso(fromIso = nowIso()) {
@@ -4763,7 +4721,6 @@ function pushMatchState(match) {
     if (!socketId) continue;
     io.to(socketId).emit('match:state', buildClientState(match, pid));
   }
-  emitChallengeUpdatesForMatch(match);
 }
 
 function emitMatchBetUpdated(match, {
@@ -4951,7 +4908,8 @@ function recordChallengeEvent(user, event, amount = 1) {
 }
 
 function recordChallengeEventForMatch(match, user, event, amount = 1) {
-  if (!matchCountsForChallenges(match)) return false;
+  // Real-chip bot and PvP matches both count; practice/no-delta matches do not.
+  if (!isRealMatch(match)) return false;
   recordChallengeEvent(user, event, amount);
   return true;
 }
@@ -5971,7 +5929,6 @@ function resolveRound(match) {
   match.round.isResolved = true;
   match.phase = PHASES.ROUND_RESOLVE;
   const realMatch = isRealMatch(match);
-  const challengeMatch = matchCountsForChallenges(match);
   const [aId, bId] = match.playerIds;
   const a = match.round.players[aId];
   const b = match.round.players[bId];
@@ -6253,10 +6210,6 @@ function resolveRound(match) {
     if (!user) return;
     const stats = user.stats || (user.stats = cloneUserStatsDefaults());
     const isBotOpponent = isBotPlayer(nextPlayerId(match, ownId));
-    const challengeEligibleForUser = challengeMatch && (realMatch || isBotOpponent);
-    const ownWon = out.winner === ownId;
-    const ownLost = out.loser === ownId;
-    const ownPush = !ownWon && !ownLost;
     if (isBotOpponent) {
       if (isPracticeMatch(match)) stats.handsPlayedBotPractice = (stats.handsPlayedBotPractice || 0) + 1;
       else stats.handsPlayedBotReal = (stats.handsPlayedBotReal || 0) + 1;
@@ -6265,15 +6218,11 @@ function resolveRound(match) {
       else stats.handsPlayedPvpReal = (stats.handsPlayedPvpReal || 0) + 1;
     }
 
-    if (!realMatch) {
-      if (challengeEligibleForUser) {
-        recordChallengeEvent(user, 'hand_played', 1);
-        if (ownWon) recordChallengeEvent(user, 'hand_won', 1);
-        else if (ownLost) recordChallengeEvent(user, 'hand_lost', 1);
-        else if (ownPush) recordChallengeEvent(user, 'push', 1);
-      }
-      return;
-    }
+    if (!realMatch) return;
+
+    const ownWon = out.winner === ownId;
+    const ownLost = out.loser === ownId;
+    const ownPush = !ownWon && !ownLost;
     const handCards = Array.isArray(hand?.cards) ? hand.cards : [];
     const handBet = Math.max(0, Math.floor(Number(hand?.bet) || 0));
     const handCardsCount = handCards.length;
@@ -6282,7 +6231,7 @@ function resolveRound(match) {
     stats.handsPlayed = (stats.handsPlayed || 0) + 1;
     stats.realBetSum = (stats.realBetSum || 0) + handBet;
     stats.realBetCount = (stats.realBetCount || 0) + 1;
-    if (challengeEligibleForUser) recordChallengeEvent(user, 'hand_played', 1);
+    recordChallengeEvent(user, 'hand_played', 1);
 
     if (!handSummary.isBust) {
       stats.highestSafeTotal = Math.max(stats.highestSafeTotal || 0, handSummary.total || 0);
@@ -6309,7 +6258,7 @@ function resolveRound(match) {
       stats.totalChipsWon = (stats.totalChipsWon || 0) + (out.amount || 0);
       stats.biggestHandWin = Math.max(stats.biggestHandWin || 0, out.amount || 0);
       if (!hand?.bust) stats.maxCardsInWinningHand = Math.max(stats.maxCardsInWinningHand || 0, handCardsCount);
-      if (challengeEligibleForUser) recordChallengeEvent(user, 'hand_won', 1);
+      recordChallengeEvent(user, 'hand_won', 1);
       recordSkillEvent(user, 'hand_won', 1);
       if ((hand?.doubleCount || 0) > 0) recordSkillEvent(user, 'double_win', 1);
       if (hand?.wasSplitHand) recordSkillEvent(user, 'split_win', 1);
@@ -6333,7 +6282,7 @@ function resolveRound(match) {
       stats.longestLossStreak = Math.max(stats.longestLossStreak || 0, stats.currentLossStreak || 0);
       stats.totalChipsLost = (stats.totalChipsLost || 0) + (out.amount || 0);
       stats.biggestHandLoss = Math.max(stats.biggestHandLoss || 0, out.amount || 0);
-      if (challengeEligibleForUser) recordChallengeEvent(user, 'hand_lost', 1);
+      recordChallengeEvent(user, 'hand_lost', 1);
       recordSkillEvent(user, 'hand_lost', 1);
     } else if (ownPush) {
       stats.pushes = (stats.pushes || 0) + 1;
@@ -6345,7 +6294,7 @@ function resolveRound(match) {
       });
       stats.currentWinStreak = nextStreak.winStreak;
       stats.currentLossStreak = nextStreak.lossStreak;
-      if (challengeEligibleForUser) recordChallengeEvent(user, 'push', 1);
+      recordChallengeEvent(user, 'push', 1);
       recordSkillEvent(user, 'push', 1);
     }
 
@@ -7620,12 +7569,12 @@ function applyAction(match, playerId, action) {
     });
     // Ensure both clients receive and render the updated wager before draw/bust settlement.
     pushMatchState(match);
-    if (matchCountsForChallenges(match) && !isBotPlayer(playerId)) {
+    if (isRealMatch(match) && !isBotPlayer(playerId)) {
       const user = getUserById(playerId);
       if (user) {
-        if (isRealMatch(match)) user.stats.doublesAttempted = (user.stats.doublesAttempted || 0) + 1;
+        user.stats.doublesAttempted = (user.stats.doublesAttempted || 0) + 1;
         recordChallengeEvent(user, 'double', 1);
-        if (isRealMatch(match)) recordSkillEvent(user, 'double', 1);
+        recordSkillEvent(user, 'double', 1);
       }
     }
     hand.cards.push(drawCard(match.round));
@@ -7677,16 +7626,14 @@ function applyAction(match, playerId, action) {
     state.hands.splice(idx, 1, newOne, newTwo);
     state.activeHandIndex = idx;
 
-    if (matchCountsForChallenges(match)) {
+    if (isRealMatch(match)) {
       const user = getUserById(playerId);
       if (user) {
-        if (isRealMatch(match)) user.stats.splitsAttempted = (user.stats.splitsAttempted || 0) + 1;
+        user.stats.splitsAttempted = (user.stats.splitsAttempted || 0) + 1;
         recordChallengeEvent(user, 'split', 1);
-        if (isRealMatch(match)) {
-          recordSkillEvent(user, 'split', 1);
-          db.write();
-          emitUserUpdate(playerId);
-        }
+        recordSkillEvent(user, 'split', 1);
+        db.write();
+        emitUserUpdate(playerId);
       }
     }
 
